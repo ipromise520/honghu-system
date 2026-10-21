@@ -4,8 +4,10 @@
 3. 入库后自动重算（本地版为实时计算，无需重算）
 """
 import json
+import math
 import re
 import uuid
+from collections import Counter
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -43,10 +45,12 @@ SYNC_MODULES = {
     "complaint_query": {"name": "投诉综合查询", "target": "complaint_orders",
                         "columns": ["家宽投诉综合工单列表：EOMS工单号/区域/工单状态/当前处理人/施工部门/人/受理时间/投诉时间/投诉分类"],
                         "note": "实时数据（比宽表早约2小时）；白名单解析「家宽投诉综合工单列表」sheet；month 从投诉时间推导；按月替换"},
-    "h5_survey": {"name": "H5满意度通报", "target": "h5_survey_districts + h5_survey_records + h5_low_scores",
-                  "columns": ["H5数据统计：区县/回单量/H5测评数/满意度/Q24-Q29/参与率",
-                              "装机H5回复详单、投诉H5回复详单、累计装机低分核实、累计投诉低分核实"],
-                  "note": "集团大音平台装维H5满意度通报（表头在第2行自动识别）；区县汇总/测评明细/低分核实全量替换，保留最新快照"},
+    "h5_survey": {"name": "H5满意度通报", "target": "h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores",
+                  "columns": ["新版导出：装机/投诉参与率（人员）+ 装机/投诉回单 + 装机/投诉H5回复详单",
+                              "旧版导出：H5数据统计（区县汇总）+ 装机/投诉H5回复详单 + 累计装机/投诉低分核实"],
+                  "note": "集团大音平台装维H5满意度通报；新版导出由本地聚合出区县汇总（当日/当月）与人员参与率明细"
+                          "（满意度=0.4×Q1+0.2×Q2+0.4×Q3），驱动「H5参与率通报」页面与首页「重要通报 → H5满意度」卡片；"
+                          "旧版「H5数据统计」仅当月；四表全量替换，保留最新快照"},
     "ai_visit": {"name": "AI装维即访", "target": "ai_visit_issues（不规范明细） + ai_visit_stats（规范率通报）",
                  "columns": ["装后即访-通报表 / 投诉即访-通报表：区县/外呼量/接通量/有问题工单量/规范率 + 各勾选项(调研量/不是/占比)",
                              "当月装机即访清单 / 当月投诉即访清单：责任人/不规范项/工单号/回单时间"],
@@ -219,8 +223,97 @@ def _hq(r: dict, prefix: str):
     return ""
 
 
-def _normalize_h5_survey(sheets: dict) -> dict:
-    """H5满意度通报 → {districts/records/lows 三类行（带 _kind），供 confirm 分表入库}"""
+def _hq_score(r: dict, n: int) -> str:
+    """第 n 题得分：优先取表头以 'Qn.' 开头且含「打几分」的列（过滤不满意原因/建议列），
+    旧版导出措辞不同时兜底按前缀取（_hq）"""
+    for c, v in r.items():
+        cs = str(c)
+        if cs.startswith(f"Q{n}.") and "打几分" in cs and _hs(v):
+            return _hs(v)
+    return _hq(r, f"Q{n}.")
+
+
+def _hflag(r: dict, prefix: str) -> bool:
+    """不满意/有问题标志：新版导出同一问题有「原因文本列」与「0/1 标志列」（重名双列，
+    标志列自动加 .1 后缀）；任一列值为 '1' 或原因为具体文本（非 '0'）即计一次"""
+    for c, v in r.items():
+        if not str(c).startswith(prefix):
+            continue
+        s = _hs(v)
+        if s == "1" or (s and s != "0"):
+            return True
+    return False
+
+
+def _hcol(r: dict, *names):
+    """按优先级取第一个存在的列（兼容表头改名，如「区县名称」vs「区县名称(TCountyName)」）"""
+    for n in names:
+        if n in r:
+            return r.get(n)
+    return None
+
+
+def _xround(v: float) -> int:
+    """Excel ROUND 口径（四舍五入远离零，如 ROUND(-4.5)=-5）；Python round 为 banker's rounding"""
+    return int(math.floor(v + 0.5)) if v >= 0 else int(math.ceil(v - 0.5))
+
+
+def _person_key(name) -> str:
+    """人员匹配键：剥「第三方」/任意区县前缀与括号备注（跨区县工单的人员名也归一）"""
+    n = _strip_district_prefix(name, "")
+    for p in ("第三方", "沙市区", "荆州区", "公安县", "监利市", "江陵县", "石首市", "洪湖市", "松滋市", "荆州开发区"):
+        if n.startswith(p) and len(n) > len(p):
+            n = n[len(p):]
+            break
+    return n.strip()
+
+
+def _normalize_h5_survey(sheets: dict, data_date: str = "") -> list[dict]:
+    """H5满意度通报双格式兼容（带 _kind，供 confirm 分表入库）：
+    - 新版导出（2026-10 起，含「装机/投诉参与率」人员 sheet）→ v2 本地聚合
+    - 旧版导出（含「H5数据统计」区县汇总 sheet）→ v1 原逻辑
+    """
+    if sheets.get("装机参与率") or sheets.get("投诉参与率"):
+        return _normalize_h5_survey_v2(sheets, data_date)
+    return _normalize_h5_survey_v1(sheets)
+
+
+def _h5_survey_records(sheets: dict) -> list[dict]:
+    """测评明细：装机/投诉 H5 回复详单（新旧格式共用；表头改名/得分列兜底已兼容）"""
+    out: list[dict] = []
+    for kind, sh in (("装机", "装机H5回复详单"), ("投诉", "投诉H5回复详单")):
+        for r in sheets.get(sh) or []:
+            d = _hs(_hcol(r, "区县名称", "区县名称(TCountyName)"))
+            if not d:
+                continue
+            qcols = [1, 2, 3] if kind == "装机" else [1, 2, 3]
+
+            def _reason(prefix):
+                """不满意原因（过滤 0/1 标志列噪音）"""
+                v = _hq(r, prefix)
+                return "" if v in ("0", "1") else v
+
+            remark = " | ".join(filter(None, [
+                _reason("Q1-1."), _reason("Q2-1."), _reason("Q3-1."),
+                _reason("Q1-2."), _reason("Q2-2."),
+                _hs(r.get("不满意原因（可多选）") or r.get("不满意原因(可多选)")),
+                _hs(r.get("建议及意见")), _hs(r.get("用户留言"))]))[:250]
+            out.append({"_kind": "record", "kind": kind, "district": d,
+                        "staff": _strip_district_prefix(_hcol(r, "装维人员姓名(ServStaffName)"), d),
+                        "staff_id": _hs(_hcol(r, "装维人员工号(ServStaffId)")),
+                        "order_no": _hs(_hcol(r, "装维工单编码(WBSerialNo)")),
+                        "phone": _hs(_hcol(r, "目标手机号码", "目标手机号码(TargetMSISDN)")),
+                        "send_time": _ht(_hcol(r, "下发时间", "下发时间(SendingTime)")),
+                        "reply_time": _ht(_hcol(r, "回复时间", "回复时间(AnswerTime)")),
+                        "is_low": _hs(_hcol(r, "是否低分用户", "是否低分用户(IsLowScore)")),
+                        "q1": _hq_score(r, qcols[0]), "q2": _hq_score(r, qcols[1]),
+                        "q3": _hq_score(r, qcols[2]) if kind == "装机" else "",
+                        "remark": remark})
+    return out
+
+
+def _normalize_h5_survey_v1(sheets: dict) -> list[dict]:
+    """旧版导出（含「H5数据统计」区县汇总 sheet）：区县汇总(当月) + 测评明细 + 低分核实"""
     JZ = {"沙市区", "荆州区", "公安县", "监利市", "江陵县", "石首市", "洪湖市", "松滋市", "荆州开发区", "荆州"}
     out: list[dict] = []
     # ---- 1) 区县汇总：装机段+投诉段同表两段；同区县有当日段+累计段两行，dict 覆盖取最后（累计） ----
@@ -231,46 +324,28 @@ def _normalize_h5_survey(sheets: dict) -> dict:
         if d not in JZ or ("合计" in d) or ("平均" in d):
             continue
         dist[d] = [
-            {"_kind": "district", "kind": "装机", "district": d,
+            {"_kind": "district", "kind": "装机", "period": "当月", "district": d,
              "back_cnt": _hi(r.get("回单量")), "survey_cnt": _hi(r.get("H5装机测评数")),
              "satisfaction": _hf(r.get("装机满意度")),
              "q_timely": _hf(r.get("Q24上门及时性40%")), "q_service": _hf(r.get("Q25人员服务20%")),
-             "q_effect": _hf(r.get("Q26安装效果40%")), "fttr_sat": _hf(r.get("FTTR满意度")),
+             "q_effect": _hf(r.get("Q26安装效果40%")), "fttr_sat": _hf(r.get("FTTR满意度")) or None,
              "join_rate": _hf(r.get("装机参与率")),
              "affect_cnt": _hi(r.get("装机影响客户感知工单数量")),
-             "affect_ratio": _hf(r.get("装机影响客户感知工单占比0.3%"))},
-            {"_kind": "district", "kind": "投诉", "district": d,
+             "affect_ratio": _hf(r.get("装机影响客户感知工单占比0.3%")),
+             "unsat_timely": 0, "unsat_service": 0, "unsat_effect": 0, "unsat_image": 0, "diff_cnt": 0},
+            {"_kind": "district", "kind": "投诉", "period": "当月", "district": d,
              "back_cnt": _hi(r.get("回单量.1")), "survey_cnt": _hi(r.get("H5投诉测评数")),
              "satisfaction": _hf(r.get("投诉满意度")),
              "q_timely": _hf(r.get("Q27上门及时性40%")), "q_service": _hf(r.get("Q28人员服务20%")),
-             "q_effect": _hf(r.get("Q29问题解决情况40%")), "fttr_sat": 0.0,
+             "q_effect": _hf(r.get("Q29问题解决情况40%")), "fttr_sat": None,
              "join_rate": _hf(r.get("投诉参与率")),
              "affect_cnt": _hi(r.get("投诉影响客户感知工单数量")),
-             "affect_ratio": _hf(r.get("投诉影响客户感知工单占比0.3%"))}]
+             "affect_ratio": _hf(r.get("投诉影响客户感知工单占比0.3%")),
+             "unsat_timely": 0, "unsat_service": 0, "unsat_effect": 0, "unsat_image": 0, "diff_cnt": 0}]
     for d, pair in dist.items():
         out.extend(pair)
     # ---- 2) 测评明细：装机/投诉 H5 回复详单 ----
-    for kind, sh in (("装机", "装机H5回复详单"), ("投诉", "投诉H5回复详单")):
-        for r in sheets.get(sh) or []:
-            d = _hs(r.get("区县名称"))
-            if not d:
-                continue
-            qcols = [f"Q{i}." for i in (1, 2, 3)] if kind == "装机" else [f"Q{i}." for i in (1, 2)]
-            remark = " | ".join(filter(None, [
-                _hq(r, "Q1-1."), _hq(r, "Q2-1."), _hq(r, "Q3-1."),
-                _hq(r, "Q1-2."), _hq(r, "Q2-2."),
-                _hs(r.get("不满意原因（可多选）") or r.get("不满意原因(可多选)")),
-                _hs(r.get("建议及意见")), _hs(r.get("用户留言"))]))[:250]
-            out.append({"_kind": "record", "kind": kind, "district": d,
-                        "staff": _strip_district_prefix(r.get("装维人员姓名(ServStaffName)"), d),
-                        "staff_id": _hs(r.get("装维人员工号(ServStaffId)")),
-                        "order_no": _hs(r.get("装维工单编码(WBSerialNo)")),
-                        "phone": _hs(r.get("目标手机号码")),
-                        "send_time": _ht(r.get("下发时间")), "reply_time": _ht(r.get("回复时间")),
-                        "is_low": _hs(r.get("是否低分用户(IsLowScore)")),
-                        "q1": _hq(r, qcols[0]), "q2": _hq(r, qcols[1]) if len(qcols) > 1 else "",
-                        "q3": _hq(r, qcols[2]) if len(qcols) > 2 else "",
-                        "remark": remark})
+    out.extend(_h5_survey_records(sheets))
     # ---- 3) 低分核实明细 ----
     for kind, sh in (("装机", "累计装机低分核实"), ("投诉", "累计投诉低分核实")):
         for r in sheets.get(sh) or []:
@@ -284,6 +359,192 @@ def _normalize_h5_survey(sheets: dict) -> dict:
                         "guide": ("是" if "是" in guide else "否" if "否" in guide else guide),
                         "note": _hs(r.get("回访备注")),
                         "assess": _hs(r.get("考核")) or _hs(r.get("考核（元）")) or _hs(r.get("考核(元)"))})
+    return out
+
+
+# 新版导出固定 sheet 名与关键列（2026-10 大音平台改版：取消「H5数据统计」区县汇总 sheet）
+_JZ_ORDER = ["沙市区", "荆州区", "公安县", "监利市", "江陵县", "石首市", "洪湖市", "松滋市", "荆州开发区"]
+_JZ_SET = set(_JZ_ORDER)
+
+
+def _normalize_h5_survey_v2(sheets: dict, data_date: str = "") -> list[dict]:
+    """新版平台导出的本地聚合（无「H5数据统计」sheet，需自行计算区县汇总与人员明细）：
+    ①「装机/投诉参与率」：人员粒度当月累计（回单量/H5测评量/参与率，权威口径）
+    ②「装机/投诉回单」：工单粒度（回单时间→当日拆分；回单人员→人员网格归属）
+    ③「装机/投诉H5回复详单」：测评明细（Q 得分→满意度 0.4×Q1+0.2×Q2+0.4×Q3；回复时间→当日拆分）
+    → 区县汇总（_kind=district：当日/当月 × 装机/投诉）+ 人员明细（_kind=staff）+ 测评记录（_kind=record）
+    """
+    out: list[dict] = []
+    day = (data_date or "")[:10]
+
+    def _d10(v):
+        s = _hs(v)
+        return s[:10] if len(s) >= 10 else ""
+
+    # data_date 缺省（文件名无日期）时，取详单回复时间/回单时间的最大日期为「当日」
+    if not day:
+        dates: list[str] = []
+        for sh, tcol in (("装机回单", "回单时间"), ("投诉回单", "回单时间"),
+                         ("装机H5回复详单", "回复时间(AnswerTime)"), ("投诉H5回复详单", "回复时间(AnswerTime)")):
+            for r in sheets.get(sh) or []:
+                d = _d10(_hcol(r, tcol, "回复时间"))
+                if d:
+                    dates.append(d)
+        day = max(dates) if dates else ""
+
+    # ---------- 1) 人员参与率（当月累计，权威口径：区县汇总/人员明细同源，保证图1与图2对账） ----------
+    persons: dict = {}   # (district, key) -> {"name": 展示名, "i_back": , "i_eval": , "c_back": , "c_eval": }
+    back_rate: dict = {}  # (district, kind) -> 当月回单量合计（参与率表口径，按人员归属区县）
+    eval_rate: dict = {}  # (district, kind) -> 当月测评量合计
+    for kind_sheet, kind in (("装机参与率", "i"), ("投诉参与率", "c")):
+        for r in sheets.get(kind_sheet) or []:
+            d = _hs(r.get("区县"))
+            raw = _hs(r.get("装维人员"))
+            if d not in _JZ_SET or not raw:
+                continue
+            k = (d, _person_key(raw))
+            p = persons.setdefault(k, {"name": raw, "i_back": 0, "i_eval": 0, "c_back": 0, "c_eval": 0})
+            if kind == "i":
+                p["name"] = raw
+                p["i_back"] = _hi(r.get("回单量"))
+                p["i_eval"] = _hi(r.get("H5测评量"))
+                back_rate[(d, "装机")] = back_rate.get((d, "装机"), 0) + _hi(r.get("回单量"))
+                eval_rate[(d, "装机")] = eval_rate.get((d, "装机"), 0) + _hi(r.get("H5测评量"))
+            else:
+                if not p["i_back"] and not p["i_eval"]:
+                    p["name"] = raw
+                p["c_back"] = _hi(r.get("回单量"))
+                p["c_eval"] = _hi(r.get("H5测评量"))
+                back_rate[(d, "投诉")] = back_rate.get((d, "投诉"), 0) + _hi(r.get("回单量"))
+                eval_rate[(d, "投诉")] = eval_rate.get((d, "投诉"), 0) + _hi(r.get("H5测评量"))
+
+    # ---------- 2) 回单：当日拆分 + 人员网格归属 ----------
+    back_cnt: dict = {}          # (district, kind, period) -> n
+    person_grid: dict = {}       # (district, key) -> Counter(网格)
+    for sheet, kind, dcol, pcol, gcol, tcol, ecol in (
+            # 装机：回单人员→网格；投诉：最终回单人员→最终回单网格，另加 当前处理人→最终回单网格
+            # （仅投诉人员不出现在最终回单人员，但出现在当前处理人，与旧快照网格口径一致）
+            ("装机回单", "装机", "区县", "回单人员", "网格", "回单时间", None),
+            ("投诉回单", "投诉", "最终回单角色", "最终回单人员", "最终回单网格", "回单时间", "当前处理人")):
+        for r in sheets.get(sheet) or []:
+            d = _hs(r.get(dcol))
+            if d not in _JZ_SET:
+                continue
+            back_cnt[(d, kind, "当月")] = back_cnt.get((d, kind, "当月"), 0) + 1
+            if day and _d10(r.get(tcol)) == day:
+                back_cnt[(d, kind, "当日")] = back_cnt.get((d, kind, "当日"), 0) + 1
+            g = _hs(r.get(gcol))
+            for pcol_i in filter(None, (pcol, ecol)):
+                raw = _hs(r.get(pcol_i))
+                if raw and g:
+                    person_grid.setdefault((d, _person_key(raw)), Counter())[g] += 1
+
+    # ---------- 3) H5 回复详单：Q 得分聚合（区县×周期 / 人员）+ 不满意人数 + 低分 ----------
+    # q 聚合结构：[s1,c1,s2,c2,s3,c3]（得分合计/计数，仅计非空）
+    def _qacc():
+        return [0.0, 0, 0.0, 0, 0.0, 0]
+
+    dist_q: dict = {}            # (district, kind, period) -> q 聚合
+    person_q: dict = {}          # (district, key, kind) -> q 聚合
+    unsat: dict = {}             # (district, period) -> [t, s, e, i]（仅装机）
+    low_cnt: dict = {}           # (district, kind, period) -> n
+    eval_cnt: dict = {}          # (district, kind, period) -> n
+    for sheet, kind in (("装机H5回复详单", "装机"), ("投诉H5回复详单", "投诉")):
+        for r in sheets.get(sheet) or []:
+            d = _hs(_hcol(r, "区县名称", "区县名称(TCountyName)"))
+            if d not in _JZ_SET:
+                continue
+            is_day = bool(day) and _d10(_hcol(r, "回复时间", "回复时间(AnswerTime)")) == day
+            raw = _hs(_hcol(r, "装维人员姓名(ServStaffName)"))
+            key = _person_key(raw)
+            qs = [_hq_score(r, 1), _hq_score(r, 2), _hq_score(r, 3)]
+            for period in (("当月", "当日") if is_day else ("当月",)):
+                eval_cnt[(d, kind, period)] = eval_cnt.get((d, kind, period), 0) + 1
+                acc = dist_q.setdefault((d, kind, period), _qacc())
+                for i, q in enumerate(qs):
+                    f = _hf(q) if q else 0.0
+                    if q and 0 < f <= 10:
+                        acc[i * 2] += f
+                        acc[i * 2 + 1] += 1
+            pacc = person_q.setdefault((d, key, kind), _qacc())
+            for i, q in enumerate(qs):
+                f = _hf(q) if q else 0.0
+                if q and 0 < f <= 10:
+                    pacc[i * 2] += f
+                    pacc[i * 2 + 1] += 1
+            if kind == "装机":
+                for period in (("当月", "当日") if is_day else ("当月",)):
+                    u = unsat.setdefault((d, period), [0, 0, 0, 0])
+                    if _hflag(r, "Q1-1."):
+                        u[0] += 1
+                    if _hflag(r, "Q2-1."):
+                        u[1] += 1
+                    if _hflag(r, "Q3-1."):
+                        u[2] += 1
+                    if _hflag(r, "Q4."):
+                        u[3] += 1
+            if _hs(_hcol(r, "是否低分用户", "是否低分用户(IsLowScore)")).lower() in ("1", "是", "true", "yes"):
+                for period in (("当月", "当日") if is_day else ("当月",)):
+                    low_cnt[(d, kind, period)] = low_cnt.get((d, kind, period), 0) + 1
+
+    # ---------- 4) 区县汇总行（当日/当月 × 装机/投诉） ----------
+    def _sat(acc):
+        """满意度 % = 0.4×Q1 + 0.2×Q2 + 0.4×Q3（得分均值×10 转百分数）"""
+        if not acc[1] and not acc[3] and not acc[5]:
+            return None
+        q1 = acc[0] / acc[1] * 10 if acc[1] else 0.0
+        q2 = acc[2] / acc[3] * 10 if acc[3] else 0.0
+        q3 = acc[4] / acc[5] * 10 if acc[5] else 0.0
+        return round(0.4 * q1 + 0.2 * q2 + 0.4 * q3, 4)
+
+    def _qmean(acc, i):
+        return round(acc[i * 2] / acc[i * 2 + 1] * 10, 4) if acc[i * 2 + 1] else 0.0
+
+    for d in _JZ_ORDER:
+        for kind in ("装机", "投诉"):
+            for period in ("当日", "当月"):
+                if period == "当月":
+                    # 当月：参与率表口径（与人员明细同源，保证图1合计=图2区县行）
+                    back = back_rate.get((d, kind), back_cnt.get((d, kind, "当月"), 0))
+                    ev = eval_rate.get((d, kind), eval_cnt.get((d, kind, "当月"), 0))
+                else:
+                    # 当日：回单/详单按时间拆分（参与率表无日粒度）
+                    back = back_cnt.get((d, kind, "当日"), 0)
+                    ev = eval_cnt.get((d, kind, "当日"), 0)
+                acc = dist_q.get((d, kind, period), _qacc())
+                u = unsat.get((d, period), [0, 0, 0, 0]) if kind == "装机" else [0, 0, 0, 0]
+                low = low_cnt.get((d, kind, period), 0)
+                out.append({"_kind": "district", "kind": kind, "period": period, "district": d,
+                            "back_cnt": back, "survey_cnt": ev,
+                            "satisfaction": _sat(acc),
+                            "q_timely": _qmean(acc, 0) if acc[1] else None,
+                            "q_service": _qmean(acc, 1) if acc[3] else None,
+                            "q_effect": _qmean(acc, 2) if acc[5] else None,
+                            "fttr_sat": None,
+                            "join_rate": round(ev / back * 100, 2) if back else 0.0,
+                            "affect_cnt": low,
+                            "affect_ratio": round(low / back * 100, 2) if back else 0.0,
+                            "unsat_timely": u[0], "unsat_service": u[1],
+                            "unsat_effect": u[2], "unsat_image": u[3],
+                            "diff_cnt": 0})
+
+    # ---------- 5) 人员明细行（当月） ----------
+    for (d, key), p in persons.items():
+        i_score = _sat(person_q.get((d, key, "装机")) or _qacc())
+        c_score = _sat(person_q.get((d, key, "投诉")) or _qacc())
+        grids = person_grid.get((d, key)) or Counter()
+        grid = grids.most_common(1)[0][0] if grids else ""
+        out.append({"_kind": "staff", "district": d, "grid": grid, "name": p["name"],
+                    "i_back": p["i_back"], "i_eval": p["i_eval"],
+                    "i_short": _xround(p["i_eval"] - 0.5 * p["i_back"]),
+                    "i_score": i_score,
+                    "c_back": p["c_back"], "c_eval": p["c_eval"],
+                    "c_short": _xround(p["c_eval"] - 0.5 * p["c_back"]),
+                    "c_score": c_score,
+                    "no_install": 1 if p["i_back"] == 0 else 0})
+
+    # ---------- 6) 测评明细记录 ----------
+    out.extend(_h5_survey_records(sheets))
     return out
 
 
@@ -651,22 +912,31 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         extra = {"orders": len(rows), "months": months}
         preview = rows[:100]
     elif metric == "h5_survey":
-        # H5满意度通报（集团大音平台）：5 个白名单 sheet，表头都在第 2 行（skip 1 行标题）
+        # H5满意度通报（集团大音平台）双格式：
+        # 新版导出（2026-10 起）：「装机/投诉参与率」「装机/投诉回单」「装机/投诉H5回复详单」
+        # 旧版导出：「H5数据统计」「装机/投诉H5回复详单」「累计装机/投诉低分核实」
+        # 表头大都在第 2 行（跳 1 行标题）；新版「装机/投诉回单」表头就在第 1 行（按 sheet 指定跳行）
         filename, sheets = await parse_upload_sheets(
-            request, ["H5数据统计", "装机H5回复详单", "投诉H5回复详单", "累计装机低分核实", "累计投诉低分核实"],
-            skip_rows=1)
-        rows = _normalize_h5_survey(sheets)
+            request,
+            ["H5数据统计", "装机H5回复详单", "投诉H5回复详单", "累计装机低分核实", "累计投诉低分核实",
+             "装机参与率", "投诉参与率", "装机回单", "投诉回单"],
+            skip_rows={"装机回单": 0, "投诉回单": 0})
+        mm = re.search(r"(\d{1,2})月(\d{1,2})日", filename or "")
+        data_date = f"{datetime.now().year}-{int(mm.group(1)):02d}-{int(mm.group(2)):02d}" if mm else ""
+        rows = _normalize_h5_survey(sheets, data_date)
         n_dist = sum(1 for r in rows if r["_kind"] == "district")
         n_rec = sum(1 for r in rows if r["_kind"] == "record")
+        n_staff = sum(1 for r in rows if r["_kind"] == "staff")
         n_low = sum(1 for r in rows if r["_kind"] == "low")
         if not n_dist and not n_rec:
             raise HTTPException(status_code=400,
-                                detail="未解析到 H5 数据，请确认上传的是装维H5满意度通报表（含「H5数据统计」等 sheet）")
-        mm = re.search(r"(\d{1,2})月(\d{1,2})日", filename)
-        extra = {"districts": n_dist, "records": n_rec, "lows": n_low,
-                 "join_rate": next((f"{r['join_rate']}%" for r in rows if r["_kind"] == "district" and r["kind"] == "装机"
-                                    and r["district"] == "洪湖市"), ""),
-                 "data_date": f"{datetime.now().year}-{int(mm.group(1)):02d}-{int(mm.group(2)):02d}" if mm else ""}
+                                detail="未解析到 H5 数据，请确认上传的是装维H5满意度通报表"
+                                       "（含「H5数据统计」或「装机/投诉参与率」等 sheet）")
+        jz_rate = next((r["join_rate"] for r in rows if r["_kind"] == "district" and r["kind"] == "装机"
+                        and r["period"] == "当月" and r["district"] == "洪湖市"), None)
+        extra = {"districts": n_dist, "records": n_rec, "staff": n_staff, "lows": n_low,
+                 "join_rate": f"{jz_rate}%" if jz_rate is not None else "",
+                 "data_date": data_date}
         preview = rows[:80]
     elif metric == "ai_visit":
         # AI装维即访：白名单「装后即访-通报表」「投诉即访-通报表」（多行表头 → 原始矩阵解析）
@@ -801,21 +1071,25 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
                + "，指标已实时生效")
     elif job.metric == "h5_survey":
-        # H5满意度通报：三表全量替换（快照），保留最新上传
-        from ..models import H5SurveyDistrict, H5SurveyRecord, H5LowScore
+        # H5满意度通报：四表全量替换（快照），保留最新上传
+        from ..models import H5SurveyDistrict, H5SurveyRecord, H5LowScore, H5SurveyStaff
         dist = [r for r in rows if r.get("_kind") == "district"]
         recs = [r for r in rows if r.get("_kind") == "record"]
         lows = [r for r in rows if r.get("_kind") == "low"]
+        staff = [r for r in rows if r.get("_kind") == "staff"]
         db.query(H5SurveyDistrict).delete(synchronize_session=False)
         db.query(H5SurveyRecord).delete(synchronize_session=False)
         db.query(H5LowScore).delete(synchronize_session=False)
+        db.query(H5SurveyStaff).delete(synchronize_session=False)
         if dist:
             db.bulk_insert_mappings(H5SurveyDistrict, [{k: v for k, v in r.items() if k != "_kind"} for r in dist])
         if recs:
             db.bulk_insert_mappings(H5SurveyRecord, [{k: v for k, v in r.items() if k != "_kind"} for r in recs])
         if lows:
             db.bulk_insert_mappings(H5LowScore, [{k: v for k, v in r.items() if k != "_kind"} for r in lows])
-        # 数据日期存 Setting（从文件名如"10月17日装维H5满意度"提取），供前端展示
+        if staff:
+            db.bulk_insert_mappings(H5SurveyStaff, [{k: v for k, v in r.items() if k != "_kind"} for r in staff])
+        # 数据日期存 Setting（从文件名如"10月19日装维H5满意度"提取），供前端展示
         mm = re.search(r"(\d{1,2})月(\d{1,2})日", job.filename or "")
         date_val = f"{datetime.now().year}-{int(mm.group(1)):02d}-{int(mm.group(2)):02d}" if mm else ""
         if date_val:
@@ -824,8 +1098,9 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                 sv.value = date_val
             else:
                 db.add(Setting(key="h5_survey_date", value=date_val))
-        n = len(dist) + len(recs) + len(lows)
-        msg = f"入库成功：H5满意度通报（区县汇总{len(dist)} · 测评明细{len(recs)} · 低分核实{len(lows)}），已全量替换为最新快照"
+        n = len(dist) + len(recs) + len(lows) + len(staff)
+        msg = (f"入库成功：H5满意度通报（区县汇总{len(dist)} · 人员明细{len(staff)} · "
+               f"测评明细{len(recs)} · 低分核实{len(lows)}），已全量替换为最新快照")
     elif job.metric == "ai_visit":
         # AI装维即访：不规范明细 + 规范率通报，均按月替换（同月重复上传直接覆盖）
         issues = [r for r in rows if r.get("_kind") != "stat"]
@@ -861,7 +1136,7 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
     db.add(AuditLog(username=user.username, action="数据入库", detail=f"{job.metric} {n} 行"))
     db.commit()
     if job.metric in ("extension", "completion_rate", "install_wide", "complaint_wide",
-                      "install_query", "complaint_query", "ai_visit"):
+                      "install_query", "complaint_query", "ai_visit", "h5_survey"):
         return {"msg": msg, "rows": n}
     return {"msg": f"入库成功 {n} 行（指标实时计算，无需重算）", "rows": n}
 

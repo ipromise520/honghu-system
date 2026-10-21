@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint, Index, Computed
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -508,21 +509,50 @@ class ReportDupOrder(Base):
 
 
 class H5SurveyDistrict(Base):
-    """H5满意度通报（集团大音平台）- 区县汇总（装机/投诉两段，快照全量替换）"""
+    """H5满意度通报（集团大音平台）- 区县汇总（装机/投诉两段，快照全量替换）
+    新版平台导出（人员参与率+原始详单/回单）由本地聚合出 当日/当月 两个周期；
+    旧版「H5数据统计」sheet 仅含当月累计（period='当月'）。"""
     __tablename__ = "h5_survey_districts"
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(String(8), default="")                # 装机 / 投诉
+    period: Mapped[str] = mapped_column(String(8), default="当月")          # 当日 / 当月
     district: Mapped[str] = mapped_column(String(32), default="")
     back_cnt: Mapped[int] = mapped_column(Integer, default=0)               # 回单量
     survey_cnt: Mapped[int] = mapped_column(Integer, default=0)             # H5测评数
-    satisfaction: Mapped[float] = mapped_column(Float, default=0.0)         # 满意度
-    q_timely: Mapped[float] = mapped_column(Float, default=0.0)             # Q24/Q27 上门及时性
-    q_service: Mapped[float] = mapped_column(Float, default=0.0)            # Q25/Q28 人员服务
-    q_effect: Mapped[float] = mapped_column(Float, default=0.0)             # Q26/Q29 问题解决/安装效果
-    fttr_sat: Mapped[float] = mapped_column(Float, default=0.0)             # FTTR满意度(仅装机)
-    join_rate: Mapped[float] = mapped_column(Float, default=0.0)            # 参与率(0-100)
-    affect_cnt: Mapped[int] = mapped_column(Integer, default=0)             # 影响客户感知工单数
-    affect_ratio: Mapped[float] = mapped_column(Float, default=0.0)         # 影响占比
+    satisfaction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 满意度 %（无测评→None）
+    q_timely: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # Q24/Q27 上门及时性 %
+    q_service: Mapped[Optional[float]] = mapped_column(Float, nullable=True)# Q25/Q28 人员服务 %
+    q_effect: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # Q26/Q29 问题解决/安装效果 %
+    fttr_sat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # FTTR满意度(仅装机；新版导出无此列→None)
+    join_rate: Mapped[float] = mapped_column(Float, default=0.0)            # 参与率 %(0-100)
+    affect_cnt: Mapped[int] = mapped_column(Integer, default=0)             # 影响客户感知工单数（低分用户数）
+    affect_ratio: Mapped[float] = mapped_column(Float, default=0.0)         # 影响占比 %
+    unsat_timely: Mapped[int] = mapped_column(Integer, default=0)           # 不满意人数-上门及时（Q1-1 非空，仅装机）
+    unsat_service: Mapped[int] = mapped_column(Integer, default=0)          # 不满意人数-人员服务（Q2-1 非空，仅装机）
+    unsat_effect: Mapped[int] = mapped_column(Integer, default=0)           # 不满意人数-安装效果（Q3-1 非空，仅装机）
+    unsat_image: Mapped[int] = mapped_column(Integer, default=0)            # 形象提升建议人数（Q4 非空，仅装机）
+    diff_cnt: Mapped[int] = mapped_column(Integer, default=0)               # 差额（平台口径，新版导出无此列→0）
+
+
+class H5SurveyStaff(Base):
+    """H5满意度通报 - 人员参与率明细（新版平台导出「装机/投诉参与率」sheet；
+    驱动「H5参与率通报」图1 人员明细；班组长(grid.leader)查询时关联 extension_members；
+    快照全量替换）"""
+    __tablename__ = "h5_survey_staff"
+    __table_args__ = (Index("ix_h5staff_district", "district"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    district: Mapped[str] = mapped_column(String(32), default="")           # 区县
+    grid: Mapped[str] = mapped_column(String(64), default="")               # 网格（回单 sheet 聚合）
+    name: Mapped[str] = mapped_column(String(64), default="")               # 装维人员（展示名，含区县/第三方前缀）
+    i_back: Mapped[int] = mapped_column(Integer, default=0)                 # 装机回单量（当月）
+    i_eval: Mapped[int] = mapped_column(Integer, default=0)                 # 装机H5已测评
+    i_short: Mapped[int] = mapped_column(Integer, default=0)                # 50%参与率欠产数 ROUND(测评量-50%×回单量)
+    i_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 装机满意度 %（无测评为 None）
+    c_back: Mapped[int] = mapped_column(Integer, default=0)                 # 投诉回单量（当月）
+    c_eval: Mapped[int] = mapped_column(Integer, default=0)                 # 投诉H5已测评
+    c_short: Mapped[int] = mapped_column(Integer, default=0)
+    c_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 投诉满意度 %
+    no_install: Mapped[int] = mapped_column(Integer, default=0)             # 1=当月无装机回单
 
 
 class H5SurveyRecord(Base):

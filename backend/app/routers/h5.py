@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 
 from ..config import OVERDUE_HOURS
 from ..database import get_db
-from ..models import Alert, District, H5Complaint, H5Receipt, H5Session, WorkOrder
+from ..models import (Alert, District, ExtensionMember, H5Complaint, H5Receipt, H5Session,
+                      H5SurveyDistrict, H5SurveyStaff, Setting, SyncJob, WorkOrder)
 from ..deps import get_current_user, require_admin, scope_district_ids
 from ..utils_excel import parse_upload_sheets
 
@@ -523,3 +524,128 @@ def _up_wide_install(db, filename, sheets):
     db.commit()
     return {"ok": True, "filename": filename, "rows": matched, "matched": updated,
             "columns": list(rows[0].keys()) if rows else []}
+
+
+# --------------------------------------------------------------------------
+# H5参与率通报（前端 /h5-rate 页面）：数据来自「数据同步 → H5满意度通报」最新确认快照
+# 图1 人员参与率明细（默认洪湖市，district 参数可切换）+ 图2 区县汇总（当日/当月）
+# --------------------------------------------------------------------------
+_H5_RATE_DISTRICTS = ["沙市区", "荆州区", "荆州开发区", "洪湖市", "监利市", "江陵县", "公安县", "松滋市", "石首市"]
+
+
+def _h5_rate_meta(db, district: str) -> dict:
+    dd = db.query(Setting).filter(Setting.key == "h5_survey_date").first()
+    job = (db.query(SyncJob).filter(SyncJob.metric == "h5_survey", SyncJob.status == "confirmed")
+           .order_by(SyncJob.confirmed_at.desc()).first())
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", (dd.value if dd else "") or "")
+    if m:
+        day_label = f"{int(m.group(2))}月{int(m.group(3))}日"
+        month_label = f"{int(m.group(2))}月截止{int(m.group(3))}日"
+    else:
+        day_label = month_label = ""
+    return {"source": job.filename if job else "", "day_label": day_label, "month_label": month_label,
+            "fig1_title": "(集团大音平台) 装维H5满意度", "fig1_subtitle": district,
+            "data_date": dd.value if dd else ""}
+
+
+@router.get("/rate")
+def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """H5参与率通报：图1 人员明细 + 图2 区县汇总（当日/当月）。
+    回单量/测评数取参与率与回单明细（当月按人员归属、当日按回单时间拆分）；
+    满意度 = 0.4×Q1 + 0.2×Q2 + 0.4×Q3（详单得分均值）；欠产数 = ROUND(测评量 − 50%×回单量)"""
+    dists = db.query(H5SurveyDistrict).all()
+    staff_rows = db.query(H5SurveyStaff).all()
+    meta = _h5_rate_meta(db, district)
+
+    # ---- 图1：人员明细（班组长 = extension_members 网格长，按网格名关联） ----
+    leaders: dict = {}
+    for m in db.query(ExtensionMember).filter(ExtensionMember.position.contains("网格长")).all():
+        if m.grid and m.name:
+            leaders[m.grid] = m.name
+    fig1_rows = []
+    for s in staff_rows:
+        if s.district != district:
+            continue
+        fig1_rows.append({
+            "grid": s.grid, "leader": leaders.get(s.grid, ""), "name": s.name,
+            "i_back": s.i_back, "i_eval": s.i_eval,
+            "i_rate": (s.i_eval / s.i_back) if s.i_back else 0.0,
+            "i_short": s.i_short, "i_score": s.i_score,
+            "c_back": s.c_back, "c_eval": s.c_eval,
+            "c_rate": (s.c_eval / s.c_back) if s.c_back else 0.0,
+            "c_short": s.c_short, "c_score": s.c_score,
+            "no_install": bool(s.no_install),
+        })
+    fig1_rows.sort(key=lambda r: (r["grid"], r["name"]))
+
+    def _wavg(score_key, eval_key, rows):
+        num = sum((r[score_key] or 0.0) * r[eval_key] for r in rows if r[score_key] is not None)
+        den = sum(r[eval_key] for r in rows if r[score_key] is not None)
+        return round(num / den, 4) if den else None
+
+    fig1 = {"rows": fig1_rows,
+            "totals": {"i_back": sum(r["i_back"] for r in fig1_rows),
+                       "i_eval": sum(r["i_eval"] for r in fig1_rows),
+                       "i_short": sum(r["i_short"] for r in fig1_rows),
+                       "i_score": _wavg("i_score", "i_eval", fig1_rows),
+                       "c_back": sum(r["c_back"] for r in fig1_rows),
+                       "c_eval": sum(r["c_eval"] for r in fig1_rows),
+                       "c_short": sum(r["c_short"] for r in fig1_rows),
+                       "c_score": _wavg("c_score", "c_eval", fig1_rows)}}
+
+    # ---- 图2：区县汇总（当日/当月 × 装机/投诉，9 区县 + 荆州合计行） ----
+    def _pick(d, kind, period):
+        return next((x for x in dists if x.district == d and x.kind == kind and x.period == period), None)
+
+    def _fig2_block(period):
+        rows = []
+        for d in _H5_RATE_DISTRICTS:
+            i, c = _pick(d, "装机", period), _pick(d, "投诉", period)
+            if not i and not c:
+                continue
+            rows.append({
+                "district": d,
+                "i_back": i.back_cnt if i else 0, "i_eval": i.survey_cnt if i else 0,
+                "i_sat": i.satisfaction if i else None,
+                "q24": i.q_timely if i else None, "q25": i.q_service if i else None,
+                "q26": i.q_effect if i else None, "fttr": i.fttr_sat if i else None,
+                "i_rate": (i.survey_cnt / i.back_cnt) if i and i.back_cnt else None,
+                "i_affect": i.affect_cnt if i else 0,
+                "i_affect_rate": (i.affect_ratio / 100) if i else None,
+                "i_diff": i.diff_cnt if i else 0,
+                "bm": i.unsat_timely if i else 0, "bn": i.unsat_service if i else 0,
+                "bo": i.unsat_effect if i else 0, "bp": i.unsat_image if i else 0,
+                "c_back": c.back_cnt if c else 0, "c_eval": c.survey_cnt if c else 0,
+                "c_sat": c.satisfaction if c else None,
+                "q27": c.q_timely if c else None, "q28": c.q_service if c else None,
+                "q29": c.q_effect if c else None,
+                "c_rate": (c.survey_cnt / c.back_cnt) if c and c.back_cnt else None,
+                "c_affect": c.affect_cnt if c else 0,
+                "c_affect_rate": (c.affect_ratio / 100) if c else None,
+                "c_diff": c.diff_cnt if c else 0,
+            })
+        if not rows:
+            return {"rows": [], "totals": {}}
+        t_ib, t_ie = sum(r["i_back"] for r in rows), sum(r["i_eval"] for r in rows)
+        t_cb, t_ce = sum(r["c_back"] for r in rows), sum(r["c_eval"] for r in rows)
+        q24, q25, q26 = (_wavg(k, "i_eval", rows) for k in ("q24", "q25", "q26"))
+        q27, q28, q29 = (_wavg(k, "c_eval", rows) for k in ("q27", "q28", "q29"))
+        totals = {"district": "荆州",
+                  "i_back": t_ib, "i_eval": t_ie,
+                  "i_sat": round(0.4 * (q24 or 0) + 0.2 * (q25 or 0) + 0.4 * (q26 or 0), 4) if q24 is not None else None,
+                  "q24": q24, "q25": q25, "q26": q26, "fttr": _wavg("fttr", "i_eval", rows),
+                  "i_rate": (t_ie / t_ib) if t_ib else None,
+                  "i_affect": sum(r["i_affect"] for r in rows), "i_affect_rate": None,
+                  "i_diff": sum(r["i_diff"] for r in rows),
+                  "bm": sum(r["bm"] for r in rows), "bn": sum(r["bn"] for r in rows),
+                  "bo": sum(r["bo"] for r in rows), "bp": sum(r["bp"] for r in rows),
+                  "c_back": t_cb, "c_eval": t_ce,
+                  "c_sat": round(0.4 * (q27 or 0) + 0.2 * (q28 or 0) + 0.4 * (q29 or 0), 4) if q27 is not None else None,
+                  "q27": q27, "q28": q28, "q29": q29,
+                  "c_rate": (t_ce / t_cb) if t_cb else None,
+                  "c_affect": sum(r["c_affect"] for r in rows), "c_affect_rate": None,
+                  "c_diff": sum(r["c_diff"] for r in rows)}
+        return {"rows": rows, "totals": totals}
+
+    return {"has_data": bool(dists or staff_rows), "meta": meta, "fig1": fig1,
+            "fig2": {"day": _fig2_block("当日"), "month": _fig2_block("当月")}}

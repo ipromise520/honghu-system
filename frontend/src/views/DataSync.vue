@@ -100,10 +100,10 @@ const modules = {
     note: '实时数据（比宽表早约2小时）；解析「家宽投诉综合工单列表」sheet，按月替换',
   },
   h5_survey: {
-    name: 'H5满意度通报', target: 'h5_survey_districts + h5_survey_records + h5_low_scores',
-    columns: ['H5数据统计：区县/回单量/H5测评数/满意度/Q24-Q29/参与率',
-              '装机H5回复详单、投诉H5回复详单、累计装机/投诉低分核实'],
-    note: '集团大音平台装维H5满意度通报；区县汇总/测评明细/低分核实全量替换，保留最新快照；展示在首页「重要通报 → H5满意度」',
+    name: 'H5满意度通报', target: 'h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores',
+    columns: ['新版导出：装机/投诉参与率、装机/投诉回单、装机/投诉H5回复详单（旧版「H5数据统计」格式同样兼容）'],
+    note: '集团大音平台装维H5满意度通报；新版导出由后端本地聚合出区县汇总（当日/当月）、人员参与明细、测评明细与低分核实，' +
+          '全量替换保留最新快照；展示在「H5参与率通报」页面与首页「重要通报 → H5满意度」',
   },
   ai_visit: {
     name: 'AI装维即访', target: 'ai_visit_issues',

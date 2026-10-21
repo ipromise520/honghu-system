@@ -605,7 +605,10 @@ def h5_survey(user=Depends(get_current_user), db: Session = Depends(get_db)):
     """H5满意度通报（集团大音平台）：区县汇总 + 人员测评汇总 + 低分核实 + 快照信息"""
     from ..models import H5SurveyDistrict, H5SurveyRecord, H5LowScore
     from ..models import Setting
-    dists = db.query(H5SurveyDistrict).order_by(H5SurveyDistrict.id).all()
+    # 新版导出含「当日/当月」双周期行，Dashboard 汇总只用当月口径
+    dists = (db.query(H5SurveyDistrict)
+             .filter(H5SurveyDistrict.period == "当月")
+             .order_by(H5SurveyDistrict.id).all())
     recs = db.query(H5SurveyRecord).all()
     lows = db.query(H5LowScore).order_by(H5LowScore.id.desc()).all()
     # 人员测评汇总：姓名 → {装机测评/投诉测评/低分}；"开发区李平"等短前缀归一，与 h5staff 口径一致

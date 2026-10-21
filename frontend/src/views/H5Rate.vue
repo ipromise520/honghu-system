@@ -1,5 +1,5 @@
 <template>
-  <div class="rate-page">
+  <div class="rate-page" v-loading="loading">
     <!-- 顶部工具栏 -->
     <el-card shadow="never" class="toolbar-card">
       <div class="toolbar">
@@ -15,6 +15,9 @@
       </div>
     </el-card>
 
+    <el-empty v-if="!loading && !hasData" description="暂无数据：请先在「数据同步 → H5满意度通报」上传平台导出文件并确认" />
+
+    <template v-if="hasData">
     <!-- 图1：洪湖市 人员明细 -->
     <el-card shadow="never" class="report-card">
       <div class="card-head">
@@ -105,22 +108,39 @@
         </div>
       </div>
       <div class="note">
+        数据来源：「数据同步 → H5满意度通报」最新确认快照（新版平台导出，后端本地聚合）。
         口径说明：回单量＝回单明细中归属该区县/人员的工单数；测评量＝H5回复详单数；参与率＝测评量÷回单量；
-        欠产数＝ROUND(测评量−50%×回单量)；满意度＝0.4×Q24＋0.2×Q25＋0.4×Q26（投诉为 Q27/Q28/Q29）。
+        欠产数＝ROUND(测评量−50%×回单量)；满意度＝0.4×Q24＋0.2×Q25＋0.4×Q26（投诉为 Q27/Q28/Q29）；
+        FTTR 满意度新版导出无明细数据，显示「—」。
       </div>
     </el-card>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import html2canvas from 'html2canvas'
-import rate from '../data/h5_rate.json'
+import api from '../api'
 
-const meta = rate.meta
-const fig1 = rate.fig1
-const fig2 = rate.fig2
+// 数据来自「数据同步 → H5满意度通报」最新确认快照（后端本地聚合），不再使用静态 JSON
+const payload = ref(null)
+const loading = ref(false)
+const meta = computed(() => payload.value?.meta || {})
+const fig1 = computed(() => payload.value?.fig1 || { rows: [], totals: {} })
+const fig2 = computed(() => payload.value?.fig2 || { day: { rows: [], totals: {} }, month: { rows: [], totals: {} } })
+const hasData = computed(() => !!payload.value?.has_data)
+
+async function loadRate() {
+  loading.value = true
+  try {
+    payload.value = await api.get('/h5/rate')
+  } catch (e) { /* 错误提示由 api 拦截器统一处理 */ }
+  finally { loading.value = false }
+}
+onMounted(loadRate)
+
 const fig1Ref = ref(null)
 const fig2Ref = ref(null)
 const busy1 = ref(false)
@@ -171,10 +191,17 @@ const G2 = [
   { key: 'c_affect_rate', label: '投诉影响客户感知工单数占比0.3%', fmt: 'pct2', cls: 'c-af' },
   { key: 'c_diff', label: '差额', fmt: 'int', cls: 'c-diff' },
 ]
-const FIG2_BLOCKS = [
-  { key: 'day', title1: '10月装机H5满意度（18日）', title2: '10月故障H5满意度（18日）' },
-  { key: 'month', title1: '10月截止18日装机H5满意度（当月）', title2: '10月截止18日故障H5满意度（当月）' },
-]
+// 图2 两张表标题随数据日期动态生成（如「10月装机H5满意度（18日）」/「10月截止18日装机H5满意度（当月）」）
+const FIG2_BLOCKS = computed(() => {
+  const day = meta.value.day_label || ''
+  const mm = day.replace(/^(\d+月).*$/, '$1')
+  const dd = day.replace(/^\d+月/, '')
+  const month = meta.value.month_label || ''
+  return [
+    { key: 'day', title1: `${mm}装机H5满意度（${dd}）`, title2: `${mm}故障H5满意度（${dd}）` },
+    { key: 'month', title1: `${month}装机H5满意度（当月）`, title2: `${month}故障H5满意度（当月）` },
+  ]
+})
 
 function pct1(v) {
   if (v === null || v === undefined || isNaN(v)) return '—'

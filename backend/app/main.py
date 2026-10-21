@@ -82,6 +82,13 @@ _ADD_COLUMNS = {
                     ("service_number", "VARCHAR(64)")],
     "h5_complaint": [("community_name", "VARCHAR(255)"), ("contact_person", "VARCHAR(64)"),
                      ("fault_number", "VARCHAR(64)"), ("grid", "VARCHAR(128)")],
+    # H5满意度通报 区县汇总：新版平台导出本地聚合出 当日/当月 两周期 + 不满意人数 + 差额
+    "h5_survey_districts": [("period", "VARCHAR(8) DEFAULT '当月'"),
+                            ("unsat_timely", "INTEGER DEFAULT 0"),
+                            ("unsat_service", "INTEGER DEFAULT 0"),
+                            ("unsat_effect", "INTEGER DEFAULT 0"),
+                            ("unsat_image", "INTEGER DEFAULT 0"),
+                            ("diff_cnt", "INTEGER DEFAULT 0")],
 }
 
 # month 生成列（VIRTUAL）：把 substr(accept_time,1,7) 变为可索引列，月度聚合/筛选走索引
@@ -157,10 +164,38 @@ def _migrate_columns():
                 print(f"[honghu] 警告：索引 {name} 创建失败（{e}）")
 
 
+def _rebuild_h5_districts():
+    """h5_survey_districts 重建：旧版 satisfaction/q_timely/q_service/q_effect/fttr_sat 为 NOT NULL，
+    新版解析器对「无测评」区县写 None，而 bulk_insert_mappings 会省略无默认值的列 → NOT NULL 冲突。
+    SQLite 不支持 ALTER COLUMN，按新模型重建表并拷贝数据。幂等：目标列均已可空即跳过。"""
+    targets = ("satisfaction", "q_timely", "q_service", "q_effect", "fttr_sat")
+    with engine.begin() as conn:
+        info = list(conn.execute(text("PRAGMA table_info(h5_survey_districts)")))
+        if not info:
+            return  # 表不存在（全新库已由 create_all 按新模型建好）
+        notnull = {r[1] for r in info if r[3]}
+        if not (set(targets) & notnull):
+            return  # 已是可空 schema
+        conn.execute(text("DROP TABLE IF EXISTS h5_survey_districts_old"))
+        conn.execute(text("ALTER TABLE h5_survey_districts RENAME TO h5_survey_districts_old"))
+    Base.metadata.create_all(engine)  # 独立连接按新模型重建（5 列可空）
+    with engine.begin() as conn:
+        old_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(h5_survey_districts_old)"))}
+        new_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(h5_survey_districts)"))}
+        common = [c for c in new_cols if c in old_cols and c != "id"]
+        if common:
+            cols = ", ".join(common)
+            conn.execute(text(f"INSERT INTO h5_survey_districts ({cols}) "
+                              f"SELECT {cols} FROM h5_survey_districts_old"))
+        conn.execute(text("DROP TABLE h5_survey_districts_old"))
+    print("[honghu] 已重建 h5_survey_districts（满意度等 5 列放宽为可空，数据已拷贝）")
+
+
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(engine)
     _migrate_columns()
+    _rebuild_h5_districts()
     created = seed()
     if created:
         print("[honghu] 演示数据初始化完成")

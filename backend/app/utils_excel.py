@@ -8,7 +8,10 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
 
     sheet_names 为白名单（手册 10.2：只读取需要的 sheet，如「当月明细」），
     None 表示读取全部 sheet。skip_rows 为每个 sheet 表头前的标题行数
-    （如 H5 通报表首行为标题、次行才是列名则传 1）。返回 (文件名, {sheet名: 行列表[dict]})；csv 返回 {"": 行列表}。
+    （如 H5 通报表首行为标题、次行才是列名则传 1）；也可传 dict {sheet名: 跳行数}
+    按 sheet 分别指定（未列出的 sheet 用默认跳行数，dict 模式下默认为 1），
+    用于同一文件内表头行不一致的场景（如 H5 新格式：「装机回单」表头在第 1 行、其余在第 2 行）。
+    返回 (文件名, {sheet名: 行列表[dict]})；csv 返回 {"": 行列表}。
     """
     import openpyxl
 
@@ -24,6 +27,10 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
         filename = "raw.csv"
         data = await request.body()
 
+    # skip_rows 归一化：dict 模式（按 sheet 指定，默认 1）或 int 模式（全体同一跳行数）
+    skip_map = skip_rows if isinstance(skip_rows, dict) else {}
+    default_skip = skip_rows if isinstance(skip_rows, int) else 1
+
     # .xls 后缀但实际为 xlsx 格式（导出系统常见），统一用 openpyxl 尝试
     if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
         # read_only=True：流式读取，避免报表 sheet 声明整表尺寸（如 1048576 行）时
@@ -34,8 +41,9 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
         for ws in wb.worksheets:
             if wanted is not None and ws.title.strip() not in wanted:
                 continue
+            n_skip = max(0, int(skip_map.get(ws.title.strip(), default_skip)))
             it = ws.iter_rows(values_only=True)
-            for _ in range(max(0, int(skip_rows))):        # 跳过表头前的标题行
+            for _ in range(n_skip):                  # 跳过表头前的标题行
                 next(it, None)
             header = next(it, None)
             if not header:
