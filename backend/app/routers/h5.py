@@ -14,6 +14,7 @@
   ④ wide_install   宽表查询-装机 → 回填 work_orders 的小区名称/所属网格/服务号码
 """
 import json
+import math
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -532,6 +533,43 @@ def _up_wide_install(db, filename, sheets):
 # --------------------------------------------------------------------------
 _H5_RATE_DISTRICTS = ["沙市区", "荆州区", "荆州开发区", "洪湖市", "监利市", "江陵县", "公安县", "松滋市", "石首市"]
 
+# ---------------- 参与率奖励规则（以下数值为可修改变量，按考核办法调整） ----------------
+REWARD_RATE_MIN = 0.5        # 参与率门槛：达到按件计奖，未达到按欠产扣罚
+REWARD_INSTALL_UNIT = 20     # 装机参与奖励单价（元/件）
+REWARD_COMPLAINT_UNIT = 30   # 故障（投诉）参与奖励单价（元/件）
+
+# 洪湖市 网格→班组长 补齐映射：延伸花名册（extension_members）只覆盖 7 个主网格，
+# 子网格（燕窝/万全/小港等）与主网格同班长，此处按 10月18日 通报快照补齐；
+# 花名册中有记录的网格以花名册为准（setdefault 语义），组织调整时改这里即可。
+_H5_GRID_LEADERS = {
+    "大同网格": "孙澳", "洪湖大同网格": "孙澳", "洪湖新滩网格": "孙澳",
+    "大沙网格": "蔡明", "洪湖大沙网格": "蔡明", "洪湖燕窝网格": "蔡明",
+    "峰口网格": "柴达", "洪湖峰口网格": "柴达", "洪湖沙口网格": "柴达",
+    "新堤网格": "张茂礼", "洪湖新堤网格": "张茂礼", "洪湖城区网格": "张茂礼",
+    "洪湖龙口网格": "张茂礼", "洪湖瞿家湾网格": "张茂礼",
+    "柏枝网格": "张进", "洪湖柏枝网格": "张进", "洪湖乌林网格": "张进",
+    "洪湖文泉网格": "张进", "洪湖荷花网格": "张进", "洪湖螺山网格": "张进",
+    "滨湖网格": "叶超", "洪湖滨湖网格": "叶超", "洪湖万全网格": "叶超",
+    "洪湖小港网格": "叶超", "洪湖汊河网格": "叶超", "洪湖黄家口网格": "叶超",
+    "洪湖府场网格": "何支军", "洪湖戴家场网格": "何支军", "洪湖曹市网格": "何支军",
+}
+
+
+def _xround(v: float) -> int:
+    """Excel ROUND 口径：四舍五入远离零（ROUND(-4.5)=-5）；Python round 为银行家舍入不可用"""
+    return int(math.floor(v + 0.5)) if v >= 0 else int(math.ceil(v - 0.5))
+
+
+def _reward(rate, eval_cnt: int, back_cnt: int, short_cnt, unit: int) -> int:
+    """预计奖励（元）：参与率达到门槛 → 已测评件数×单价；未达到 → 50%参与率欠产数×单价（欠产为负即扣罚）。
+    无回单不计奖；short_cnt 为已按 Excel 口径算好的欠产数（fig1 传库存值，fig2 传 None 现算）。"""
+    if not back_cnt:
+        return 0
+    if rate is not None and rate >= REWARD_RATE_MIN:
+        return int(eval_cnt * unit)
+    short = short_cnt if short_cnt is not None else _xround(eval_cnt - 0.5 * back_cnt)
+    return int(short * unit)
+
 
 def _h5_rate_meta(db, district: str) -> dict:
     dd = db.query(Setting).filter(Setting.key == "h5_survey_date").first()
@@ -545,7 +583,12 @@ def _h5_rate_meta(db, district: str) -> dict:
         day_label = month_label = ""
     return {"source": job.filename if job else "", "day_label": day_label, "month_label": month_label,
             "fig1_title": "(集团大音平台) 装维H5满意度", "fig1_subtitle": district,
-            "data_date": dd.value if dd else ""}
+            "data_date": dd.value if dd else "",
+            # 奖励规则（可修改变量，同步给前端标题旁说明与底部口径注）
+            "reward": {"rate_min": REWARD_RATE_MIN, "install_unit": REWARD_INSTALL_UNIT,
+                       "complaint_unit": REWARD_COMPLAINT_UNIT},
+            "reward_note": (f"参与率（{int(REWARD_RATE_MIN * 100)}%）奖励装机参与（{REWARD_INSTALL_UNIT}）/件；"
+                            f"故障参与（{REWARD_COMPLAINT_UNIT}）元/件。")}
 
 
 @router.get("/rate")
@@ -557,23 +600,47 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
     staff_rows = db.query(H5SurveyStaff).all()
     meta = _h5_rate_meta(db, district)
 
-    # ---- 图1：人员明细（班组长 = extension_members 网格长，按网格名关联） ----
+    # ---- 图1：人员明细（班组长 = extension_members 网格长 + 子网格补齐映射，按网格名关联） ----
     leaders: dict = {}
     for m in db.query(ExtensionMember).filter(ExtensionMember.position.contains("网格长")).all():
         if m.grid and m.name:
             leaders[m.grid] = m.name
+    for g, n in _H5_GRID_LEADERS.items():
+        leaders.setdefault(g, n)
+    # staff 表 grid 为非网格名（如「集客洪湖市投诉代维班组」「洪湖市分公司」）时，
+    # 用花名册中同名人员的 grid 反查班组长；匹配不到则留空（如管理层「装维管理员」）
+    member_grid: dict = {}
+    for m in db.query(ExtensionMember).all():
+        if m.name and m.grid:
+            bare = re.sub(r"^.*?市", "", m.name)
+            member_grid.setdefault(m.name, m.grid)
+            member_grid.setdefault(bare, m.grid)
+
+    def _leader_of(grid, name):
+        if grid in leaders:
+            return leaders[grid]
+        for k in (name, re.sub(r"^.*?市", "", name or "")):
+            mg = member_grid.get(k)
+            if mg and mg in leaders:
+                return leaders[mg]
+        return ""
+
     fig1_rows = []
     for s in staff_rows:
         if s.district != district:
             continue
+        i_rate_v = (s.i_eval / s.i_back) if s.i_back else None
+        c_rate_v = (s.c_eval / s.c_back) if s.c_back else None
         fig1_rows.append({
-            "grid": s.grid, "leader": leaders.get(s.grid, ""), "name": s.name,
+            "grid": s.grid, "leader": _leader_of(s.grid, s.name), "name": s.name,
             "i_back": s.i_back, "i_eval": s.i_eval,
-            "i_rate": (s.i_eval / s.i_back) if s.i_back else 0.0,
+            "i_rate": i_rate_v if i_rate_v is not None else 0.0,
             "i_short": s.i_short, "i_score": s.i_score,
+            "i_reward": _reward(i_rate_v, s.i_eval, s.i_back, s.i_short, REWARD_INSTALL_UNIT),
             "c_back": s.c_back, "c_eval": s.c_eval,
-            "c_rate": (s.c_eval / s.c_back) if s.c_back else 0.0,
+            "c_rate": c_rate_v if c_rate_v is not None else 0.0,
             "c_short": s.c_short, "c_score": s.c_score,
+            "c_reward": _reward(c_rate_v, s.c_eval, s.c_back, s.c_short, REWARD_COMPLAINT_UNIT),
             "no_install": bool(s.no_install),
         })
     fig1_rows.sort(key=lambda r: (r["grid"], r["name"]))
@@ -583,15 +650,21 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
         den = sum(r[eval_key] for r in rows if r[score_key] is not None)
         return round(num / den, 4) if den else None
 
+    t_ib = sum(r["i_back"] for r in fig1_rows)
+    t_ie = sum(r["i_eval"] for r in fig1_rows)
+    t_cb = sum(r["c_back"] for r in fig1_rows)
+    t_ce = sum(r["c_eval"] for r in fig1_rows)
     fig1 = {"rows": fig1_rows,
-            "totals": {"i_back": sum(r["i_back"] for r in fig1_rows),
-                       "i_eval": sum(r["i_eval"] for r in fig1_rows),
+            "totals": {"i_back": t_ib, "i_eval": t_ie,
                        "i_short": sum(r["i_short"] for r in fig1_rows),
                        "i_score": _wavg("i_score", "i_eval", fig1_rows),
-                       "c_back": sum(r["c_back"] for r in fig1_rows),
-                       "c_eval": sum(r["c_eval"] for r in fig1_rows),
+                       "i_reward": _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib,
+                                           sum(r["i_short"] for r in fig1_rows), REWARD_INSTALL_UNIT),
+                       "c_back": t_cb, "c_eval": t_ce,
                        "c_short": sum(r["c_short"] for r in fig1_rows),
-                       "c_score": _wavg("c_score", "c_eval", fig1_rows)}}
+                       "c_score": _wavg("c_score", "c_eval", fig1_rows),
+                       "c_reward": _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb,
+                                           sum(r["c_short"] for r in fig1_rows), REWARD_COMPLAINT_UNIT)}}
 
     # ---- 图2：区县汇总（当日/当月 × 装机/投诉，9 区县 + 荆州合计行） ----
     def _pick(d, kind, period):
@@ -610,6 +683,9 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                 "q24": i.q_timely if i else None, "q25": i.q_service if i else None,
                 "q26": i.q_effect if i else None, "fttr": i.fttr_sat if i else None,
                 "i_rate": (i.survey_cnt / i.back_cnt) if i and i.back_cnt else None,
+                "i_reward": _reward((i.survey_cnt / i.back_cnt) if i and i.back_cnt else None,
+                                    i.survey_cnt if i else 0, i.back_cnt if i else 0,
+                                    None, REWARD_INSTALL_UNIT),
                 "i_affect": i.affect_cnt if i else 0,
                 "i_affect_rate": (i.affect_ratio / 100) if i else None,
                 "i_diff": i.diff_cnt if i else 0,
@@ -620,6 +696,9 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                 "q27": c.q_timely if c else None, "q28": c.q_service if c else None,
                 "q29": c.q_effect if c else None,
                 "c_rate": (c.survey_cnt / c.back_cnt) if c and c.back_cnt else None,
+                "c_reward": _reward((c.survey_cnt / c.back_cnt) if c and c.back_cnt else None,
+                                    c.survey_cnt if c else 0, c.back_cnt if c else 0,
+                                    None, REWARD_COMPLAINT_UNIT),
                 "c_affect": c.affect_cnt if c else 0,
                 "c_affect_rate": (c.affect_ratio / 100) if c else None,
                 "c_diff": c.diff_cnt if c else 0,
@@ -635,6 +714,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                   "i_sat": round(0.4 * (q24 or 0) + 0.2 * (q25 or 0) + 0.4 * (q26 or 0), 4) if q24 is not None else None,
                   "q24": q24, "q25": q25, "q26": q26, "fttr": _wavg("fttr", "i_eval", rows),
                   "i_rate": (t_ie / t_ib) if t_ib else None,
+                  "i_reward": _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib, None, REWARD_INSTALL_UNIT),
                   "i_affect": sum(r["i_affect"] for r in rows), "i_affect_rate": None,
                   "i_diff": sum(r["i_diff"] for r in rows),
                   "bm": sum(r["bm"] for r in rows), "bn": sum(r["bn"] for r in rows),
@@ -643,6 +723,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                   "c_sat": round(0.4 * (q27 or 0) + 0.2 * (q28 or 0) + 0.4 * (q29 or 0), 4) if q27 is not None else None,
                   "q27": q27, "q28": q28, "q29": q29,
                   "c_rate": (t_ce / t_cb) if t_cb else None,
+                  "c_reward": _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb, None, REWARD_COMPLAINT_UNIT),
                   "c_affect": sum(r["c_affect"] for r in rows), "c_affect_rate": None,
                   "c_diff": sum(r["c_diff"] for r in rows)}
         return {"rows": rows, "totals": totals}

@@ -21,14 +21,14 @@
     <!-- 图1：洪湖市 人员明细 -->
     <el-card shadow="never" class="report-card">
       <div class="card-head">
-        <div class="card-title"><b>图1</b> · 洪湖市 装维人员 H5满意度参与率 明细</div>
+        <div class="card-title"><b>图1</b> · 洪湖市 装维人员 H5满意度参与率 明细<span v-if="meta.reward_note" class="reward-note">{{ meta.reward_note }}</span></div>
         <el-button size="small" type="primary" plain :loading="busy1" @click="exportFig1">导出图片</el-button>
       </div>
       <div class="scroll-x">
         <div ref="fig1Ref" class="shot">
           <table class="rt">
             <caption class="rt-title">
-              <span class="cap-left">{{ meta.fig1_title }}</span>
+              <span class="cap-left">{{ meta.fig1_title }}<span v-if="meta.reward_note" class="reward-note">{{ meta.reward_note }}</span></span>
               <span class="cap-right">{{ meta.day_label }}</span>
             </caption>
             <thead>
@@ -53,11 +53,13 @@
                 <td class="c-i">{{ pct1(fig1.totals.i_eval / fig1.totals.i_back) }}</td>
                 <td class="c-short s-neg">{{ fig1.totals.i_short }}</td>
                 <td class="c-sat">{{ fmtScore(fig1.totals.i_score) }}</td>
+                <td class="c-rw" :class="numCls(fig1.totals.i_reward)">{{ fig1.totals.i_reward }}</td>
                 <td class="c-c">{{ fig1.totals.c_back }}</td>
                 <td class="c-c">{{ fig1.totals.c_eval }}</td>
                 <td class="c-c">{{ pct1(fig1.totals.c_eval / fig1.totals.c_back) }}</td>
                 <td class="c-short s-neg">{{ fig1.totals.c_short }}</td>
                 <td class="c-sat">{{ fmtScore(fig1.totals.c_score) }}</td>
+                <td class="c-rw" :class="numCls(fig1.totals.c_reward)">{{ fig1.totals.c_reward }}</td>
                 <td class="c-name2"></td>
               </tr>
             </tfoot>
@@ -111,7 +113,11 @@
         数据来源：「数据同步 → H5满意度通报」最新确认快照（新版平台导出，后端本地聚合）。
         口径说明：回单量＝回单明细中归属该区县/人员的工单数；测评量＝H5回复详单数；参与率＝测评量÷回单量；
         欠产数＝ROUND(测评量−50%×回单量)；满意度＝0.4×Q24＋0.2×Q25＋0.4×Q26（投诉为 Q27/Q28/Q29）；
-        FTTR 满意度新版导出无明细数据，显示「—」。
+        FTTR 满意度新版导出无明细数据，显示「—」。<br>
+        预计奖励规则（参数以后端 <code>h5.py</code> 顶部常量为准，可调整）：参与率 ≥ {{ (meta.reward?.rate_min ?? 0.5) * 100 }}%（达标）时，
+        「装机预计奖励」＝装机H5已测评 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝故障H5已测评 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件；
+        参与率未达标时，「装机预计奖励」＝装机50%参与率欠产数 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝投诉50%参与率欠产数 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件
+        （欠产数为负即扣罚）；无回单不计奖。网格班组长由花名册（extension_members）及洪湖网格长 mappings 补齐。
       </div>
     </el-card>
     </template>
@@ -154,11 +160,13 @@ const FIG1_COLS = [
   { key: 'i_rate', label: '参与率', fmt: 'pctInt', cls: 'c-i' },
   { key: 'i_short', label: '50%参与率<br>欠产数', fmt: 'int', cls: 'c-short' },
   { key: 'i_score', label: 'H5装机满意度', fmt: 'score', cls: 'c-sat' },
+  { key: 'i_reward', label: '装机预计奖励', fmt: 'reward', cls: 'c-rw' },
   { key: 'c_back', label: '投诉回单量<br>（当月）', fmt: 'int', cls: 'c-c' },
   { key: 'c_eval', label: '故障H5<br>已测评', fmt: 'int', cls: 'c-c' },
   { key: 'c_rate', label: '参与率', fmt: 'pctInt', cls: 'c-c' },
   { key: 'c_short', label: '50%参与率<br>欠产数', fmt: 'int', cls: 'c-short' },
   { key: 'c_score', label: 'H5故障满意度', fmt: 'score', cls: 'c-sat' },
+  { key: 'c_reward', label: '故障预计奖励', fmt: 'reward', cls: 'c-rw' },
   { key: 'name2', src: 'name', label: '装维人员姓名', cls: 'c-name2' },
 ]
 
@@ -171,6 +179,7 @@ const G1 = [
   { key: 'q26', label: 'Q26安装效果40%', fmt: 'score2', cls: 'c-q' },
   { key: 'fttr', label: 'FTTR满意度', fmt: 'score2', cls: 'c-q' },
   { key: 'i_rate', label: '装机参与率', fmt: 'pct2', cls: 'c-i' },
+  { key: 'i_reward', label: '装机预计奖励', fmt: 'reward', cls: 'c-rw' },
   { key: 'i_affect', label: '装机影响客户感知工单数量', fmt: 'int', cls: 'c-af' },
   { key: 'i_affect_rate', label: '装机影响客户感知工单数占比0.3%', fmt: 'pct2', cls: 'c-af' },
   { key: 'i_diff', label: '差额', fmt: 'int', cls: 'c-diff' },
@@ -187,6 +196,7 @@ const G2 = [
   { key: 'q28', label: 'Q28人员服务20%', fmt: 'score2', cls: 'c-q' },
   { key: 'q29', label: 'Q29问题解决情况40%', fmt: 'score2', cls: 'c-q' },
   { key: 'c_rate', label: '投诉参与率', fmt: 'pct2', cls: 'c-c' },
+  { key: 'c_reward', label: '故障预计奖励', fmt: 'reward', cls: 'c-rw' },
   { key: 'c_affect', label: '投诉影响客户感知工单数量', fmt: 'int', cls: 'c-af' },
   { key: 'c_affect_rate', label: '投诉影响客户感知工单数占比0.3%', fmt: 'pct2', cls: 'c-af' },
   { key: 'c_diff', label: '差额', fmt: 'int', cls: 'c-diff' },
@@ -226,6 +236,7 @@ function fmt(fmtType, v, row, col) {
     // 无装机/投诉数据的空档显示为 0（与通报口径一致）
     return v === null || v === undefined ? '0' : String(v)
   }
+  if (fmtType === 'reward') return v === null || v === undefined ? '0' : String(v)
   if (fmtType === 'pct1') return pct1(v)
   if (fmtType === 'pctInt') return pctInt(v)
   if (fmtType === 'score') return fmtScore(v)
@@ -234,15 +245,20 @@ function fmt(fmtType, v, row, col) {
 function fmt2(col, row) {
   const v = row[col.key]
   if (col.fmt === 'int') return v === null || v === undefined ? '0' : String(v)
+  if (col.fmt === 'reward') return v === null || v === undefined ? '0' : String(v)
   if (col.fmt === 'pct2') return pct2(v)
   if (col.fmt === 'score2') return fmtScore(v)
   return v
 }
-// 负欠产标红
+// 数值正负配色：负红、正绿（用于欠产数与预计奖励列）
+function numCls(v) {
+  if (v === null || v === undefined) return ''
+  return v < 0 ? 's-neg' : (v > 0 ? 's-pos' : '')
+}
+// 负欠产/负奖励标红
 function cellCls(col, row) {
-  if (col.key.endsWith('_short')) {
-    const v = row[col.key]
-    return v < 0 ? 's-neg' : (v > 0 ? 's-pos' : '')
+  if (col.key.endsWith('_short') || col.key.endsWith('_reward')) {
+    return numCls(row[col.key])
   }
   return ''
 }
@@ -282,7 +298,9 @@ async function exportFig2() {
 .toolbar-right { display: flex; align-items: center; gap: 8px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .card-title { font-size: 14px; color: #303133; }
+.reward-note { margin-left: 10px; font-size: 12px; color: #e02020; font-weight: 700; white-space: nowrap; }
 .note { margin-top: 10px; font-size: 12px; color: #909399; line-height: 1.7; }
+.note code { background: #f2f2f2; padding: 0 4px; border-radius: 3px; font-size: 11px; }
 .scroll-x { overflow-x: auto; }
 
 /* 截图表 —— 使用独立表格样式，保证 html2canvas 导出保真 */
@@ -331,6 +349,9 @@ table.rt td.c-name2 { text-align: left; background: #eef3fb; }
 table.rt td.c-sat { background: #ebf7ec; }
 table.rt td.c-short { background: #fdf3ee; }
 table.rt td.c-c { background: #fdf2ec; }
+table.rt td.c-rw { background: #fff7e0; }
+table.rt th.c-rw { background: #ffe6a3; color: #7a5b00; }
+table.rt tfoot td.c-rw { background: #ffd966; color: inherit; }
 table.rt td.c-q { background: #f2f7fd; }
 table.rt td.c-af { background: #f7f7f7; }
 table.rt td.c-no { background: #fbfbfb; }
