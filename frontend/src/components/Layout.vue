@@ -143,6 +143,10 @@ function onCmd(cmd) {
 }
 
 async function changePwd() {
+  if (!pwdForm.value.new_password || pwdForm.value.new_password.length < 8) {
+    ElMessage.warning('新密码长度至少 8 位')
+    return
+  }
   await api.post('/auth/change-password', pwdForm.value)
   ElMessage.success('密码修改成功，请重新登录')
   store.logout()

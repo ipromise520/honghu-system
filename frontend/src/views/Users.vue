@@ -116,7 +116,7 @@ async function save() {
 }
 
 async function resetPwd(row) {
-  const { value } = await ElMessageBox.prompt(`重置 ${row.real_name} 的密码`, '重置密码', { inputValue: '123456' })
+  const { value } = await ElMessageBox.prompt(`重置 ${row.real_name} 的密码（至少 8 位，含字母和数字）`, '重置密码', { inputValue: 'Honghu@2026' })
   await api.post('/auth/reset-password', { user_id: row.id, new_password: value })
   ElMessage.success('已重置')
 }

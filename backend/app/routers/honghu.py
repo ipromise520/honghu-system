@@ -1,6 +1,7 @@
 """洪湖专题通报聚合（手册 7.13 /honghu/latest、/honghu/mini）+ SSE 实时推送"""
 import asyncio
 import json
+from collections import deque
 from datetime import datetime
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -14,7 +15,8 @@ from ..deps import get_current_user
 
 router = APIRouter(tags=["honghu"])
 
-_event_queue: list[str] = []
+# 事件队列加上限，防止长时间运行内存无限增长（仅保留最近 1000 条）
+_event_queue: deque = deque(maxlen=1000)
 
 
 def push_event(event: str):
@@ -24,11 +26,11 @@ def push_event(event: str):
 @router.get("/honghu/latest")
 def honghu_latest(user=Depends(get_current_user), db: Session = Depends(get_db)):
     month = datetime.now().strftime("%Y-%m")
-    total = db.query(WorkOrder).filter(func.substr(WorkOrder.accept_time, 1, 7) == month).count()
-    done = db.query(WorkOrder).filter(func.substr(WorkOrder.accept_time, 1, 7) == month,
+    total = db.query(WorkOrder).filter(WorkOrder.month == month).count()
+    done = db.query(WorkOrder).filter(WorkOrder.month == month,
                                       WorkOrder.status.in_(COMPLETED_STATUS)).count()
     ext = db.query(func.sum(ExtensionOrder.income)).filter(ExtensionOrder.month == month).scalar() or 0
-    comp = db.query(H5Complaint).filter(func.substr(H5Complaint.accept_time, 1, 7) == month).count()
+    comp = db.query(H5Complaint).filter(H5Complaint.month == month).count()
     return {"period": month, "sections": [
         {"title": "竣工率概况", "lines": [f"本月受理 {total} 单，已施工 {done} 单。",
                                       f"整体竣工率 {round(done / total * 100, 2) if total else 0}%（个人口径见竣工率页）。"]},
@@ -47,18 +49,21 @@ def honghu_mini(user=Depends(get_current_user), db: Session = Depends(get_db)):
 
 
 @router.get("/events/stream")
-async def event_stream():
-    """SSE 实时推送（手册 7.13）：数据更新后看板自动刷新"""
+async def event_stream(user=Depends(get_current_user)):
+    """SSE 实时推送（手册 7.13）：数据更新后看板自动刷新。需登录鉴权。"""
     async def gen():
         idx = 0
-        while True:
-            if idx < len(_event_queue):
-                ev = _event_queue[idx]
-                idx += 1
-                yield f"data: {json.dumps({'event': ev}, ensure_ascii=False)}\n\n"
-            else:
-                yield f"data: {json.dumps({'event': 'ping', 'time': datetime.now().isoformat()})}\n\n"
-            await asyncio.sleep(5)
+        try:
+            while True:
+                if idx < len(_event_queue):
+                    ev = _event_queue[idx]
+                    idx += 1
+                    yield f"data: {json.dumps({'event': ev}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {json.dumps({'event': 'ping', 'time': datetime.now().isoformat()})}\n\n"
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

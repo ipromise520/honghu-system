@@ -1,6 +1,6 @@
 """工单管理（手册 7.3）"""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -26,7 +26,7 @@ def list_orders(page: int = 1, page_size: int = 20, status: str = None, district
     if district_id:
         q = q.filter(WorkOrder.district_id == district_id)
     if month:
-        q = q.filter(func.substr(WorkOrder.accept_time, 1, 7) == month)
+        q = q.filter(WorkOrder.month == month)
     if keyword:
         kw = f"%{keyword}%"
         q = q.filter(or_(WorkOrder.order_id.like(kw), WorkOrder.construction_dept.like(kw),
@@ -48,7 +48,7 @@ def stats(month: str = None, user=Depends(get_current_user), db: Session = Depen
     if ids is not None:
         q = q.filter(WorkOrder.district_id.in_(ids))
     if month:
-        q = q.filter(func.substr(WorkOrder.accept_time, 1, 7) == month)
+        q = q.filter(WorkOrder.month == month)
     total = q.count()
     done = q.filter(WorkOrder.status.in_(COMPLETED_STATUS)).count()
     by_status = dict(q.with_entities(WorkOrder.status, func.count(WorkOrder.id)).group_by(WorkOrder.status).all())

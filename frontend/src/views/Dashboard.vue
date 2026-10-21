@@ -68,15 +68,15 @@
             <el-radio-button value="install">装机工单明细</el-radio-button>
             <el-radio-button value="complaint">投诉工单明细</el-radio-button>
           </el-radio-group>
-          <el-checkbox v-model="showDone" size="small">显示已施工</el-checkbox>
-          <el-checkbox v-model="showExt" size="small">显示延伸服务</el-checkbox>
-          <el-checkbox v-model="showRefund" size="small">显示 已退/撤单</el-checkbox>
-          <el-checkbox v-model="showModem" size="small">显示更换光猫</el-checkbox>
-          <el-checkbox v-model="showHkbz" size="small">显示HB-KHBZ单</el-checkbox>
-          <span class="header-tip">显示 {{ filteredDetailRows.length }} 条 · 按时间倒序</span>
+          <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
+          <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
+          <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
+          <el-checkbox v-model="showModem" size="small" @change="onDetailFilterChange">显示更换光猫</el-checkbox>
+          <el-checkbox v-model="showHkbz" size="small" @change="onDetailFilterChange">显示HB-KHBZ单</el-checkbox>
+          <span class="header-tip">共 {{ detailTotal }} 条 · 按时间倒序</span>
         </div>
       </template>
-      <el-table v-if="detailType === 'install'" :data="filteredDetailRows" size="small" max-height="440" :empty-text="emptyTip">
+      <el-table v-if="detailType === 'install'" :data="detailRows" size="small" max-height="440" :empty-text="emptyTip">
         <el-table-column prop="district" label="区县" width="90" sortable />
         <el-table-column prop="no" label="定单编码" min-width="150" show-overflow-tooltip sortable />
         <el-table-column prop="theme" label="业务主题" min-width="120" show-overflow-tooltip sortable />
@@ -104,7 +104,7 @@
         <el-table-column prop="handler" label="回单人员" min-width="90" sortable />
         <el-table-column prop="grid" label="网格" min-width="100" show-overflow-tooltip sortable />
       </el-table>
-      <el-table v-else :data="filteredDetailRows" size="small" max-height="440" :empty-text="emptyTip">
+      <el-table v-else :data="detailRows" size="small" max-height="440" :empty-text="emptyTip">
         <el-table-column prop="district" label="区县" width="90" sortable />
         <el-table-column prop="no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
         <el-table-column prop="category" label="投诉分类" min-width="150" show-overflow-tooltip sortable />
@@ -137,6 +137,13 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <el-pagination v-if="detailTotal > pageSize"
+                     layout="total, sizes, prev, pager, next, jumper"
+                     :total="detailTotal" :current-page="detailPage" :page-size="pageSize"
+                     :page-sizes="[200, 500, 1000, 2000]"
+                     small background style="margin-top:10px;justify-content:flex-end"
+                     @current-change="onDetailPageChange" @size-change="onDetailSizeChange" />
 
       <!-- 省公司邮件预警（139邮箱每小时快照，仅保留最新） -->
       <el-card class="page-card" style="margin-top:16px">
@@ -575,32 +582,18 @@ const districtRanking = ref([])
 const complaintDistricts = ref([])
 const hasWide = ref(false)
 const detailType = ref('install')
+// 明细数据：筛选与分页全部下推服务端（/metrics/wide/orders），避免一次性拉取上万行
 const detailRows = ref([])
+const detailTotal = ref(0)
+const detailPage = ref(1)
+const pageSize = ref(500)
 const showDone = ref(false)
 const showExt = ref(false)
 const showRefund = ref(false)
 const showModem = ref(false)
 const showHkbz = ref(false)
-const isHkbzOrder = r => (r.no || '').startsWith('HB-KHBZ') || (r.flow_no || '').startsWith('HB-KHBZ')
-const filteredDetailRows = computed(() => detailRows.value.filter(r => {
-  if (!showHkbz.value && isHkbzOrder(r)) return false
-  if (!showDone.value && (r.status || '').includes('已施工')) return false
-  if (detailType.value === 'install' && !showRefund.value &&
-      ((r.status || '').includes('退') || (r.status || '').includes('撤'))) return false
-  if (!showExt.value && ((r.theme || '') + (r.category || '')).includes('延伸服务')) return false
-  if (detailType.value === 'install' && !showModem.value && (r.theme || '').includes('更换光猫')) return false
-  return true
-}))
-const emptyTip = computed(() => {
-  if (!detailRows.value.length) return '暂无数据，请先上传对应宽表'
-  const hkbz = detailRows.value.filter(r => isHkbzOrder(r)).length
-  const done = detailRows.value.filter(r => (r.status || '').includes('已施工')).length
-  const parts = []
-  if (done) parts.push(`${done} 条为「已施工」`)
-  if (hkbz) parts.push(`${hkbz} 条为 HB-KHBZ 单`)
-  if (!parts.length) return '暂无数据'
-  return `当月 ${detailRows.value.length} 条工单中 ${parts.join('、')}被隐藏，请勾选上方对应选项查看全部`
-})
+const emptyTip = computed(() =>
+  detailTotal.value === 0 && detailRows.value.length === 0 ? '暂无数据，请先上传对应宽表' : '暂无符合条件的数据')
 const trendRef = ref()
 const catRef = ref()
 const cDistRef = ref()
@@ -651,15 +644,35 @@ async function loadAiVisit() {
 async function loadDetail() {
   try {
     const r = await api.get('/metrics/wide/orders', {
-      params: { month: month.value, type: detailType.value, limit: 20000,
-                district: district.value === '全部' ? '' : district.value } })
+      params: { month: month.value, type: detailType.value,
+                district: district.value === '全部' ? '' : district.value,
+                page: detailPage.value, page_size: pageSize.value,
+                hide_done: !showDone.value, hide_refund: !showRefund.value,
+                hide_ext: !showExt.value, hide_modem: !showModem.value,
+                hide_hkbz: !showHkbz.value } })
     detailRows.value = r.rows || []
-  } catch (e) { detailRows.value = [] }
+    detailTotal.value = r.total || 0
+  } catch (e) { detailRows.value = []; detailTotal.value = 0 }
 }
 
 function onDetailTypeChange() {
   // 默认不勾选「显示已施工」，两个明细页签均从默认（隐藏已施工）开始
   showDone.value = false
+  detailPage.value = 1
+  loadDetail()
+}
+
+function onDetailFilterChange() {
+  detailPage.value = 1
+  loadDetail()
+}
+
+function onDetailPageChange() {
+  loadDetail()
+}
+
+function onDetailSizeChange() {
+  detailPage.value = 1
   loadDetail()
 }
 
@@ -725,6 +738,7 @@ function renderComplaintCharts(wide) {
 
 async function load() {
   const dq = district.value === '全部' ? '' : district.value
+  detailPage.value = 1
   loadAiVisit()
   try {
     // 卡片/趋势随区县过滤；排名/投诉概况固定全量 9 区县
@@ -807,7 +821,7 @@ async function loadAlertOrders() {
 async function syncAlert() {
   alertSyncing.value = true
   try {
-    const r = await api.post('/alerts/fetch')
+    const r = await api.post('/alerts/fetch', null, { timeout: 120000 })
     if (r.ok) {
       ElMessage.success(`已同步预警快照：${r.mail_time}（待装${r.install} · 投诉${r.complaint} · 预约异常${r.book}）`)
       await Promise.all([loadAlerts(), load()])
@@ -921,7 +935,7 @@ const h5LowRows = computed(() =>
 async function syncReport() {
   reportSyncing.value = true
   try {
-    const r = await api.post('/alerts/fetch-report')
+    const r = await api.post('/alerts/fetch-report', null, { timeout: 120000 })
     if (r.ok) {
       const bs = r.board_sync || {}
       const parts = []

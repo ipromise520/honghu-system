@@ -124,7 +124,7 @@ async function upload(k, file) {
   try {
     const fd = new FormData()
     fd.append('file', file.raw)
-    preview.value = await api.post(`/sync/upload/${k}`, fd)
+    preview.value = await api.post(`/sync/upload/${k}`, fd, { timeout: 180000 })
     ElMessage.success(`解析成功 ${preview.value.total_rows} 行，请核对后确认入库`)
   } catch (e) { /* 拦截器已提示 */ }
   finally { uploading.value = false }
@@ -134,7 +134,7 @@ async function confirm() {
   await ElMessageBox.confirm('确认将预览数据入库？入库后指标将自动重算。', '确认入库', { type: 'warning' })
   confirming.value = true
   try {
-    const r = await api.post(`/sync/confirm/${preview.value.batch_id}`)
+    const r = await api.post(`/sync/confirm/${preview.value.batch_id}`, null, { timeout: 180000 })
     ElMessage.success(r.msg)
     preview.value = null
     loadHistory()

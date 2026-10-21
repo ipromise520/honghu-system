@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint, Index, Computed
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -49,11 +49,19 @@ class User(Base):
 class WorkOrder(Base):
     """装机宽表工单（手册 5.2）"""
     __tablename__ = "work_orders"
+    __table_args__ = (
+        Index("ix_wo_month", "month"),
+        Index("ix_wo_district_status", "district_id", "status"),
+        Index("ix_wo_type_status", "broadband_type", "status"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[str] = mapped_column(String(64), unique=True)          # 27 开头定单编码
     order_theme: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(32), default="")             # 已施工/处理中/...
     accept_time: Mapped[str] = mapped_column(String(32), default="")        # YYYY-MM-DD HH:MM:SS
+    # month 为生成列（VIRTUAL）：由 accept_time 前 7 位自动推导，免人工维护；
+    # 已有库由 main._migrate_columns 用 ALTER TABLE 补齐，新库由 create_all 直接建
+    month: Mapped[str] = mapped_column(String(7), Computed("substr(accept_time, 1, 7)"))
     completion_time: Mapped[str] = mapped_column(String(32), default="")
     district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
     construction_dept: Mapped[str] = mapped_column(String(64), default="")  # 当前处理人或回单人
@@ -67,12 +75,14 @@ class WorkOrder(Base):
 class CancelRescheduleOrder(Base):
     """退单 / 改约工单（手册 5.2）"""
     __tablename__ = "cancel_reschedule_orders"
+    __table_args__ = (Index("ix_cro_month", "month"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[str] = mapped_column(String(64), default="")
     type: Mapped[str] = mapped_column(String(16), default="")               # 退单 / 改约
     district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
     handler: Mapped[str] = mapped_column(String(64), default="")
     accept_time: Mapped[str] = mapped_column(String(32), default="")
+    month: Mapped[str] = mapped_column(String(7), Computed("substr(accept_time, 1, 7)"))
     reason: Mapped[str] = mapped_column(String(255), default="")
 
 
@@ -103,12 +113,18 @@ class ExtensionMember(Base):
 class H5Complaint(Base):
     """投诉 H5 工单（手册 5.2）"""
     __tablename__ = "h5_complaint"
+    __table_args__ = (
+        Index("ix_hc_month", "month"),
+        Index("ix_hc_status", "order_status"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     eoms_order_no: Mapped[str] = mapped_column(String(64), unique=True)     # HB-058 前缀
     order_status: Mapped[str] = mapped_column(String(32), default="")
     construction_dept_person: Mapped[str] = mapped_column(String(64), default="")
     district: Mapped[str] = mapped_column(String(64), default="洪湖市")
     accept_time: Mapped[str] = mapped_column(String(32), default="")
+    # month 生成列：由 accept_time 前 7 位推导（与 work_orders 同口径）
+    month: Mapped[str] = mapped_column(String(7), Computed("substr(accept_time, 1, 7)"))
     community_name: Mapped[str] = mapped_column(String(255), default="")     # 小区名称（宽表-投诉回填）
     contact_person: Mapped[str] = mapped_column(String(64), default="")      # 联系人（宽表-投诉回填）
     fault_number: Mapped[str] = mapped_column(String(64), default="")        # 故障号码（宽表-投诉回填）
@@ -153,6 +169,11 @@ class H5Session(Base):
 class Task(Base):
     """任务分派（手册 7.9 全流程）"""
     __tablename__ = "tasks"
+    __table_args__ = (
+        Index("ix_task_status", "status"),
+        Index("ix_task_assignee", "assignee_id"),
+        Index("ix_task_district", "district_id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(128))
     content: Mapped[str] = mapped_column(Text, default="")
@@ -350,6 +371,7 @@ class AlertMeta(Base):
 class AlertOrder(Base):
     """省公司邮件预警明细（type: install装机/complaint投诉/book预约异常/monitor人员预警）"""
     __tablename__ = "alert_orders"
+    __table_args__ = (Index("ix_alert_type_district", "type", "district"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     type: Mapped[str] = mapped_column(String(16), default="")               # install/complaint/book/monitor
     district: Mapped[str] = mapped_column(String(32), default="")
@@ -397,6 +419,7 @@ class ReportDistrict(Base):
 class ReportTimeout(Base):
     """重要通报-超时工单盯控明细（预约时间内未完成）"""
     __tablename__ = "report_timeouts"
+    __table_args__ = (Index("ix_rt_district", "district"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     district: Mapped[str] = mapped_column(String(32), default="")
     order_no: Mapped[str] = mapped_column(String(64), default="")
@@ -412,6 +435,7 @@ class ReportTimeout(Base):
 class ReportWideOrder(Base):
     """重要通报-装机宽表明细（用于上门不及时等下钻）"""
     __tablename__ = "report_wide_orders"
+    __table_args__ = (Index("ix_rwo_district_timely", "district", "visit_timely"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     district: Mapped[str] = mapped_column(String(32), default="")
     grid: Mapped[str] = mapped_column(String(64), default="")
@@ -432,6 +456,7 @@ class ReportWideOrder(Base):
 class ReportComplaintOrder(Base):
     """重要通报-投诉受理明细（受理 sheet，含当日修及时性/全球通标识）"""
     __tablename__ = "report_complaint_orders"
+    __table_args__ = (Index("ix_rco_district", "district"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     district: Mapped[str] = mapped_column(String(32), default="")
     flow_no: Mapped[str] = mapped_column(String(64), default="")            # 工单流水号
@@ -467,6 +492,7 @@ class ReportH5Record(Base):
 class ReportDupOrder(Base):
     """重要通报-广义重复投诉工单（广义分子 sheet）"""
     __tablename__ = "report_dup_orders"
+    __table_args__ = (Index("ix_rdo_district", "district"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     district: Mapped[str] = mapped_column(String(32), default="")
     order_no: Mapped[str] = mapped_column(String(64), default="")           # 工单编号

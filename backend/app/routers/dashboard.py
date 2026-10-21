@@ -27,7 +27,7 @@ def current_month():
 def overview(user=Depends(get_current_user), db: Session = Depends(get_db)):
     month = current_month()
     ids = _district_filter_ids(user, db)
-    q = db.query(WorkOrder).filter(func.substr(WorkOrder.accept_time, 1, 7) == month)
+    q = db.query(WorkOrder).filter(WorkOrder.month == month)
     if ids is not None:
         q = q.filter(WorkOrder.district_id.in_(ids))
     total = q.count()
@@ -55,23 +55,28 @@ def overview(user=Depends(get_current_user), db: Session = Depends(get_db)):
 
 
 def _h5_pending_count(db, window: str) -> int:
-    """H5 未收 = 应发 - 已参评（装机 + 投诉，口径见 h5.py）"""
-    sent = []
-    rows = db.query(WorkOrder.order_id, WorkOrder.broadband_type, WorkOrder.status).filter(
-        func.substr(WorkOrder.accept_time, 1, 7) == window,
-        WorkOrder.status.in_(COMPLETED_STATUS), WorkOrder.broadband_type == "个人",
-        WorkOrder.order_id.like("27%")).all()
-    sent += [r[0] for r in rows]
-    crows = db.query(H5Complaint.eoms_order_no).filter(
-        func.substr(H5Complaint.accept_time, 1, 7) == window,
+    """H5 未收 = 应发 - 已参评（装机 + 投诉，口径见 h5.py）。
+
+    NOT EXISTS 子查询下推 SQL，避免把全部应发单号拉进内存做集合差。
+    """
+    install_pending = db.query(func.count(WorkOrder.id)).filter(
+        WorkOrder.month == window,
+        WorkOrder.status.in_(COMPLETED_STATUS),
+        WorkOrder.broadband_type == "个人",
+        WorkOrder.order_id.like("27%"),
+        ~db.query(H5Receipt.id).filter(
+            H5Receipt.order_no == WorkOrder.order_id,
+            H5Receipt.h5_received == "已参评").exists(),
+    ).scalar()
+    complaint_pending = db.query(func.count(H5Complaint.id)).filter(
+        H5Complaint.month == window,
         H5Complaint.order_status == "已施工",
-        H5Complaint.eoms_order_no.like("HB-058%")).all()
-    sent += [r[0] for r in crows]
-    if not sent:
-        return 0
-    received = {r[0] for r in db.query(H5Receipt.order_no).filter(
-        H5Receipt.order_no.in_(sent), H5Receipt.h5_received == "已参评").all()}
-    return sum(1 for s in sent if s not in received)
+        H5Complaint.eoms_order_no.like("HB-058%"),
+        ~db.query(H5Receipt.id).filter(
+            H5Receipt.order_no == H5Complaint.eoms_order_no,
+            H5Receipt.h5_received == "已参评").exists(),
+    ).scalar()
+    return (install_pending or 0) + (complaint_pending or 0)
 
 
 @router.get("/district-ranking")
@@ -79,7 +84,7 @@ def district_ranking(user=Depends(get_current_user), month: str = Query(None),
                      db: Session = Depends(get_db)):
     """首页区县排名（按竣工率简化版）"""
     month = month or current_month()
-    q = db.query(WorkOrder).filter(func.substr(WorkOrder.accept_time, 1, 7) == month,
+    q = db.query(WorkOrder).filter(WorkOrder.month == month,
                                    WorkOrder.district_id.isnot(None))
     ids = _district_filter_ids(user, db)
     if ids is not None:
@@ -104,7 +109,8 @@ def district_ranking(user=Depends(get_current_user), month: str = Query(None),
 @router.get("/trend")
 def trend(days: int = 7, user=Depends(get_current_user), db: Session = Depends(get_db)):
     start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
-    q = db.query(WorkOrder).filter(func.substr(WorkOrder.accept_time, 1, 10) >= start)
+    # accept_time 为 'YYYY-MM-DD HH:MM:SS' 定长格式，直接字符串比较等价于按天截断比较
+    q = db.query(WorkOrder).filter(WorkOrder.accept_time >= start)
     ids = _district_filter_ids(user, db)
     if ids is not None:
         q = q.filter(WorkOrder.district_id.in_(ids))
