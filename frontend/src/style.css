@@ -1,0 +1,29 @@
+:root {
+  --hh-primary: #1a6fdb;
+  --hh-sidebar: #1d2b3a;
+}
+
+.page-card { margin-bottom: 16px; }
+.card-header { display: flex; align-items: center; justify-content: space-between; }
+.card-header .title { font-weight: 600; font-size: 15px; color: #303133; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.stat-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 1200px) { .stat-cards { grid-template-columns: repeat(3, 1fr); } }
+.stat-card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+.stat-card .label { color: #909399; font-size: 13px; }
+.stat-card .value { font-size: 26px; font-weight: 700; color: #303133; margin-top: 6px; }
+.stat-card .unit { font-size: 13px; color: #909399; margin-left: 4px; }
+.el-table { --el-table-header-bg-color: #f7f9fc; }
+.nowrap-cell .cell { white-space: nowrap; }
+
+/* 移动端适配 */
+html, body { overflow-x: hidden; }
+@media (max-width: 768px) {
+  .stat-cards { grid-template-columns: repeat(2, 1fr) !important; gap: 10px; }
+  .stat-card { padding: 12px; }
+  .stat-card .value { font-size: 20px; }
+  /* 表格在窄屏可横向滑动，避免撑破布局 */
+  .el-table { width: 100%; }
+  .el-dialog { width: 92% !important; }
+  .el-date-picker, .el-select { width: 100% !important; }
+}

@@ -1,0 +1,1020 @@
+<template>
+  <div>
+    <div class="toolbar">
+      <el-date-picker v-model="month" type="month" value-format="YYYY-MM" placeholder="选择月份" style="width:150px" @change="load" />
+      <el-select v-model="district" style="width:150px" @change="load">
+        <el-option v-for="d in districtOptions" :key="d" :label="d" :value="d" />
+      </el-select>
+      <span class="data-tag" :class="{ wide: hasWide }">{{ hasWide ? '宽表数据' : '演示数据' }} · v{{ buildTime }}</span>
+    </div>
+
+    <div class="stat-cards">
+      <div v-for="c in cards" :key="c.key" class="stat-card" :class="c.tone">
+        <div class="label">{{ c.label }}</div>
+        <div class="value">{{ fmt(c.value) }}<span class="unit">{{ c.unit }}</span></div>
+        <div v-if="c.sub" class="sub">{{ c.sub }}</div>
+      </div>
+    </div>
+
+    <el-row :gutter="16">
+      <el-col :xs="24" :md="10">
+        <el-card class="page-card">
+          <template #header><div class="card-header"><span class="title">区县竣工率排名（{{ month }}）</span></div></template>
+          <div class="rank-table-wrap">
+            <el-table :data="districtRanking" size="small" height="100%">
+              <el-table-column prop="rank" label="#" width="50" />
+              <el-table-column prop="district" label="区县" min-width="90" />
+              <el-table-column prop="total" label="受理" min-width="70" />
+              <el-table-column prop="completed" label="已施工" min-width="70" />
+              <el-table-column label="竣工率" min-width="140">
+                <template #default="{ row }">
+                  <el-progress :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="12" />
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :md="14">
+        <el-card class="page-card">
+          <template #header><div class="card-header"><span class="title">每日工单趋势（{{ month }}）</span></div></template>
+          <div ref="trendRef" class="chart-tall" />
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-card class="page-card" v-if="hasWide">
+      <template #header><div class="card-header"><span class="title">投诉概况（{{ month }}）</span></div></template>
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="8">
+          <div ref="catRef" class="chart-mid" />
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <div ref="cDistRef" class="chart-mid" />
+        </el-col>
+        <el-col :xs="24" :md="8">
+          <el-table :data="complaintDistricts" size="small">
+            <el-table-column prop="district" label="区县" width="150" />
+            <el-table-column prop="count" label="投诉量" width="90" align="right" />
+          </el-table>
+        </el-col>
+      </el-row>
+    </el-card>
+
+    <el-card class="page-card">
+      <template #header>
+        <div class="card-header">
+          <el-radio-group v-model="detailType" size="small" @change="onDetailTypeChange">
+            <el-radio-button value="install">装机工单明细</el-radio-button>
+            <el-radio-button value="complaint">投诉工单明细</el-radio-button>
+          </el-radio-group>
+          <el-checkbox v-model="showDone" size="small">显示已施工</el-checkbox>
+          <el-checkbox v-model="showExt" size="small">显示延伸服务</el-checkbox>
+          <el-checkbox v-model="showRefund" size="small">显示 已退/撤单</el-checkbox>
+          <el-checkbox v-model="showModem" size="small">显示更换光猫</el-checkbox>
+          <el-checkbox v-model="showHkbz" size="small">显示HB-KHBZ单</el-checkbox>
+          <span class="header-tip">显示 {{ filteredDetailRows.length }} 条 · 按时间倒序</span>
+        </div>
+      </template>
+      <el-table v-if="detailType === 'install'" :data="filteredDetailRows" size="small" max-height="440" :empty-text="emptyTip">
+        <el-table-column prop="district" label="区县" width="90" sortable />
+        <el-table-column prop="no" label="定单编码" min-width="150" show-overflow-tooltip sortable />
+        <el-table-column prop="theme" label="业务主题" min-width="120" show-overflow-tooltip sortable />
+        <el-table-column prop="broadband_type" label="宽带类型" width="90" sortable />
+        <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="is_fttr" label="是否FTTR" width="95" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.is_fttr === '是' ? 'success' : 'info'">{{ row.is_fttr || '否' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="current_step" label="当前环节" width="110" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="(row.status || '').includes('施工') ? 'success'
+              : (row.status || '').includes('退') || (row.status || '').includes('撤') ? 'danger' : 'warning'">
+              {{ row.current_step || '处理中' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
+        <el-table-column prop="appointment_time" label="预约截止时间" width="150" sortable />
+        <el-table-column prop="handler" label="回单人员" min-width="90" sortable />
+        <el-table-column prop="grid" label="网格" min-width="100" show-overflow-tooltip sortable />
+      </el-table>
+      <el-table v-else :data="filteredDetailRows" size="small" max-height="440" :empty-text="emptyTip">
+        <el-table-column prop="district" label="区县" width="90" sortable />
+        <el-table-column prop="no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
+        <el-table-column prop="category" label="投诉分类" min-width="150" show-overflow-tooltip sortable />
+        <el-table-column label="是否触发H5" width="105" sortable
+                         sort-by="row => row.category && row.category.startsWith('家庭市场') ? 1 : 0">
+          <template #default="{ row }">
+            <el-tag v-if="row.category && row.category.startsWith('家庭市场')" size="small" type="danger">触发H5</el-tag>
+            <el-tag v-else size="small" type="info">未触发</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="global_pass" label="全球通标识" width="110" sortable>
+          <template #default="{ row }">
+            <span :class="{ 'gp-red': /白金|钻石/.test(row.global_pass || '') }">{{ row.global_pass || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="accept_time" label="投诉时间" width="150" sortable />
+        <el-table-column prop="appointment_time" label="预约截止时间" width="150" sortable />
+        <el-table-column prop="status" label="状态" width="95" sortable show-overflow-tooltip />
+        <el-table-column prop="handler" label="处理人" min-width="85" sortable />
+        <el-table-column prop="grid" label="网格" min-width="100" show-overflow-tooltip sortable />
+        <el-table-column prop="duration" label="时长(h)" width="85" align="right" sortable />
+        <el-table-column prop="is_solved" label="是否解决" width="95" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.is_solved === '已维修' ? 'success' : 'warning'">{{ row.is_solved || '处理中' }}</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <!-- 省公司邮件预警（139邮箱每小时快照，仅保留最新） -->
+      <el-card class="page-card" style="margin-top:16px">
+        <template #header>
+          <div class="card-header">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span class="title">省公司预警</span>
+              <el-tag v-if="alertMeta.has_data" size="small" type="danger">数据时间：{{ alertMeta.meta.mail_time }}</el-tag>
+              <span v-if="alertMeta.has_data" class="header-tip">导出 {{ alertMeta.meta.export_time }} · 拉取 {{ alertMeta.meta.fetched_at }}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <el-select v-model="alertDistrict" size="small" style="width:120px" placeholder="全部区县" clearable @change="onAlertDistrict">
+                <el-option v-for="d in districtOptions" :key="d" :label="d" :value="d === '全部' ? '' : d" />
+              </el-select>
+              <el-radio-group v-model="alertType" size="small" @change="loadAlertOrders">
+                <el-radio-button value="install">待装明细</el-radio-button>
+                <el-radio-button value="complaint">投诉待处理</el-radio-button>
+                <el-radio-button value="book">预约异常</el-radio-button>
+                <el-radio-button value="monitor">人员预警</el-radio-button>
+              </el-radio-group>
+              <el-button v-if="isAdmin" size="small" type="danger" plain :loading="alertSyncing" @click="syncAlert">同步邮件</el-button>
+            </div>
+          </div>
+        </template>
+        <template v-if="alertMeta.has_data">
+          <div class="stat-cards alert-cards">
+            <div class="stat-card blue clickable" :class="{ active: alertType === 'install' }" @click="pickAlert('install')"><div class="label">待装工单</div><div class="value">{{ alertMeta.counts?.install ?? alertMeta.meta.install_total }}<span class="unit">单</span></div><div class="sub">{{ alertInstallTop }}</div></div>
+            <div class="stat-card purple clickable" :class="{ active: alertType === 'complaint' }" @click="pickAlert('complaint')"><div class="label">投诉待处理</div><div class="value">{{ alertMeta.counts?.complaint ?? alertMeta.meta.complaint_total }}<span class="unit">单</span></div><div class="sub">{{ alertComplaintTop }}</div></div>
+            <div class="stat-card red clickable" :class="{ active: alertType === 'book' }" @click="pickAlert('book')"><div class="label">预约异常</div><div class="value">{{ alertMeta.counts?.book ?? alertMeta.meta.book_abnormal }}<span class="unit">单</span></div><div class="sub">超时/临近/冲突</div></div>
+            <div class="stat-card orange clickable" :class="{ active: alertType === 'monitor' && monitorLevel === '黄' }" @click="pickAlert('monitor', '黄')"><div class="label">黄色告警人员</div><div class="value">{{ alertMeta.counts?.warn_yellow ?? alertMeta.meta.warn_yellow }}<span class="unit">人</span></div><div class="sub">单量超负荷预警</div></div>
+            <div class="stat-card red clickable" :class="{ active: alertType === 'monitor' && monitorLevel === '红' }" @click="pickAlert('monitor', '红')"><div class="label">红色告警人员</div><div class="value">{{ alertMeta.counts?.warn_red ?? alertMeta.meta.warn_red }}<span class="unit">人</span></div><div class="sub">需立即调单</div></div>
+            <div class="stat-card green clickable" @click="openDrill('global', { level: '白金' })"><div class="label">全球通-白金卡</div><div class="value">{{ alertMeta.global_cnt?.platinum ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报投诉 · 点击明细</div></div>
+            <div class="stat-card blue clickable" @click="openDrill('global', { level: '金' })"><div class="label">全球通-金卡</div><div class="value">{{ alertMeta.global_cnt?.gold ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报投诉 · 点击明细</div></div>
+          </div>
+          <el-table v-if="alertType === 'install'" :data="alertRows" size="small" max-height="400">
+            <el-table-column prop="district" label="区县" width="85" sortable />
+            <el-table-column prop="order_no" label="定单编码" min-width="150" show-overflow-tooltip sortable />
+            <el-table-column prop="status" label="工单状态" width="105" sortable>
+              <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="order_type" label="工单类型" width="90" sortable />
+            <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
+            <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
+            <el-table-column prop="visit_time" label="上门时间" width="150" sortable />
+            <el-table-column prop="handler" label="处理人" min-width="80" sortable />
+            <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
+            <el-table-column prop="community" label="小区" min-width="110" show-overflow-tooltip sortable />
+            <el-table-column prop="is_fttr" label="FTTR" width="70" sortable />
+            <el-table-column prop="is_high_quality" label="高品质" width="70" sortable />
+          </el-table>
+          <el-table v-else-if="alertType === 'complaint'" :data="alertRows" size="small" max-height="400">
+            <el-table-column prop="district" label="区县" width="85" sortable />
+            <el-table-column prop="order_no" label="定单编码" min-width="150" show-overflow-tooltip sortable />
+            <el-table-column prop="status" label="工单状态" width="105" sortable>
+              <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="order_type" label="工单类型" width="90" sortable />
+            <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
+            <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
+            <el-table-column prop="handler" label="处理人" min-width="80" sortable />
+            <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
+            <el-table-column prop="community" label="小区" min-width="110" show-overflow-tooltip sortable />
+          </el-table>
+          <el-table v-else-if="alertType === 'book'" :data="alertRows" size="small" max-height="400">
+            <el-table-column prop="district" label="区县" width="85" sortable />
+            <el-table-column prop="book_status" label="预约状态" width="110" sortable>
+              <template #default="{ row }">
+                <el-tag size="small" :type="(row.book_status || '').includes('超时') || (row.book_status || '').includes('冲突') ? 'danger' : 'warning'">{{ row.book_status || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="order_no" label="定单编码" min-width="150" show-overflow-tooltip sortable />
+            <el-table-column prop="status" label="定单状态" width="105" sortable />
+            <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
+            <el-table-column prop="visit_time" label="上门时间" width="150" sortable />
+            <el-table-column prop="handler" label="处理人" min-width="80" sortable />
+            <el-table-column prop="supervise_info" label="督办信息" width="100" sortable />
+            <el-table-column prop="supervise_person" label="督办人员" min-width="85" sortable />
+            <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
+          </el-table>
+          <el-table v-else :data="monitorRows" size="small" max-height="400">
+            <el-table-column prop="warn_level" label="预警级别" width="100" sortable>
+              <template #default="{ row }">
+                <el-tag size="small" :type="(row.warn_level || '').includes('红') ? 'danger' : (row.warn_level || '').includes('黄') ? 'warning' : 'info'">{{ row.warn_level || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="handler" label="人员" min-width="85" sortable />
+            <el-table-column prop="district" label="区县" width="100" sortable />
+            <el-table-column prop="grid" label="网格" min-width="120" show-overflow-tooltip sortable />
+            <el-table-column prop="order_count" label="当日工单量" width="100" align="right" sortable />
+            <el-table-column prop="warn_time" label="预警时间" width="150" sortable />
+          </el-table>
+        </template>
+        <el-empty v-else description="暂无预警数据，管理员点击右上角「同步邮件」拉取省公司最新邮件" />
+      </el-card>
+    </el-card>
+
+    <!-- 省公司【重要通报】邮件（区县装维指标快照，随顶部区县筛选联动） -->
+    <el-card class="page-card">
+      <template #header>
+        <div class="card-header">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span class="title">重要通报（装维指标）</span>
+            <el-tag v-if="reportMeta.has_data" size="small" type="warning">通报日期：{{ reportMeta.meta.data_date }}</el-tag>
+            <el-tag v-if="reportMeta.has_data" size="small" type="danger">收件时间：{{ reportMeta.meta.mail_time }}</el-tag>
+            <span v-if="reportMeta.has_data" class="header-tip">邮件：{{ reportMeta.meta.mail_subject }} · 拉取 {{ reportMeta.meta.fetched_at }}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <el-radio-group v-model="reportTab" size="small">
+              <el-radio-button value="cards">区县指标</el-radio-button>
+              <el-radio-button value="rank">区县排名</el-radio-button>
+              <el-radio-button value="timeout">超时盯控明细</el-radio-button>
+              <el-radio-button value="h5">H5满意度</el-radio-button>
+            </el-radio-group>
+            <el-button v-if="isAdmin" size="small" type="warning" plain :loading="reportSyncing" @click="syncReport">同步通报</el-button>
+          </div>
+        </div>
+      </template>
+      <template v-if="reportMeta.has_data">
+        <div v-show="reportTab === 'cards'" class="stat-cards">
+          <div v-for="c in reportCards" :key="c.key" class="stat-card" :class="c.tone">
+            <div class="label">{{ c.label }}</div>
+            <div class="value">{{ c.value }}<span v-if="c.value !== '-'" class="unit">{{ c.unit }}</span></div>
+            <div v-if="c.drill" class="sub clickable" style="color:var(--el-color-primary)" title="点击查看明细"
+                 @click="openDrill(c.drill)">{{ c.sub }} ›</div>
+            <div v-else class="sub">{{ c.sub }}</div>
+          </div>
+        </div>
+        <el-table v-show="reportTab === 'rank'" :data="reportRanking" size="small" max-height="420">
+          <el-table-column type="index" label="#" width="50" />
+          <el-table-column prop="district" label="区县" width="100" sortable />
+          <el-table-column prop="month_order" label="当月收单" width="90" align="right" sortable />
+          <el-table-column prop="month_done" label="当月竣工" width="90" align="right" sortable />
+          <el-table-column label="竣工率" min-width="130" sortable sort-by="month_rate">
+            <template #default="{ row }">
+              <el-progress :percentage="row.month_rate" :color="rateColor(row.month_rate)" :stroke-width="12" />
+            </template>
+          </el-table-column>
+          <el-table-column label="装机及时率" width="105" align="right" sortable sort-by="timely_rate">
+            <template #default="{ row }"><span :class="{ 'gp-red': row.timely_rate !== '-' && row.timely_rate < 100 }">{{ row.timely_rate }}%</span></template>
+          </el-table-column>
+          <el-table-column label="超时工单" width="90" align="right" sortable sort-by="timeout_orders">
+            <template #default="{ row }"><span :class="{ 'gp-red': row.timeout_orders > 0 }">{{ row.timeout_orders }}</span></template>
+          </el-table-column>
+          <el-table-column label="投诉及时率" width="100" align="right" sortable sort-by="hq_normal_rate">
+            <template #default="{ row }">{{ row.hq_normal_rate }}%</template>
+          </el-table-column>
+          <el-table-column label="H5满意度" width="95" align="right" sortable sort-by="h5_satisfaction">
+            <template #default="{ row }">{{ row.h5_satisfaction }}</template>
+          </el-table-column>
+        </el-table>
+        <el-table v-show="reportTab === 'timeout'" :data="reportTimeoutRows" size="small" max-height="420"
+                  :empty-text="`当前区县暂无超时盯控工单（全通报共 ${reportTimeouts.length} 条）`">
+          <el-table-column prop="district" label="区县" width="90" sortable />
+          <el-table-column prop="order_no" label="定单编码" min-width="170" show-overflow-tooltip sortable />
+          <el-table-column prop="theme" label="定单主题" min-width="130" show-overflow-tooltip sortable />
+          <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
+          <el-table-column prop="appoint_end" label="预约结束时间" width="150" sortable />
+          <el-table-column prop="step" label="当前环节" width="100" sortable>
+            <template #default="{ row }">
+              <el-tag size="small" type="warning">{{ row.step || '-' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="handler" label="当前处理人" min-width="100" sortable />
+          <el-table-column prop="phone" label="处理人电话" width="115" sortable />
+          <el-table-column prop="ctrl_type" label="盯控类型" min-width="120" sortable>
+            <template #default="{ row }">
+              <el-tag size="small" type="danger">{{ row.ctrl_type || '-' }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <!-- H5满意度通报（集团大音平台，数据同步页上传） -->
+        <div v-show="reportTab === 'h5'">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+            <el-tag v-if="h5Survey.has_data" size="small" type="danger">数据日期：{{ h5Survey.data_date || '-' }}</el-tag>
+            <span v-if="h5Survey.has_data" class="header-tip">{{ h5Survey.filename }} · 上传 {{ h5Survey.uploaded_at }}</span>
+            <span v-if="isAdmin" class="header-tip">上传入口：数据同步页 → 「H5满意度通报」</span>
+          </div>
+          <el-table :data="h5DistRows" size="small" max-height="300" v-loading="h5Loading">
+            <el-table-column prop="district" label="区县" width="95" sortable />
+            <el-table-column label="装机回单" width="85" align="right" sortable sort-by="ib">
+              <template #default="{ row }">{{ row.ib }}</template>
+            </el-table-column>
+            <el-table-column label="装机测评" width="85" align="right" sortable sort-by="isv">
+              <template #default="{ row }">{{ row.isv }}</template>
+            </el-table-column>
+            <el-table-column label="装机参与率" min-width="150" sortable sort-by="ijoin">
+              <template #default="{ row }">
+                <span :class="{ 'gp-red': row.ijoin !== '-' && row.ijoin < 30 }" style="margin-right:6px">{{ row.ijoin }}%</span>
+                <el-progress v-if="row.ijoin !== '-'" :percentage="Math.min(row.ijoin, 100)" :stroke-width="9"
+                             :color="row.ijoin < 30 ? '#f56c6c' : '#67c23a'" style="display:inline-block;width:70px" />
+              </template>
+            </el-table-column>
+            <el-table-column label="装机满意度" width="95" align="right" sortable sort-by="isat">
+              <template #default="{ row }">{{ row.isat }}</template>
+            </el-table-column>
+            <el-table-column label="投诉回单" width="85" align="right" sortable sort-by="cb">
+              <template #default="{ row }">{{ row.cb }}</template>
+            </el-table-column>
+            <el-table-column label="投诉测评" width="85" align="right" sortable sort-by="csv">
+              <template #default="{ row }">{{ row.csv }}</template>
+            </el-table-column>
+            <el-table-column label="投诉参与率" min-width="150" sortable sort-by="cjoin">
+              <template #default="{ row }">
+                <span :class="{ 'gp-red': row.cjoin !== '-' && row.cjoin < 30 }" style="margin-right:6px">{{ row.cjoin }}%</span>
+                <el-progress v-if="row.cjoin !== '-'" :percentage="Math.min(row.cjoin, 100)" :stroke-width="9"
+                             :color="row.cjoin < 30 ? '#f56c6c' : '#67c23a'" style="display:inline-block;width:70px" />
+              </template>
+            </el-table-column>
+            <el-table-column label="投诉满意度" width="95" align="right" sortable sort-by="csat">
+              <template #default="{ row }">{{ row.csat }}</template>
+            </el-table-column>
+          </el-table>
+          <el-row :gutter="16" style="margin-top:12px">
+            <el-col :xs="24" :md="12">
+              <div class="title" style="margin-bottom:6px">人员测评TOP50（{{ district === '全部' ? '全部区县' : district }} · 按测评总数）</div>
+              <el-table :data="h5StaffRows" size="small" max-height="320">
+                <el-table-column type="index" label="#" width="45" />
+                <el-table-column prop="staff" label="装维人员" min-width="100" sortable />
+                <el-table-column prop="district" label="区县" width="90" sortable />
+                <el-table-column prop="install" label="装机测评" width="85" align="right" sortable />
+                <el-table-column prop="complaint" label="投诉测评" width="85" align="right" sortable />
+                <el-table-column prop="total" label="合计" width="70" align="right" sortable />
+                <el-table-column prop="low" label="低分" width="65" align="right" sortable>
+                  <template #default="{ row }">
+                    <span :class="{ 'gp-red': row.low > 0 }">{{ row.low || '-' }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-col>
+            <el-col :xs="24" :md="12">
+              <div class="title" style="margin-bottom:6px">低分测评核实（{{ h5Survey.lows?.length || 0 }} 条）</div>
+              <el-table :data="h5LowRows" size="small" max-height="320"
+                        empty-text="当前区县无低分测评工单">
+                <el-table-column prop="kind" label="类型" width="65">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="row.kind === '装机' ? 'primary' : 'warning'">{{ row.kind }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="district" label="区县" width="85" sortable />
+                <el-table-column prop="order_no" label="工单号" min-width="150" show-overflow-tooltip />
+                <el-table-column prop="score" label="低分" width="60" align="center" />
+                <el-table-column prop="person" label="责任人" min-width="90" sortable />
+                <el-table-column prop="message" label="用户留言" min-width="120" show-overflow-tooltip />
+                <el-table-column prop="note" label="回访备注" min-width="110" show-overflow-tooltip />
+              </el-table>
+            </el-col>
+          </el-row>
+        </div>
+      </template>
+      <el-empty v-else description="暂无通报数据，管理员点击右上角「同步通报」拉取省公司最新邮件" />
+    </el-card>
+
+    <!-- AI装维即访-不规范（人员通报，随顶部区县/月份筛选联动；数据同步页上传） -->
+    <el-card class="page-card">
+      <template #header>
+        <div class="card-header">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span class="title">AI装维即访-不规范</span>
+            <el-tag v-if="aiVisit.month" size="small" type="info">{{ aiVisit.month }}</el-tag>
+            <el-tag v-if="aiVisit.total" size="small" type="danger">共 {{ aiVisit.total }} 条</el-tag>
+            <span class="header-tip">
+              {{ district === '全部' ? '全部区县' : district }} · 仅统计「外呼成功」且勾选项为「不是」的工单 · 按责任人排序
+            </span>
+            <span v-if="isAdmin" class="header-tip">上传入口：数据同步页 → 「AI装维即访」</span>
+          </div>
+        </div>
+      </template>
+      <!-- 区县规范率（当日 / 当月；低于 99% 标红） -->
+      <div class="rate-block">
+        <div class="rate-title">
+          <span>区县规范率（全部区县）</span>
+          <el-tag v-if="aiRates.date" size="small" type="info">当日数据：{{ aiRates.date }}</el-tag>
+          <span class="header-tip">口径：规范率 =（接通量 − 有问题工单量）/ 接通量 · 低于 99% 标红 · 指标明细见左侧「AI装维即访」页</span>
+        </div>
+        <el-table :data="aiRateRows" size="small" border style="margin-bottom:14px"
+                  empty-text="暂无规范率通报，请在数据同步页上传「AI装维即访」回访清单">
+          <el-table-column prop="district" label="区县" width="110" fixed />
+          <el-table-column label="装机 · 当日" min-width="110" align="right">
+            <template #default="{ row }">
+              <span :class="{ 'gp-red': row.iDay && row.iDay.rate < 99 }"
+                    :title="row.iDay ? `接通 ${row.iDay.connected} · 问题 ${row.iDay.problem} 单` : ''">
+                {{ row.iDay ? row.iDay.rate + '%' : '-' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="装机 · 当月" min-width="110" align="right">
+            <template #default="{ row }">
+              <span :class="{ 'gp-red': row.iMonth && row.iMonth.rate < 99 }"
+                    :title="row.iMonth ? `接通 ${row.iMonth.connected} · 问题 ${row.iMonth.problem} 单` : ''">
+                {{ row.iMonth ? row.iMonth.rate + '%' : '-' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="投诉 · 当日" min-width="110" align="right">
+            <template #default="{ row }">
+              <span :class="{ 'gp-red': row.cDay && row.cDay.rate < 99 }"
+                    :title="row.cDay ? `接通 ${row.cDay.connected} · 问题 ${row.cDay.problem} 单` : ''">
+                {{ row.cDay ? row.cDay.rate + '%' : '-' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="投诉 · 当月" min-width="110" align="right">
+            <template #default="{ row }">
+              <span :class="{ 'gp-red': row.cMonth && row.cMonth.rate < 99 }"
+                    :title="row.cMonth ? `接通 ${row.cMonth.connected} · 问题 ${row.cMonth.problem} 单` : ''">
+                {{ row.cMonth ? row.cMonth.rate + '%' : '-' }}
+              </span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <el-table :data="aiVisitRows" size="small" max-height="440" v-loading="aiVisitLoading"
+                :default-sort="{ prop: 'handler', order: 'ascending' }"
+                empty-text="当前月份/区县暂无「不规范」记录，可在数据同步页上传「AI装维即访」回访清单">
+        <el-table-column prop="district" label="区县" width="95" sortable />
+        <el-table-column prop="handler" label="责任人" min-width="110" sortable />
+        <el-table-column prop="item" label="不规范项" min-width="110" sortable>
+          <template #default="{ row }">
+            <el-tag size="small" type="danger">{{ row.item }}</el-tag>
+            <el-tag size="small" :type="row.kind === '装机' ? 'primary' : 'warning'" style="margin-left:6px">{{ row.kind }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="order_no" label="工单号" min-width="170" show-overflow-tooltip sortable />
+        <el-table-column prop="completion_time" label="回单时间" width="160" sortable />
+      </el-table>
+    </el-card>
+
+    <!-- 通报/预警卡片下钻明细对话框 -->
+    <el-dialog v-model="drillVisible" :title="drillTitle" width="1080px" top="6vh" destroy-on-close>
+      <div v-loading="drillLoading" style="min-height:180px">
+        <el-alert v-if="drillKind === 'h5staff'" type="info" :closable="false" style="margin-bottom:8px"
+                  title="参评率 = 该装维人员当月投诉工单中完成H5参评的比例；低于30%标红" />
+        <el-alert v-if="drillKind === 'dup' && drillRows.length === 0 && !drillLoading" type="success" :closable="false"
+                  title="当前区县无广义重复投诉工单" />
+        <el-table v-if="drillKind === 'h5staff'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="staff" label="装维人员" min-width="110" sortable />
+          <el-table-column prop="district" label="区县" width="100" sortable />
+          <el-table-column prop="orders" label="当月投诉工单" width="115" align="right" sortable />
+          <el-table-column prop="joined" label="H5参评数" width="100" align="right" sortable />
+          <el-table-column label="参评率" width="180">
+            <template #default="{ row }">
+              <template v-if="row.rate !== null">
+                <span :class="{ 'gp-red': row.rate < 30 }" style="margin-right:8px">{{ row.rate }}%</span>
+                <el-progress :percentage="Math.min(row.rate, 100)" :stroke-width="10"
+                             :color="row.rate < 30 ? '#f56c6c' : '#67c23a'" style="flex:1" />
+              </template>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-table v-else-if="drillKind === 'untimely'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="district" label="区县" width="85" sortable />
+          <el-table-column prop="order_no" label="定单编码" min-width="160" show-overflow-tooltip sortable />
+          <el-table-column prop="theme" label="业务主题" min-width="120" show-overflow-tooltip sortable />
+          <el-table-column prop="broadband_type" label="宽带类型" width="90" sortable />
+          <el-table-column prop="accept_time" label="受理时间" width="145" sortable />
+          <el-table-column prop="appoint_end" label="预约结束时间" width="145" sortable />
+          <el-table-column prop="step" label="当前环节" width="95" sortable />
+          <el-table-column prop="handler" label="当前处理人" min-width="90" sortable />
+          <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
+        </el-table>
+        <el-table v-else-if="drillKind === 'timeout'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="district" label="区县" width="85" sortable />
+          <el-table-column prop="order_no" label="定单编码" min-width="160" show-overflow-tooltip sortable />
+          <el-table-column prop="theme" label="定单主题" min-width="120" show-overflow-tooltip sortable />
+          <el-table-column prop="accept_time" label="受理时间" width="145" sortable />
+          <el-table-column prop="appoint_end" label="预约结束时间" width="145" sortable />
+          <el-table-column prop="step" label="当前环节" width="95" sortable />
+          <el-table-column prop="handler" label="当前处理人" min-width="90" sortable />
+          <el-table-column prop="phone" label="处理人电话" width="110" sortable />
+          <el-table-column prop="ctrl_type" label="盯控类型" min-width="110" sortable />
+        </el-table>
+        <el-table v-else-if="drillKind === 'complaint'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="district" label="区县" width="85" sortable />
+          <el-table-column prop="flow_no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
+          <el-table-column prop="category" label="投诉分类" min-width="120" show-overflow-tooltip sortable />
+          <el-table-column prop="theme" label="投诉主题" min-width="130" show-overflow-tooltip sortable />
+          <el-table-column prop="accept_time" label="投诉时间" width="145" sortable />
+          <el-table-column prop="duration" label="时长(h)" width="80" align="right" sortable />
+          <el-table-column prop="status" label="状态" width="95" show-overflow-tooltip sortable />
+          <el-table-column prop="handler" label="当前处理人" min-width="90" sortable />
+          <el-table-column prop="phone" label="电话" width="110" sortable />
+        </el-table>
+        <el-table v-else-if="drillKind === 'dup'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="district" label="区县" width="85" sortable />
+          <el-table-column prop="order_no" label="工单编号" min-width="140" show-overflow-tooltip sortable />
+          <el-table-column prop="account" label="宽带账号" width="100" sortable />
+          <el-table-column prop="dup_cnt" label="重复次数" width="85" align="center" sortable />
+          <el-table-column prop="first_time" label="第一次投诉时间" width="145" sortable />
+          <el-table-column prop="first_reason" label="第一次投诉原因" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="second_time" label="第二次投诉时间" width="145" sortable />
+          <el-table-column prop="second_reason" label="第二次投诉原因" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="handler" label="当前处理人" min-width="95" sortable />
+          <el-table-column prop="grid" label="回单网格" min-width="95" show-overflow-tooltip sortable />
+        </el-table>
+        <el-table v-else-if="drillKind === 'global'" :data="drillRows" size="small" max-height="480">
+          <el-table-column prop="district" label="区县" width="85" sortable />
+          <el-table-column prop="flow_no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
+          <el-table-column label="全球通标识" width="115" sortable sort-by="global_pass">
+            <template #default="{ row }">
+              <span :class="{ 'gp-red': /白金|钻石/.test(row.global_pass || '') }">{{ row.global_pass || '-' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="category" label="投诉分类" min-width="120" show-overflow-tooltip sortable />
+          <el-table-column prop="theme" label="投诉主题" min-width="130" show-overflow-tooltip sortable />
+          <el-table-column prop="accept_time" label="投诉时间" width="145" sortable />
+          <el-table-column prop="status" label="状态" width="95" show-overflow-tooltip sortable />
+          <el-table-column prop="handler" label="当前处理人" min-width="90" sortable />
+          <el-table-column prop="duration" label="时长(h)" width="80" align="right" sortable />
+        </el-table>
+        <el-empty v-if="drillKind !== 'h5staff' && drillKind !== 'dup' && drillRows.length === 0 && !drillLoading"
+                  description="当前区县无相关明细" :image-size="70" />
+      </div>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, nextTick, onBeforeUnmount, computed } from 'vue'
+import * as echarts from 'echarts'
+import api from '../api'
+import { ElMessage } from 'element-plus'
+import { useUserStore } from '../store'
+
+const store = useUserStore()
+const isAdmin = computed(() => store.isAdmin)
+
+const month = ref(new Date().toISOString().slice(0, 7))
+const buildTime = typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : 'dev'
+const district = ref('洪湖市')
+const districtOptions = ['洪湖市', '监利市', '公安县', '荆州区', '江陵县', '松滋市', '沙市区', '石首市', '荆州开发区', '全部']
+const cards = ref([])
+const districtRanking = ref([])
+const complaintDistricts = ref([])
+const hasWide = ref(false)
+const detailType = ref('install')
+const detailRows = ref([])
+const showDone = ref(false)
+const showExt = ref(false)
+const showRefund = ref(false)
+const showModem = ref(false)
+const showHkbz = ref(false)
+const isHkbzOrder = r => (r.no || '').startsWith('HB-KHBZ') || (r.flow_no || '').startsWith('HB-KHBZ')
+const filteredDetailRows = computed(() => detailRows.value.filter(r => {
+  if (!showHkbz.value && isHkbzOrder(r)) return false
+  if (!showDone.value && (r.status || '').includes('已施工')) return false
+  if (detailType.value === 'install' && !showRefund.value &&
+      ((r.status || '').includes('退') || (r.status || '').includes('撤'))) return false
+  if (!showExt.value && ((r.theme || '') + (r.category || '')).includes('延伸服务')) return false
+  if (detailType.value === 'install' && !showModem.value && (r.theme || '').includes('更换光猫')) return false
+  return true
+}))
+const emptyTip = computed(() => {
+  if (!detailRows.value.length) return '暂无数据，请先上传对应宽表'
+  const hkbz = detailRows.value.filter(r => isHkbzOrder(r)).length
+  const done = detailRows.value.filter(r => (r.status || '').includes('已施工')).length
+  const parts = []
+  if (done) parts.push(`${done} 条为「已施工」`)
+  if (hkbz) parts.push(`${hkbz} 条为 HB-KHBZ 单`)
+  if (!parts.length) return '暂无数据'
+  return `当月 ${detailRows.value.length} 条工单中 ${parts.join('、')}被隐藏，请勾选上方对应选项查看全部`
+})
+const trendRef = ref()
+const catRef = ref()
+const cDistRef = ref()
+let chart = null, catChart = null, cDistChart = null
+
+const fmt = v => (typeof v === 'number' ? v.toLocaleString('zh-CN') : v)
+const rateColor = r => (r >= 70 ? '#67c23a' : r >= 50 ? '#e6a23c' : '#f56c6c')
+
+// ---------------- AI装维即访（规范率 + 不规范明细，随顶部区县/月份筛选联动） ----------------
+const aiVisit = ref({ month: '', total: 0 })
+const aiVisitRows = ref([])
+const aiVisitLoading = ref(false)
+const aiRates = ref({ has_data: false, date: '', rows: [] })
+const AI_DIST_ORDER = ['公安县', '洪湖市', '监利市', '江陵县', '荆州开发区', '荆州区', '沙市区', '石首市', '松滋市', '荆州']
+
+// 区县规范率精简表：区县 × (装机·当日/当月, 投诉·当日/当月)
+const AI_RATE_KEY = { '装机当日': 'iDay', '装机当月': 'iMonth', '投诉当日': 'cDay', '投诉当月': 'cMonth' }
+const aiRateRows = computed(() => {
+  const map = {}
+  for (const r of aiRates.value.rows) {
+    const k = AI_RATE_KEY[r.kind + r.period]
+    if (!k) continue
+    ;(map[r.district] = map[r.district] || { district: r.district })[k] = r
+  }
+  let list = AI_DIST_ORDER.filter(d => map[d]).map(d => map[d])
+  return list
+})
+
+async function loadAiVisit() {
+  aiVisitLoading.value = true
+  const dq = district.value === '全部' ? '' : district.value
+  // 分开容错：任一请求失败不影响另一块渲染
+  const [iss, rates] = await Promise.allSettled([
+    api.get('/dashboard/ai-visit-issues', { params: { month: month.value, district: dq } }),
+    api.get('/dashboard/ai-visit-rates', { params: { month: month.value } }),
+  ])
+  if (iss.status === 'fulfilled') {
+    aiVisit.value = { month: iss.value.month, total: iss.value.total }
+    aiVisitRows.value = iss.value.rows || []
+  } else {
+    aiVisit.value = { month: '', total: 0 }
+    aiVisitRows.value = []
+  }
+  aiRates.value = rates.status === 'fulfilled' ? rates.value : { has_data: false, date: '', rows: [] }
+  aiVisitLoading.value = false
+}
+
+async function loadDetail() {
+  try {
+    const r = await api.get('/metrics/wide/orders', {
+      params: { month: month.value, type: detailType.value, limit: 20000,
+                district: district.value === '全部' ? '' : district.value } })
+    detailRows.value = r.rows || []
+  } catch (e) { detailRows.value = [] }
+}
+
+function onDetailTypeChange() {
+  // 默认不勾选「显示已施工」，两个明细页签均从默认（隐藏已施工）开始
+  showDone.value = false
+  loadDetail()
+}
+
+function buildCardsFromWide(wide) {
+  const i = wide.install, c = wide.complaint
+  cards.value = [
+    { key: 'accept', label: '当月受理', value: i.total, unit: '单', tone: 'blue', sub: `已施工 ${i.done} / 待装 ${i.pending}` },
+    { key: 'rate', label: '竣工率', value: i.rate, unit: '%', tone: 'green', sub: `退撤单 ${i.refund} 单` },
+    { key: 'refund', label: '退撤单', value: i.refund, unit: '单', tone: 'orange', sub: i.refund_reasons?.[0] ? `主因：${i.refund_reasons[0].reason}` : '' },
+    { key: 't24', label: '24h超时', value: i.timeout_24h, unit: '单', tone: 'red', sub: `8h超时 ${i.timeout_8h}` },
+    { key: 'complaint', label: '投诉工单', value: c.total, unit: '单', tone: 'purple', sub: `已解决 ${c.solved}` },
+    { key: 'crate', label: '投诉解决率', value: c.rate, unit: '%', tone: 'green', sub: `24h超时 ${c.timeout_24h}` },
+  ]
+}
+
+function renderTrend(daily) {
+  nextTick(() => {
+    if (!chart) chart = echarts.init(trendRef.value)
+    chart.setOption({
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['受理', '已施工', '退单'] },
+      grid: { left: 40, right: 20, top: 40, bottom: 30 },
+      xAxis: { type: 'category', data: daily.map(d => d.day.slice(5)) },
+      yAxis: { type: 'value' },
+      series: [
+        { name: '受理', type: 'bar', data: daily.map(d => d.total), itemStyle: { color: '#1a6fdb' },
+          label: { show: true, position: 'top', fontSize: 9, color: '#1a6fdb' },
+          labelLayout: { hideOverlap: true } },
+        { name: '已施工', type: 'bar', data: daily.map(d => d.done), itemStyle: { color: '#67c23a' },
+          label: { show: true, position: 'top', fontSize: 9, color: '#67c23a' },
+          labelLayout: { hideOverlap: true } },
+        { name: '退单', type: 'bar', data: daily.map(d => d.refund), itemStyle: { color: '#e6a23c' },
+          label: { show: true, position: 'top', fontSize: 9, color: '#e6a23c' },
+          labelLayout: { hideOverlap: true } },
+      ],
+    })
+  })
+}
+
+function renderComplaintCharts(wide) {
+  const c = wide.complaint
+  complaintDistricts.value = c.by_district
+  nextTick(() => {
+    if (!catChart) catChart = echarts.init(catRef.value)
+    const topCat = c.by_category.slice(0, 6)
+    catChart.setOption({
+      title: { text: '投诉分类 TOP6', left: 'center', textStyle: { fontSize: 13 } },
+      tooltip: { trigger: 'item' },
+      series: [{ type: 'pie', radius: ['40%', '65%'], data: topCat.map(x => ({ name: x.category.slice(-8), value: x.count })) }],
+    })
+    if (!cDistChart) cDistChart = echarts.init(cDistRef.value)
+    const topD = c.by_district.slice(0, 8)
+    cDistChart.setOption({
+      title: { text: '区县投诉分布', left: 'center', textStyle: { fontSize: 13 } },
+      tooltip: { trigger: 'axis' },
+      grid: { left: 80, right: 20, top: 40, bottom: 20 },
+      xAxis: { type: 'value' },
+      yAxis: { type: 'category', data: topD.map(d => d.district).reverse() },
+      series: [{ type: 'bar', data: topD.map(d => d.count).reverse(), itemStyle: { color: '#9b59b6' } }],
+    })
+  })
+}
+
+async function load() {
+  const dq = district.value === '全部' ? '' : district.value
+  loadAiVisit()
+  try {
+    // 卡片/趋势随区县过滤；排名/投诉概况固定全量 9 区县
+    const [wf, wa] = await Promise.all([
+      api.get('/metrics/wide/summary', { params: { month: month.value, district: dq } }),
+      api.get('/metrics/wide/summary', { params: { month: month.value } }),
+    ])
+    if (wa.has_data) {
+      hasWide.value = true
+      const f = wf.has_data ? wf : wa
+      buildCardsFromWide(f)
+      renderTrend(f.install.daily)
+      districtRanking.value = wa.install.by_district.map(d => ({ ...d, completed: d.done }))
+      renderComplaintCharts(wa)
+      loadDetail()
+      return
+    }
+  } catch (e) { /* fall through to demo */ }
+  // 回退演示数据
+  hasWide.value = false
+  const [ov, rk, tr] = await Promise.all([
+    api.get('/dashboard/overview'),
+    api.get('/dashboard/district-ranking'),
+    api.get('/dashboard/trend'),
+  ])
+  cards.value = ov.cards
+  districtRanking.value = rk
+  renderTrend(tr.map(t => ({ day: t.day, total: t.accepted, done: t.completed, refund: 0 })))
+  loadDetail()
+}
+
+const onRz = () => { chart?.resize(); catChart?.resize(); cDistChart?.resize() }
+
+// ---------------- 省公司邮件预警 ----------------
+const alertMeta = ref({ has_data: false })
+const alertType = ref('install')
+const alertRows = ref([])
+const alertSyncing = ref(false)
+const alertDistrict = ref('')
+const monitorLevel = ref('')
+const alertStTag = s => (s || '').includes('施工') ? 'warning'
+  : (s || '').includes('回访') || (s || '').includes('接收') ? 'success' : 'info'
+const alertInstallTop = computed(() => {
+  const st = alertMeta.value.install_status || []
+  return st.length ? `最多：${st[0].status} ${st[0].count}` : ''
+})
+const alertComplaintTop = computed(() => {
+  const st = alertMeta.value.complaint_status || []
+  return st.length ? `最多：${st[0].status} ${st[0].count}` : ''
+})
+const monitorRows = computed(() =>
+  monitorLevel.value ? alertRows.value.filter(r => (r.warn_level || '').includes(monitorLevel.value))
+    : alertRows.value)
+
+function pickAlert(type, level = '') {
+  alertType.value = type
+  monitorLevel.value = type === 'monitor' ? level : ''
+  loadAlertOrders()
+}
+
+function onAlertDistrict() {
+  loadAlerts()
+}
+
+async function loadAlerts() {
+  try {
+    const s = await api.get('/alerts/summary', { params: { district: alertDistrict.value } })
+    alertMeta.value = s.has_data ? s : { has_data: false }
+    if (s.has_data) loadAlertOrders()
+  } catch (e) { alertMeta.value = { has_data: false } }
+}
+
+async function loadAlertOrders() {
+  try {
+    const r = await api.get('/alerts/orders', { params: { type: alertType.value, district: alertDistrict.value, limit: 2000 } })
+    alertRows.value = r.rows || []
+  } catch (e) { alertRows.value = [] }
+}
+
+async function syncAlert() {
+  alertSyncing.value = true
+  try {
+    const r = await api.post('/alerts/fetch')
+    if (r.ok) {
+      ElMessage.success(`已同步预警快照：${r.mail_time}（待装${r.install} · 投诉${r.complaint} · 预约异常${r.book}）`)
+      await Promise.all([loadAlerts(), load()])
+    } else ElMessage.error(r.error || '同步失败')
+  } catch (e) { ElMessage.error('同步失败：' + (e?.response?.data?.detail || e.message)) }
+  finally { alertSyncing.value = false }
+}
+
+// ---------------- 省公司【重要通报】（区县装维指标，随区县筛选联动） ----------------
+const reportMeta = ref({ has_data: false })
+const reportTab = ref('cards')
+const reportSyncing = ref(false)
+const reportTimeouts = ref([])
+
+const rAvg = (arr, k) => {
+  const v = arr.map(x => Number(x[k])).filter(x => !isNaN(x))
+  return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length * 10) / 10 : '-'
+}
+const rSum = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0)
+
+const reportCards = computed(() => {
+  const km = reportMeta.value
+  if (!km.has_data) return []
+  const K = km.kinds || {}
+  const all = district.value === '全部'
+  const one = k => (K[k] || {})[district.value] || {}
+  const i = one('install'), c = one('complaint'), d = one('dup')
+  const iv = Object.values(K.install || {}), cv = Object.values(K.complaint || {})
+  const dash = '-' // 区县无数据占位
+  return [
+    { key: 'mrate', label: '当月竣工率', tone: 'green', unit: '%',
+      value: all ? rAvg(iv, 'month_rate') : (i.month_rate ?? dash),
+      sub: all ? `九区县平均 · ${rSum(iv, 'month_order')} 收单 / ${rSum(iv, 'month_done')} 竣工` : `收单 ${i.month_order ?? dash} · 竣工 ${i.month_done ?? dash}` },
+    { key: 'trate', label: '装机及时率', tone: 'blue', unit: '%', drill: 'untimely',
+      value: all ? rAvg(iv, 'timely_rate') : (i.timely_rate ?? dash),
+      sub: all ? '九区县平均 · 全部上门不及时明细' : `不及时 ${i.untimely ?? dash} 单 · 上门及时率 ${i.visit_timely_rate ?? dash}%` },
+    { key: 'timeout', label: '装机超时工单', tone: 'red', unit: '单', drill: 'timeout',
+      value: all ? rSum(iv, 'timeout_orders') : (i.timeout_orders ?? dash),
+      sub: all ? '九区县合计 · 全部超时盯控明细' : `超时占比 ${i.timeout_rate ?? dash}%` },
+    { key: 'crate', label: '投诉及时率', tone: 'purple', unit: '%', drill: 'complaint',
+      value: all ? rAvg(cv, 'hq_normal_rate') : (c.hq_normal_rate ?? dash),
+      sub: all ? '九区县平均（高品质+普通）· 当日超时明细' : `工单 ${c.total ?? dash} · 当日超时 ${c.day_timeout ?? dash} · 未完工 ${c.unfinished ?? dash}` },
+    { key: 'h5', label: '投诉H5满意度', tone: 'orange', unit: '', drill: 'h5staff',
+      value: all ? rAvg(cv, 'h5_satisfaction') : (c.h5_satisfaction ?? dash),
+      sub: all ? '九区县平均 · 全部人员参评率' : `H5参评率 ${c.h5_join_rate ?? dash}%` },
+    { key: 'dup', label: '广义重复投诉率', tone: 'blue', unit: '%', drill: 'dup',
+      value: all ? rAvg(cv, 'dup_rate') : (c.dup_rate ?? dash),
+      sub: all ? '九区县平均 · 全部重复投诉工单' : (d.dup_users != null ? `重复用户 ${d.dup_users} · 工单 ${d.total} · 第${d.rank}名` : '') },
+  ]
+})
+
+const reportRanking = computed(() => {
+  const K = reportMeta.value.kinds || {}
+  const ins = K.install || {}, cmp = K.complaint || {}, dup = K.dup || {}
+  return Object.keys(ins).map(d => ({
+    district: d,
+    month_order: ins[d].month_order ?? '-',
+    month_done: ins[d].month_done ?? '-',
+    month_rate: Number(ins[d].month_rate) || 0,
+    timely_rate: ins[d].timely_rate ?? '-',
+    timeout_orders: ins[d].timeout_orders ?? 0,
+    hq_normal_rate: cmp[d]?.hq_normal_rate ?? '-',
+    h5_satisfaction: cmp[d]?.h5_satisfaction ?? '-',
+    dup_rate: dup[d]?.dup_rate ?? cmp[d]?.dup_rate ?? '-',
+  })).sort((a, b) => b.month_rate - a.month_rate)
+})
+
+const reportTimeoutRows = computed(() =>
+  district.value === '全部' ? reportTimeouts.value
+    : reportTimeouts.value.filter(r => r.district === district.value))
+
+async function loadReport() {
+  try {
+    const s = await api.get('/alerts/report-summary')
+    reportMeta.value = s.has_data ? s : { has_data: false }
+    if (s.has_data) {
+      const t = await api.get('/alerts/report-timeouts', { params: { limit: 2000 } })
+      reportTimeouts.value = t.rows || []
+    }
+  } catch (e) { reportMeta.value = { has_data: false } }
+  // H5满意度通报（大音平台）随通报区块一并加载
+  try {
+    h5Survey.value = await api.get('/alerts/h5-survey')
+  } catch (e) { h5Survey.value = { has_data: false, districts: [], staff: [], lows: [] } }
+  finally { h5Loading.value = false }
+}
+
+// ---------------- H5满意度通报（集团大音平台） ----------------
+const h5Survey = ref({ has_data: false, districts: [], staff: [], lows: [] })
+const h5Loading = ref(true)
+const h5DistRows = computed(() => {
+  const all = h5Survey.value.districts || []
+  const d = district.value
+  const pick = (kind) => all.filter(x => x.kind === kind && (d === '全部' || x.district === d))
+    .reduce((m, x) => (m[x.district] = x, m), {})
+  const im = pick('装机'), cm = pick('投诉')
+  const f = (v) => (v === 0 || v === undefined || v === null) ? '-' : v
+  return Object.keys(Object.keys(im).length ? im : cm).map(k => ({
+    district: k,
+    ib: f(im[k]?.back_cnt), isv: f(im[k]?.survey_cnt), ijoin: f(im[k]?.join_rate), isat: f(im[k]?.satisfaction),
+    cb: f(cm[k]?.back_cnt), csv: f(cm[k]?.survey_cnt), cjoin: f(cm[k]?.join_rate), csat: f(cm[k]?.satisfaction),
+  }))
+})
+const h5StaffRows = computed(() =>
+  (h5Survey.value.staff || [])
+    .filter(s => district.value === '全部' || s.district === district.value)
+    .map(s => ({ ...s, total: s.install + s.complaint })).slice(0, 50))
+const h5LowRows = computed(() =>
+  (h5Survey.value.lows || []).filter(l => district.value === '全部' || l.district === district.value))
+
+async function syncReport() {
+  reportSyncing.value = true
+  try {
+    const r = await api.post('/alerts/fetch-report')
+    if (r.ok) {
+      const bs = r.board_sync || {}
+      const parts = []
+      if (bs.install_replaced?.length) parts.push(`看板装机${bs.install_replaced.join('、')}`)
+      if (bs.complaint_replaced?.length) parts.push(`看板投诉${bs.complaint_replaced.join('、')}`)
+      if (bs.install_skipped?.length || bs.complaint_skipped?.length) parts.push('较早快照已跳过')
+      ElMessage.success(`已同步：${r.subject}（通报日 ${r.data_date}）${parts.length ? '，' + parts.join('；') : ''}`)
+      await Promise.all([loadReport(), load()])
+    } else ElMessage.error(r.error || '同步失败')
+  } catch (e) { ElMessage.error('同步失败：' + (e?.response?.data?.detail || e.message)) }
+  finally { reportSyncing.value = false }
+}
+
+// ---------------- 卡片下钻明细对话框 ----------------
+const DRILL_TITLES = {
+  untimely: '上门不及时工单明细（装机宽表通报口径）',
+  timeout: '超时工单盯控明细',
+  complaint: '当日修不及时投诉工单明细',
+  h5staff: '装维人员H5参评率（低于30%标红）',
+  dup: '广义重复投诉工单明细',
+  global: '',
+}
+const DRILL_LEVELS = { 白金: '全球通-白金卡投诉工单', 金: '全球通-金卡投诉工单', 钻石: '全球通-钻石卡投诉工单' }
+const drillVisible = ref(false)
+const drillLoading = ref(false)
+const drillKind = ref('timeout')
+const drillLevel = ref('')
+const drillRows = ref([])
+const drillTitle = computed(() =>
+  drillKind.value === 'global'
+    ? `${DRILL_LEVELS[drillLevel.value] || '全球通投诉工单'}明细`
+    : DRILL_TITLES[drillKind.value] || '明细')
+
+async function openDrill(kind, opt = {}) {
+  drillKind.value = kind
+  drillLevel.value = opt.level || ''
+  // 预警区块的全球通卡片跟随预警区县筛选；通报卡片跟随顶部区县筛选
+  const dist = kind === 'global' ? alertDistrict.value
+    : (district.value === '全部' ? '' : district.value)
+  drillVisible.value = true
+  drillLoading.value = true
+  drillRows.value = []
+  try {
+    const r = await api.get('/alerts/report-drill', { params: { kind, level: drillLevel.value, district: dist, limit: 1000 } })
+    drillRows.value = r.rows || []
+  } catch (e) { drillRows.value = [] }
+  finally { drillLoading.value = false }
+}
+
+onMounted(() => { load(); loadAlerts(); loadReport(); window.addEventListener('resize', onRz) })
+onBeforeUnmount(() => { window.removeEventListener('resize', onRz); chart?.dispose(); catChart?.dispose(); cDistChart?.dispose() })
+</script>
+
+<style scoped>
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.data-tag { font-size: 12px; padding: 2px 10px; border-radius: 10px; background: #909399; color: #fff; }
+.data-tag.wide { background: #1a6fdb; }
+.stat-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
+.stat-card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); border-left: 4px solid #1a6fdb; }
+.stat-card.blue { border-left-color: #1a6fdb; }
+.stat-card.green { border-left-color: #67c23a; }
+.stat-card.orange { border-left-color: #e6a23c; }
+.stat-card.red { border-left-color: #f56c6c; }
+.stat-card.purple { border-left-color: #9b59b6; }
+.stat-card .label { color: #606266; font-size: 13px; }
+.stat-card .value { font-size: 26px; font-weight: 600; margin-top: 6px; color: #303133; }
+.stat-card .unit { font-size: 13px; font-weight: 400; margin-left: 2px; }
+.stat-card .sub { font-size: 11px; color: #909399; margin-top: 4px; }
+.page-card { margin-bottom: 16px; }
+.card-header { display: flex; align-items: center; justify-content: space-between; }
+.card-header .title { font-weight: 600; }
+.header-tip { font-size: 12px; color: #909399; }
+.gp-red { color: #f56c6c; font-weight: 600; }
+.rate-block { margin-bottom: 4px; }
+.rate-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+.chart-tall { height: 420px; }
+.chart-mid { height: 400px; }
+.rank-table-wrap { height: 420px; }
+.alert-cards { grid-template-columns: repeat(7, 1fr); margin-bottom: 12px; }
+.stat-card.clickable { cursor: pointer; transition: transform .15s, box-shadow .15s; }
+.stat-card.clickable:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.stat-card.active { outline: 2px solid var(--el-color-primary); outline-offset: 1px; }
+@media (max-width: 1200px) { .alert-cards { grid-template-columns: repeat(4, 1fr); } }
+@media (max-width: 768px) {
+  .alert-cards { grid-template-columns: repeat(2, 1fr); }
+  .stat-cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .stat-card { padding: 12px; }
+  .stat-card .value { font-size: 22px; }
+  .chart-tall { height: 300px; }
+  .chart-mid { height: 260px; }
+  .rank-table-wrap { height: auto; }
+  .toolbar { flex-wrap: wrap; margin-bottom: 10px; }
+  .page-card { margin-bottom: 10px; }
+  .page-card :deep(.el-card__body) { padding: 12px; }
+}
+</style>
