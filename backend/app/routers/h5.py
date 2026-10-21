@@ -631,16 +631,19 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
             continue
         i_rate_v = (s.i_eval / s.i_back) if s.i_back else None
         c_rate_v = (s.c_eval / s.c_back) if s.c_back else None
+        i_rw = _reward(i_rate_v, s.i_eval, s.i_back, s.i_short, REWARD_INSTALL_UNIT)
+        c_rw = _reward(c_rate_v, s.c_eval, s.c_back, s.c_short, REWARD_COMPLAINT_UNIT)
         fig1_rows.append({
             "grid": s.grid, "leader": _leader_of(s.grid, s.name), "name": s.name,
             "i_back": s.i_back, "i_eval": s.i_eval,
             "i_rate": i_rate_v if i_rate_v is not None else 0.0,
             "i_short": s.i_short, "i_score": s.i_score,
-            "i_reward": _reward(i_rate_v, s.i_eval, s.i_back, s.i_short, REWARD_INSTALL_UNIT),
+            "i_reward": i_rw,
             "c_back": s.c_back, "c_eval": s.c_eval,
             "c_rate": c_rate_v if c_rate_v is not None else 0.0,
             "c_short": s.c_short, "c_score": s.c_score,
-            "c_reward": _reward(c_rate_v, s.c_eval, s.c_back, s.c_short, REWARD_COMPLAINT_UNIT),
+            "c_reward": c_rw,
+            "rw_total": i_rw + c_rw,
             "no_install": bool(s.no_install),
         })
     fig1_rows.sort(key=lambda r: (r["grid"], r["name"]))
@@ -654,17 +657,20 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
     t_ie = sum(r["i_eval"] for r in fig1_rows)
     t_cb = sum(r["c_back"] for r in fig1_rows)
     t_ce = sum(r["c_eval"] for r in fig1_rows)
+    t_i_rw = _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib,
+                     sum(r["i_short"] for r in fig1_rows), REWARD_INSTALL_UNIT)
+    t_c_rw = _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb,
+                     sum(r["c_short"] for r in fig1_rows), REWARD_COMPLAINT_UNIT)
     fig1 = {"rows": fig1_rows,
             "totals": {"i_back": t_ib, "i_eval": t_ie,
                        "i_short": sum(r["i_short"] for r in fig1_rows),
                        "i_score": _wavg("i_score", "i_eval", fig1_rows),
-                       "i_reward": _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib,
-                                           sum(r["i_short"] for r in fig1_rows), REWARD_INSTALL_UNIT),
+                       "i_reward": t_i_rw,
                        "c_back": t_cb, "c_eval": t_ce,
                        "c_short": sum(r["c_short"] for r in fig1_rows),
                        "c_score": _wavg("c_score", "c_eval", fig1_rows),
-                       "c_reward": _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb,
-                                           sum(r["c_short"] for r in fig1_rows), REWARD_COMPLAINT_UNIT)}}
+                       "c_reward": t_c_rw,
+                       "rw_total": t_i_rw + t_c_rw}}
 
     # ---- 图2：区县汇总（当日/当月 × 装机/投诉，9 区县 + 荆州合计行） ----
     def _pick(d, kind, period):

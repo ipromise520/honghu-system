@@ -7,6 +7,9 @@
           <span class="page-title">📈 H5 参与率通报</span>
           <el-tag type="warning" effect="light" size="small">{{ meta.day_label }} · 装维 H5 满意度参与率</el-tag>
           <el-tag type="info" effect="plain" size="small">{{ meta.source }}</el-tag>
+          <el-tooltip content="勾选后显示：装机预计奖励、故障预计奖励、奖励合计；取消勾选则隐藏（默认隐藏）" placement="bottom">
+            <el-checkbox v-model="showReward" size="small" class="reward-toggle">显示奖励列</el-checkbox>
+          </el-tooltip>
         </div>
         <div class="toolbar-right">
           <el-button size="small" type="primary" :loading="busy1" @click="exportFig1">🖼️ 一键输出图1 通报图片</el-button>
@@ -53,14 +56,15 @@
                 <td class="c-i">{{ pct1(fig1.totals.i_eval / fig1.totals.i_back) }}</td>
                 <td class="c-short s-neg">{{ fig1.totals.i_short }}</td>
                 <td class="c-sat">{{ fmtScore(fig1.totals.i_score) }}</td>
-                <td class="c-rw" :class="numCls(fig1.totals.i_reward)">{{ fig1.totals.i_reward }}</td>
+                <td v-if="showReward" class="c-rw" :class="numCls(fig1.totals.i_reward)">{{ fig1.totals.i_reward }}</td>
                 <td class="c-c">{{ fig1.totals.c_back }}</td>
                 <td class="c-c">{{ fig1.totals.c_eval }}</td>
                 <td class="c-c">{{ pct1(fig1.totals.c_eval / fig1.totals.c_back) }}</td>
                 <td class="c-short s-neg">{{ fig1.totals.c_short }}</td>
                 <td class="c-sat">{{ fmtScore(fig1.totals.c_score) }}</td>
-                <td class="c-rw" :class="numCls(fig1.totals.c_reward)">{{ fig1.totals.c_reward }}</td>
+                <td v-if="showReward" class="c-rw" :class="numCls(fig1.totals.c_reward)">{{ fig1.totals.c_reward }}</td>
                 <td class="c-name2"></td>
+                <td v-if="showReward" class="c-rw" :class="numCls(fig1.totals.rw_total)">{{ fig1.totals.rw_total }}</td>
               </tr>
             </tfoot>
           </table>
@@ -117,7 +121,9 @@
         预计奖励规则（参数以后端 <code>h5.py</code> 顶部常量为准，可调整）：参与率 ≥ {{ (meta.reward?.rate_min ?? 0.5) * 100 }}%（达标）时，
         「装机预计奖励」＝装机H5已测评 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝故障H5已测评 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件；
         参与率未达标时，「装机预计奖励」＝装机50%参与率欠产数 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝投诉50%参与率欠产数 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件
-        （欠产数为负即扣罚）；无回单不计奖。网格班组长由花名册（extension_members）及洪湖网格长 mappings 补齐。
+        （欠产数为负即扣罚）；无回单不计奖；「奖励合计」＝装机预计奖励＋故障预计奖励。
+        奖励列（装机预计奖励、故障预计奖励、奖励合计）默认隐藏，勾选页面顶部「显示奖励列」后展示（图1/图2 同步生效，导出图片同步包含）。
+        网格班组长由花名册（extension_members）及洪湖网格长 mappings 补齐。
       </div>
     </el-card>
     </template>
@@ -151,8 +157,12 @@ const fig1Ref = ref(null)
 const fig2Ref = ref(null)
 const busy1 = ref(false)
 const busy2 = ref(false)
+// 「显示奖励列」勾选框：控制图1/图2 的奖励列（装机预计奖励、故障预计奖励、奖励合计）显隐，默认不勾选（隐藏）
+const showReward = ref(false)
+const REWARD_COL_KEYS = ['i_reward', 'c_reward', 'rw_total']
+const _noReward = cols => cols.filter(c => !REWARD_COL_KEYS.includes(c.key))
 
-const FIG1_COLS = [
+const FIG1_COLS_ALL = [
   { key: 'leader', label: '网格班组长', cls: 'c-grid' },
   { key: 'name', label: '装维人员姓名', cls: 'c-name' },
   { key: 'i_back', label: '装机回单量<br>（当月）', fmt: 'int', cls: 'c-i' },
@@ -168,9 +178,11 @@ const FIG1_COLS = [
   { key: 'c_score', label: 'H5故障满意度', fmt: 'score', cls: 'c-sat' },
   { key: 'c_reward', label: '故障预计奖励', fmt: 'reward', cls: 'c-rw' },
   { key: 'name2', src: 'name', label: '装维人员姓名', cls: 'c-name2' },
+  { key: 'rw_total', label: '奖励合计', fmt: 'reward', cls: 'c-rw' },
 ]
+const FIG1_COLS = computed(() => showReward.value ? FIG1_COLS_ALL : _noReward(FIG1_COLS_ALL))
 
-const G1 = [
+const G1_ALL = [
   { key: 'i_back', label: '回单量', fmt: 'int', cls: 'c-i' },
   { key: 'i_eval', label: 'H5装机测评数', fmt: 'int', cls: 'c-i' },
   { key: 'i_sat', label: '装机满意度', fmt: 'score2', cls: 'c-sat' },
@@ -188,7 +200,7 @@ const G1 = [
   { key: 'bo', label: '服务安装效果不满意', fmt: 'int', cls: 'c-no' },
   { key: 'bp', label: '服务人员形象提升', fmt: 'int', cls: 'c-no' },
 ]
-const G2 = [
+const G2_ALL = [
   { key: 'c_back', label: '回单量', fmt: 'int', cls: 'c-c' },
   { key: 'c_eval', label: 'H5投诉测评数', fmt: 'int', cls: 'c-c' },
   { key: 'c_sat', label: '投诉满意度', fmt: 'score2', cls: 'c-sat' },
@@ -201,6 +213,8 @@ const G2 = [
   { key: 'c_affect_rate', label: '投诉影响客户感知工单数占比0.3%', fmt: 'pct2', cls: 'c-af' },
   { key: 'c_diff', label: '差额', fmt: 'int', cls: 'c-diff' },
 ]
+const G1 = computed(() => showReward.value ? G1_ALL : _noReward(G1_ALL))
+const G2 = computed(() => showReward.value ? G2_ALL : _noReward(G2_ALL))
 // 图2 两张表标题随数据日期动态生成（如「10月装机H5满意度（18日）」/「10月截止18日装机H5满意度（当月）」）
 const FIG2_BLOCKS = computed(() => {
   const day = meta.value.day_label || ''
@@ -257,7 +271,7 @@ function numCls(v) {
 }
 // 负欠产/负奖励标红
 function cellCls(col, row) {
-  if (col.key.endsWith('_short') || col.key.endsWith('_reward')) {
+  if (col.key.endsWith('_short') || REWARD_COL_KEYS.includes(col.key)) {
     return numCls(row[col.key])
   }
   return ''
@@ -294,6 +308,7 @@ async function exportFig2() {
 .rate-page { display: flex; flex-direction: column; gap: 12px; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
 .toolbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.reward-toggle :deep(.el-checkbox__label) { font-size: 12px; }
 .page-title { font-size: 17px; font-weight: 700; }
 .toolbar-right { display: flex; align-items: center; gap: 8px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
