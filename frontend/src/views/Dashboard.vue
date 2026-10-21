@@ -667,11 +667,15 @@ function onDetailFilterChange() {
   loadDetail()
 }
 
-function onDetailPageChange() {
+function onDetailPageChange(page) {
+  // Element Plus current-change 抛出新页码，必须回写 detailPage，否则永远停在第 1 页
+  detailPage.value = page || 1
   loadDetail()
 }
 
-function onDetailSizeChange() {
+function onDetailSizeChange(size) {
+  // size-change 抛出新每页条数，回写 pageSize 并回到第 1 页
+  pageSize.value = size || 500
   detailPage.value = 1
   loadDetail()
 }
