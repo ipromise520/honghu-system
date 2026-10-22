@@ -734,5 +734,15 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                   "c_diff": sum(r["c_diff"] for r in rows)}
         return {"rows": rows, "totals": totals}
 
-    return {"has_data": bool(dists or staff_rows), "meta": meta, "fig1": fig1,
+    # 图1 空态说明：staff 表为空但区县汇总有数据 → 当前快照为旧版导出（无人员粒度），
+    # 明确告知用户该传哪种导出，避免「明细不显示」再次发生（2026-10-22 用户反馈）
+    fig1_hint = ""
+    if not staff_rows and dists:
+        fig1_hint = ("当前快照为旧版导出格式（「H5数据统计」区县汇总），无人员粒度数据，图1 暂无明细。"
+                     "请在「数据同步 → H5满意度通报」上传「装维H5满意度参与率」导出"
+                     "（含「装机参与率」「投诉参与率」sheet）并确认入库后即可显示。")
+    elif not fig1_rows and staff_rows:
+        fig1_hint = f"当前快照中无{district}的人员明细数据。"
+
+    return {"has_data": bool(dists or staff_rows), "meta": meta, "fig1": fig1, "fig1_hint": fig1_hint,
             "fig2": {"day": _fig2_block("当日"), "month": _fig2_block("当月")}}

@@ -27,7 +27,10 @@
         <div class="card-title"><b>图1</b> · 洪湖市 装维人员 H5满意度参与率 明细<span v-if="meta.reward_note" class="reward-note">{{ meta.reward_note }}</span></div>
         <el-button size="small" type="primary" plain :loading="busy1" @click="exportFig1">导出图片</el-button>
       </div>
-      <div class="scroll-x">
+      <!-- 无人员明细（旧版导出无人员粒度数据）时给出明确指引，替代空白表格 -->
+      <el-alert v-if="!fig1.rows.length" :title="fig1Hint || '当前无人员明细数据'"
+                type="warning" :closable="false" show-icon class="fig1-empty" />
+      <div v-else class="scroll-x">
         <div ref="fig1Ref" class="shot">
           <table class="rt">
             <caption class="rt-title">
@@ -80,7 +83,8 @@
       </div>
       <div class="scroll-x">
         <div ref="fig2Ref" class="shot">
-          <table v-for="blk in FIG2_BLOCKS" :key="blk.key" class="rt r2">
+          <template v-for="blk in FIG2_BLOCKS" :key="blk.key">
+            <table v-if="fig2[blk.key].rows.length" class="rt r2">
             <caption class="rt-title split">
               <span class="cap-left">{{ blk.title1 }}</span>
               <span class="cap-right">{{ blk.title2 }}</span>
@@ -110,7 +114,10 @@
                 <td v-for="c in G2" :key="'b' + c.key" :class="[c.cls, cellCls(c, fig2[blk.key].totals)]">{{ fmt2(c, fig2[blk.key].totals) }}</td>
               </tr>
             </tfoot>
-          </table>
+            </table>
+            <!-- 当日块无数据（旧版导出仅当月汇总）时隐藏空表并说明，避免展示全 0 的误导表格 -->
+            <div v-else class="note blk-empty">{{ blk.title1 }} / {{ blk.title2 }}：当前快照无当日数据（旧版导出仅含当月汇总）。</div>
+          </template>
         </div>
       </div>
       <div class="note">
@@ -141,6 +148,8 @@ const payload = ref(null)
 const loading = ref(false)
 const meta = computed(() => payload.value?.meta || {})
 const fig1 = computed(() => payload.value?.fig1 || { rows: [], totals: {} })
+// 图1 空态说明（后端 /h5/rate 返回）：旧版导出无人员粒度数据时提示应传哪种导出
+const fig1Hint = computed(() => payload.value?.fig1_hint || '')
 const fig2 = computed(() => payload.value?.fig2 || { day: { rows: [], totals: {} }, month: { rows: [], totals: {} } })
 const hasData = computed(() => !!payload.value?.has_data)
 
@@ -285,6 +294,10 @@ async function shot(el, name) {
   a.click()
 }
 async function exportFig1() {
+  if (!fig1.value.rows.length) {
+    ElMessage.warning(fig1Hint.value || '当前无人员明细数据，无法导出')
+    return
+  }
   if (!fig1Ref.value) return
   busy1.value = true
   try {
@@ -317,6 +330,9 @@ async function exportFig2() {
 .note { margin-top: 10px; font-size: 12px; color: #909399; line-height: 1.7; }
 .note code { background: #f2f2f2; padding: 0 4px; border-radius: 3px; font-size: 11px; }
 .scroll-x { overflow-x: auto; }
+.fig1-empty { margin-bottom: 10px; }
+.fig1-empty :deep(.el-alert__title) { font-size: 13px; line-height: 1.6; }
+.blk-empty { margin: 4px 0 14px; }
 
 /* 截图表 —— 使用独立表格样式，保证 html2canvas 导出保真 */
 .shot { width: max-content; }

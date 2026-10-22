@@ -50,9 +50,12 @@ SYNC_MODULES = {
     "h5_survey": {"name": "H5满意度通报", "target": "h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores",
                   "columns": ["新版导出：装机/投诉参与率（人员）+ 装机/投诉回单 + 装机/投诉H5回复详单",
                               "旧版导出：H5数据统计（区县汇总）+ 装机/投诉H5回复详单 + 累计装机/投诉低分核实"],
-                  "note": "集团大音平台装维H5满意度通报；新版导出由本地聚合出区县汇总（当日/当月）与人员参与率明细"
-                          "（满意度=0.4×Q1+0.2×Q2+0.4×Q3），驱动「H5参与率通报」页面与首页「重要通报 → H5满意度」卡片；"
-                          "旧版「H5数据统计」仅当月；四表全量替换，保留最新快照"},
+                  "note": "集团大音平台装维H5满意度通报；「H5参与率通报」图1 人员明细必须使用「装维H5满意度参与率」导出"
+                      "（含「装机参与率」「投诉参与率」sheet，人员粒度）；旧版「装维H5满意度（集团大音平台)」导出"
+                      "仅含「H5数据统计」区县汇总（无人员明细、仅当月），上传时预览会给出告警；"
+                      "新版导出由本地聚合出区县汇总（当日/当月）与人员参与率明细"
+                      "（满意度=0.4×Q1+0.2×Q2+0.4×Q3），驱动「H5参与率通报」页面与首页「重要通报 → H5满意度」卡片；"
+                      "四表全量替换，保留最新快照"},
     "ai_visit": {"name": "AI装维即访", "target": "ai_visit_issues（不规范明细） + ai_visit_stats（规范率通报）",
                  "columns": ["装后即访-通报表 / 投诉即访-通报表：区县/外呼量/接通量/有问题工单量/规范率 + 各勾选项(调研量/不是/占比)",
                              "当月装机即访清单 / 当月投诉即访清单：责任人/不规范项/工单号/回单时间"],
@@ -954,9 +957,19 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
                                        "（含「H5数据统计」或「装机/投诉参与率」等 sheet）")
         jz_rate = next((r["join_rate"] for r in rows if r["_kind"] == "district" and r["kind"] == "装机"
                         and r["period"] == "当月" and r["district"] == "洪湖市"), None)
+        # 格式识别：新版导出含人员粒度「装机/投诉参与率」sheet（可产出图1 人员明细）；
+        # 旧版导出仅「H5数据统计」区县汇总（无人员粒度），入库后「H5参与率通报」图1 将为空。
+        # 两种格式文件名都可能是「装维H5满意度（集团大音平台).xlsx」，无法从文件名区分，
+        # 故在上传预览即带告警，避免「确认入库后图1 空白」再次发生（2026-10-22 用户反馈）。
+        survey_fmt = "new" if (sheets.get("装机参与率") or sheets.get("投诉参与率")) else "old"
+        warn = ""
+        if survey_fmt == "old":
+            warn = ("当前文件为旧版导出格式（「H5数据统计」区县汇总），无人员粒度数据："
+                    "入库后「H5参与率通报」图1 人员明细将为空、图2 仅有当月汇总。"
+                    "请改传「装维H5满意度参与率」导出（含「装机参与率」「投诉参与率」sheet）后再确认入库。")
         extra = {"districts": n_dist, "records": n_rec, "staff": n_staff, "lows": n_low,
                  "join_rate": f"{jz_rate}%" if jz_rate is not None else "",
-                 "data_date": data_date}
+                 "data_date": data_date, "format": survey_fmt, "warn": warn}
         preview = rows[:80]
     elif metric == "ai_visit":
         # AI装维即访：白名单「装后即访-通报表」「投诉即访-通报表」（多行表头 → 原始矩阵解析）

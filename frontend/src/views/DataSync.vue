@@ -32,6 +32,9 @@
           <el-button type="success" :loading="confirming" @click="confirm">确认入库</el-button>
         </div>
       </template>
+      <!-- 后端格式告警（如 H5满意度通报旧版导出无人员明细）：入库前明确提示 -->
+      <el-alert v-if="preview.warn" :title="preview.warn" type="warning" :closable="false" show-icon
+                style="margin-bottom:12px" />
       <el-table :data="preview.preview" size="small" max-height="400">
         <el-table-column v-for="c in preview.columns" :key="c" :prop="c" :label="c" min-width="120" show-overflow-tooltip />
       </el-table>
@@ -102,8 +105,11 @@ const modules = {
   },
   h5_survey: {
     name: 'H5满意度通报', target: 'h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores',
-    columns: ['新版导出：装机/投诉参与率、装机/投诉回单、装机/投诉H5回复详单（旧版「H5数据统计」格式同样兼容）'],
-    note: '集团大音平台装维H5满意度通报；新版导出由后端本地聚合出区县汇总（当日/当月）、人员参与明细、测评明细与低分核实，' +
+    columns: ['「装维H5满意度参与率」导出：装机/投诉参与率（人员）、装机/投诉回单、装机/投诉H5回复详单',
+              '旧版「装维H5满意度（集团大音平台)」导出：H5数据统计（区县汇总）、装机/投诉H5回复详单、累计装机/投诉低分核实'],
+    note: '集团大音平台装维H5满意度通报。「H5参与率通报」图1 人员明细必须使用「装维H5满意度参与率」导出' +
+          '（含「装机参与率」「投诉参与率」sheet，人员粒度）；旧版导出仅含区县汇总（无人员明细、仅当月），' +
+          '上传预览时会给出告警。新版导出由后端本地聚合出区县汇总（当日/当月）、人员参与明细、测评明细与低分核实，' +
           '全量替换保留最新快照；展示在「H5参与率通报」页面与首页「重要通报 → H5满意度」',
   },
   ai_visit: {
