@@ -12,6 +12,12 @@ import {
 import App from './App.vue'
 import router from './router'
 import './style.css'
+// 命令式组件（ElMessage/ElMessageBox）的样式必须显式引入：按需引入模式下
+// unplugin-vue-components 只收集模板中出现过的组件样式，命令式服务经 JS 调用，
+// 其 theme-chalk CSS 不会自动进入产物（缺失曾导致「确认入库」弹窗无样式、错位于左上角）
+import 'element-plus/theme-chalk/el-message.css'
+import 'element-plus/theme-chalk/el-message-box.css'
+import 'element-plus/theme-chalk/el-overlay.css'
 
 // Element Plus 组件与 API 已改为按需引入（vite.config.js 中 unplugin-vue-components /
 // unplugin-auto-import + ElementPlusResolver），不再全量注册。
