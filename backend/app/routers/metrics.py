@@ -1,4 +1,5 @@
 """指标计算 —— 竣工率 / 延伸服务 / 综合得分 / 短板分析（口径严格对齐开发手册 七、八）"""
+import re
 from collections import defaultdict
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func
@@ -38,6 +39,27 @@ def _base_query(db: Session, user, month: str):
 
 def _has_work_orders(db: Session, month: str) -> bool:
     return db.query(WorkOrder.id).filter(WorkOrder.month == month).first() is not None
+
+
+# 施工人字段常见前缀（区县名 / 第三方），规范化时剥离
+_HANDLER_PREFIXES = ("第三方", "沙市区", "荆州区", "公安县", "监利市", "江陵县",
+                     "石首市", "洪湖市", "松滋市", "荆州开发区")
+
+
+def _clean_handler(name) -> str:
+    """施工人字段规范化：'洪湖市代月新(峰口网格)' → '代月新'
+    （与 sync._strip_district_prefix 同规则：先截括号备注、再剥区县前缀）"""
+    if not name:
+        return ""
+    name = str(name).strip()
+    m = re.match(r"^([^\(（]+)", name)
+    if m:
+        name = m.group(1).strip()
+    for p in _HANDLER_PREFIXES:
+        if name.startswith(p) and len(name) > len(p):
+            name = name[len(p):]
+            break
+    return name.strip()
 
 
 def _install_scope_filter(db: Session, user, month: str):
@@ -156,23 +178,29 @@ def completion_users(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                            func.count(WorkOrder.id)).group_by(WorkOrder.construction_dept, WorkOrder.status).all()
     agg = defaultdict(lambda: {"total": 0, "done": 0})
     for handler, status, cnt in rows:
-        if not handler:
+        name = _clean_handler(handler)
+        if not name:
             continue
-        agg[handler]["total"] += cnt
+        agg[name]["total"] += cnt
         if status in COMPLETED_STATUS:
-            agg[handler]["done"] += cnt
-    # 离职过滤：仅保留在册人员（手册 8.1 fetch_inactive_handler_values）
+            agg[name]["done"] += cnt
+
+    def _build(only_active: bool) -> list:
+        out = []
+        for name, v in agg.items():
+            if only_active and name not in active_names:
+                continue
+            rate = v["done"] / v["total"] * 100 if v["total"] else 0
+            out.append({"handler": name, "total": v["total"],
+                        "completed": v["done"], "rate": round(rate, 2)})
+        return _rank(out)[:100]
+
+    # 离职过滤：仅保留在册人员（手册 8.1 fetch_inactive_handler_values）；
+    # 但用户表未覆盖装维人员时（实名只在工单里、不在 users 表）不过滤，
+    # 与 _install_users 宽表回退口径一致，避免人员卡整卡为空
     active_names = {u.real_name for u in db.query(User).filter(User.is_active == True).all()}  # noqa: E712
-    out = []
-    for name, v in agg.items():
-        if name not in active_names:
-            continue
-        rate = v["done"] / v["total"] * 100 if v["total"] else 0
-        out.append({"handler": name, "total": v["total"], "completed": v["done"], "rate": round(rate, 2)})
-    out.sort(key=lambda x: -x["rate"])
-    for i, r in enumerate(out, 1):
-        r["rank"] = i
-    return out[:100]
+    out = _build(True)
+    return out if out else _build(False)
 
 
 @router.get("/completion-rate/daily")
