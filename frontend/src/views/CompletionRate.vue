@@ -132,51 +132,147 @@
       </el-table>
     </el-card>
 
-    <!-- 工单口径（work_orders 实时计算） -->
+    <!-- 竣工率盯控（装机宽表维度指标 + 短信情况） -->
+    <el-card v-if="monitor.has_data" class="page-card">
+      <template #header>
+        <div class="card-header" style="display:flex;align-items:center;gap:12px">
+          <span class="title">竣工率盯控（装机宽表维度指标）</span>
+          <el-tag size="small" type="info">{{ monitor.scope.district_filter }} · {{ monitor.scope.orders }} 单</el-tag>
+        </div>
+      </template>
+      <el-row :gutter="12" class="stat-row">
+        <el-col v-for="c in monitorCards" :key="c.label" :xs="12" :sm="8" :md="4">
+          <el-card class="stat-card" shadow="never">
+            <div class="stat-label">{{ c.label }}</div>
+            <div class="stat-value" :style="{ color: c.color || '' }">{{ c.value }}</div>
+            <div class="stat-sub">{{ c.sub }}</div>
+          </el-card>
+        </el-col>
+      </el-row>
+
+      <el-row :gutter="16">
+        <el-col :xs="24" :md="12">
+          <div class="sub-title">及时性</div>
+          <el-table :data="timelinessRows" size="small" max-height="300">
+            <el-table-column prop="label" label="指标" min-width="100" />
+            <el-table-column prop="yes" label="及时" width="70" sortable />
+            <el-table-column prop="no" label="不及时" width="80" sortable />
+            <el-table-column prop="other" label="其他" width="70" sortable />
+            <el-table-column prop="blank" label="未回填" width="80" sortable />
+            <el-table-column label="及时率" min-width="130">
+              <template #default="{ row }">
+                <span v-if="row.rate === null" style="color:#909399">—</span>
+                <el-progress v-else :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="10" />
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-col>
+        <el-col :xs="24" :md="12">
+          <div class="sub-title">进度与质量</div>
+          <el-table :data="qualityRows" size="small" max-height="300">
+            <el-table-column prop="label" label="指标" min-width="110" />
+            <el-table-column prop="value" label="数值" min-width="110" />
+            <el-table-column prop="sub" label="说明" min-width="130" show-overflow-tooltip />
+          </el-table>
+        </el-col>
+      </el-row>
+
+      <el-row :gutter="16" style="margin-top:16px">
+        <el-col :xs="24" :md="10">
+          <div class="sub-title">风险</div>
+          <el-table :data="riskRows" size="small">
+            <el-table-column prop="label" label="指标" min-width="110" />
+            <el-table-column prop="value" label="数值" min-width="100" />
+          </el-table>
+          <div class="sub-title" style="margin-top:12px">退单原因 TOP5</div>
+          <el-table :data="monitor.risk.top_refund_reasons" size="small" max-height="220">
+            <el-table-column type="index" label="#" width="50" />
+            <el-table-column prop="reason" label="一级退单原因" show-overflow-tooltip />
+            <el-table-column prop="count" label="次数" width="70" sortable />
+          </el-table>
+        </el-col>
+        <el-col :xs="24" :md="14">
+          <div class="sub-title">短信提醒情况（场景估算）</div>
+          <el-alert type="warning" :closable="false" show-icon style="margin-bottom:8px"
+                    title="暂无短信平台数据源" :description="monitor.sms.note" />
+          <el-table :data="monitor.sms.scenes" size="small">
+            <el-table-column type="index" label="#" width="50" />
+            <el-table-column prop="scene" label="应提醒场景" min-width="220" />
+            <el-table-column prop="count" label="工单数" width="90" sortable />
+          </el-table>
+          <div class="sub-title" style="margin-top:12px">区县分布</div>
+          <el-table :data="monitor.by_district" size="small" max-height="220">
+            <el-table-column prop="district" label="区县" min-width="90" />
+            <el-table-column prop="orders" label="受理" width="70" sortable />
+            <el-table-column prop="done" label="已施工" width="80" sortable />
+            <el-table-column prop="refund" label="退单" width="70" sortable />
+            <el-table-column prop="urge" label="催单" width="70" sortable />
+            <el-table-column label="竣工率" min-width="120">
+              <template #default="{ row }">
+                <el-progress :percentage="row.done_rate" :color="rateColor(row.done_rate)" :stroke-width="10" />
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-col>
+      </el-row>
+    </el-card>
+    <el-card v-else-if="loaded" class="page-card">
+      <el-alert type="info" :closable="false" title="本月暂无装机宽表数据"
+                description="点击右上角「上传装机宽表」导入宽表查询文件（解析「数据1」sheet），上传后自动生成及时性/进度/质量/风险/短信提醒等盯控指标。" />
+    </el-card>
+
+    <!-- 工单口径（work_orders 实时计算；当月无系统工单时回退装机宽表统计） -->
     <el-card class="page-card">
       <template #header>
         <div class="card-header" style="display:flex;align-items:center;gap:12px">
           <span class="title">工单口径（系统工单实时计算）</span>
+          <span class="tip">当月无系统工单时自动按装机宽表统计</span>
           <span class="tip" v-if="report.latest_order_time">数据截止：{{ report.latest_order_time.slice(0, 16) }}</span>
         </div>
       </template>
-      <div class="toolbar">
-        <el-radio-group v-model="dim" @change="load">
-          <el-radio-button value="districts">区县排名</el-radio-button>
-          <el-radio-button value="users">人员排名</el-radio-button>
-          <el-radio-button value="daily">每日趋势</el-radio-button>
-        </el-radio-group>
-      </div>
+      <el-alert v-if="orderEmpty" type="info" :closable="false"
+                title="本月暂无工单数据" description="工单口径来源于系统工单（工单管理页录入或旧版上传入口）；当月无系统工单时已自动按装机宽表统计，若仍为空请先点击右上角「上传装机宽表」。" />
+      <template v-else>
+        <div class="toolbar">
+          <el-radio-group v-model="dim" @change="load">
+            <el-radio-button value="districts">区县排名</el-radio-button>
+            <el-radio-button value="users">人员排名</el-radio-button>
+            <el-radio-button value="daily">每日趋势</el-radio-button>
+          </el-radio-group>
+        </div>
 
-      <el-table v-if="dim === 'districts'" :data="viewOrderDistricts" size="small" max-height="480">
-        <el-table-column prop="rank" label="#" width="50" />
-        <el-table-column prop="district" label="区县" min-width="100" />
-        <el-table-column prop="total" label="个人受理" min-width="90" sortable />
-        <el-table-column prop="completed" label="已施工" min-width="90" sortable />
-        <el-table-column label="竣工率" min-width="160">
-          <template #default="{ row }">
-            <el-progress :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="12" />
-          </template>
-        </el-table-column>
-      </el-table>
+        <el-table v-if="dim === 'districts'" :data="viewOrderDistricts" size="small" max-height="480">
+          <el-table-column prop="rank" label="#" width="50" />
+          <el-table-column prop="district" label="区县" min-width="100" />
+          <el-table-column prop="total" label="个人受理" min-width="90" sortable />
+          <el-table-column prop="completed" label="已施工" min-width="90" sortable />
+          <el-table-column label="竣工率" min-width="160">
+            <template #default="{ row }">
+              <el-progress :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="12" />
+            </template>
+          </el-table-column>
+        </el-table>
 
-      <el-table v-else-if="dim === 'users'" :data="users" size="small" max-height="480">
-        <el-table-column prop="rank" label="#" width="50" />
-        <el-table-column prop="handler" label="人员" min-width="90" />
-        <el-table-column prop="total" label="个人受理" min-width="90" sortable />
-        <el-table-column prop="completed" label="已施工" min-width="90" sortable />
-        <el-table-column label="竣工率" min-width="160">
-          <template #default="{ row }">
-            <el-progress :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="12" />
-          </template>
-        </el-table-column>
-      </el-table>
+        <el-table v-else-if="dim === 'users'" :data="users" size="small" max-height="480">
+          <el-table-column prop="rank" label="#" width="50" />
+          <el-table-column prop="handler" label="人员" min-width="90" />
+          <el-table-column prop="total" label="个人受理" min-width="90" sortable />
+          <el-table-column prop="completed" label="已施工" min-width="90" sortable />
+          <el-table-column label="竣工率" min-width="160">
+            <template #default="{ row }">
+              <el-progress :percentage="row.rate" :color="rateColor(row.rate)" :stroke-width="12" />
+            </template>
+          </el-table-column>
+        </el-table>
 
-      <div v-else ref="dailyRef" style="height: 500px" />
+        <div v-else ref="dailyRef" style="height: 500px" />
+      </template>
     </el-card>
 
     <el-card class="page-card">
       <template #header><div class="card-header"><span class="title">退单 / 改约盯控</span></div></template>
+      <el-alert v-if="crEmpty" type="info" :closable="false" style="margin-bottom:10px"
+                title="本月暂无退单 / 改约数据" description="数据来源：退单改约同步（工单取消/改约记录入库后自动展示）。" />
       <el-row :gutter="16">
         <el-col :xs="24" :md="8">
           <el-table :data="cr.by_type" size="small">
@@ -285,6 +381,11 @@ const wideParsed = ref(null)
 const wideUploading = ref(false)
 const wideImporting = ref(false)
 
+// 竣工率盯控（装机宽表维度指标 + 短信情况）
+const monitor = ref({ has_data: false })
+const loaded = ref(false)                       // 首屏加载完成（用于区分「未加载」与「已加载无数据」）
+const dailyData = ref([])                       // 每日趋势原始数据（供空态判断）
+
 const wideCards = computed(() => {
   const i = wide.value.install || {}
   const rate24 = i.total ? +((1 - (i.timeout_24h || 0) / i.total) * 100).toFixed(1) : 0
@@ -314,6 +415,77 @@ const wideUsers = computed(() => {
 })
 
 const rateColor = r => (r >= 70 ? '#67c23a' : r >= 50 ? '#e6a23c' : '#f56c6c')
+const pctOrDash = v => (v === null || v === undefined ? '—' : `${v}%`)
+const colorOrNull = r => (r === null || r === undefined ? '' : rateColor(r))
+
+// ---- 竣工率盯控 ----
+const monitorCards = computed(() => {
+  const m = monitor.value
+  if (!m.has_data) return []
+  const p = m.progress, t = m.timeliness, r = m.risk
+  return [
+    { label: '受理量', value: p.orders, sub: '单' },
+    { label: '已施工', value: p.done, sub: `竣工率 ${p.done_rate}%`, color: rateColor(p.done_rate) },
+    { label: '24h及时率', value: pctOrDash(t.rate_24h.rate), sub: `超时 ${t.rate_24h.no} 单`, color: colorOrNull(t.rate_24h.rate) },
+    { label: '8h及时率', value: pctOrDash(t.rate_8h.rate), sub: `超时 ${t.rate_8h.no} 单`, color: colorOrNull(t.rate_8h.rate) },
+    { label: '首联及时率', value: pctOrDash(t.first_contact.rate), sub: `无首联 ${t.first_contact.other} 单`, color: colorOrNull(t.first_contact.rate) },
+    { label: '履约率', value: pctOrDash(t.perform.rate), sub: `履约 ${t.perform.yes} 单`, color: colorOrNull(t.perform.rate) },
+    { label: '退单率', value: `${r.refund_rate}%`, sub: `${r.refund_orders} 单`, color: '#f56c6c' },
+    { label: '催单工单率', value: `${r.urge_rate}%`, sub: `${r.urge_orders} 单 / 共 ${r.urge_total} 次`, color: '#e6a23c' },
+  ]
+})
+
+const timelinessRows = computed(() => {
+  const m = monitor.value
+  if (!m.has_data) return []
+  const row = (label, d) => ({ label, yes: d.yes, no: d.no, other: d.other, blank: d.blank, rate: d.rate })
+  return [
+    row('24小时及时', m.timeliness.rate_24h),
+    row('8小时及时', m.timeliness.rate_8h),
+    row('首联及时', m.timeliness.first_contact),
+    row('及时上门', m.timeliness.visit_timely),
+    row('履约', m.timeliness.perform),
+  ]
+})
+
+const qualityRows = computed(() => {
+  const m = monitor.value
+  if (!m.has_data) return []
+  const q = m.quality, p = m.progress
+  const top = arr => (arr && arr.length ? arr.map(([k, v]) => `${k} ${v}`).join('；') : '—')
+  return [
+    { label: '平均装机时长', value: p.avg_install_duration === null ? '—' : `${p.avg_install_duration} 分钟`, sub: p.duration_unit },
+    { label: '平均完工时长', value: p.avg_completion_duration === null ? '—' : `${p.avg_completion_duration} 分钟`, sub: p.duration_unit },
+    { label: 'H5装机满意度', value: q.h5_avg === null ? '—' : `${q.h5_avg} 分`, sub: `已测评 ${q.h5_cnt} 单` },
+    { label: 'IVR装通率', value: pctOrDash(q.ivr_pass.rate), sub: `装通 ${q.ivr_pass.yes} / 未通 ${q.ivr_pass.no}` },
+    { label: 'IVR满意率', value: pctOrDash(q.ivr_satisfied.rate), sub: `满意 ${q.ivr_satisfied.yes} / 不满 ${q.ivr_satisfied.no}` },
+    { label: 'AI回访不满意', value: q.ai_unsat, sub: '单' },
+    { label: '综调回访TOP3', value: top(q.zongdiao_top), sub: '按工单数' },
+    { label: '地市回访TOP3', value: top(q.city_top), sub: '按工单数' },
+  ]
+})
+
+const riskRows = computed(() => {
+  const m = monitor.value
+  if (!m.has_data) return []
+  const r = m.risk
+  return [
+    { label: '催单工单', value: `${r.urge_orders} 单` },
+    { label: '催单工单率', value: `${r.urge_rate}%` },
+    { label: '催单总次数', value: `${r.urge_total} 次` },
+    { label: '退单工单', value: `${r.refund_orders} 单` },
+    { label: '退单率', value: `${r.refund_rate}%` },
+  ]
+})
+
+// 工单口径空态：三个维度均无数据
+const orderEmpty = computed(() =>
+  (districts.value || []).length === 0 && (users.value || []).length === 0 && dailyData.value.length === 0)
+
+// 退单/改约盯控空态
+const crEmpty = computed(() =>
+  (cr.value.by_type || []).length === 0 && (cr.value.by_district || []).length === 0 &&
+  (cr.value.top_reasons || []).length === 0)
 
 // 区县下拉选项：通报区县 + 工单口径区县 合并去重
 const districtOptions = computed(() => {
@@ -358,18 +530,21 @@ const statCards = computed(() => {
 async function load() {
   const params = { month: month.value }
   const dparam = { month: month.value, district: districtSel.value === '全部' ? '' : districtSel.value }
-  const [rp, d, u, c, w] = await Promise.all([
+  const [rp, d, u, c, w, mo] = await Promise.all([
     api.get('/metrics/completion-rate/report', { params }),
     api.get('/metrics/completion-rate/districts', { params }),
     api.get('/metrics/completion-rate/users', { params: dparam }),
     api.get('/metrics/completion-rate/cancel-reschedule', { params }),
     api.get('/metrics/wide/summary', { params }).catch(() => ({ has_data: false })),
+    api.get('/metrics/completion-rate/monitor', { params: dparam }).catch(() => ({ has_data: false })),
   ])
   report.value = rp
   districts.value = d
   users.value = u
   cr.value = c
   wide.value = w.has_data ? w : { has_data: false, install: {}, refund_reasons: [] }
+  monitor.value = mo && mo.has_data ? mo : { has_data: false }
+  loaded.value = true
   if (dim.value === 'daily') await drawDaily()
 }
 
@@ -435,6 +610,7 @@ async function doImport() {
 
 async function drawDaily() {
   const daily = await api.get('/metrics/completion-rate/daily', { params: { month: month.value } })
+  dailyData.value = daily
   await nextTick()
   if (!chart) chart = echarts.init(dailyRef.value)
   chart.setOption({

@@ -89,6 +89,24 @@ _ADD_COLUMNS = {
                             ("unsat_effect", "INTEGER DEFAULT 0"),
                             ("unsat_image", "INTEGER DEFAULT 0"),
                             ("diff_cnt", "INTEGER DEFAULT 0")],
+    # 竣工率盯控维度（装机宽表回填）
+    "install_orders": [("first_contact_time", "VARCHAR(32) DEFAULT ''"),
+                       ("first_contact_timely", "VARCHAR(8) DEFAULT ''"),
+                       ("visit_time", "VARCHAR(32) DEFAULT ''"),
+                       ("visit_timely", "VARCHAR(8) DEFAULT ''"),
+                       ("activate_time", "VARCHAR(32) DEFAULT ''"),
+                       ("revisit_time", "VARCHAR(32) DEFAULT ''"),
+                       ("revisit_result", "VARCHAR(16) DEFAULT ''"),
+                       ("ivr_pass", "VARCHAR(8) DEFAULT ''"),
+                       ("ivr_satisfied", "VARCHAR(8) DEFAULT ''"),
+                       ("ivr_score", "VARCHAR(16) DEFAULT ''"),
+                       ("ivr_final", "VARCHAR(8) DEFAULT ''"),
+                       ("urge_cnt", "INTEGER DEFAULT 0"),
+                       ("refund_reason2", "VARCHAR(64) DEFAULT ''"),
+                       ("refund_person", "VARCHAR(64) DEFAULT ''"),
+                       ("ai_result", "VARCHAR(16) DEFAULT ''"),
+                       ("zongdiao_result", "VARCHAR(16) DEFAULT ''"),
+                       ("city_result", "VARCHAR(16) DEFAULT ''")],
 }
 
 # month 生成列（VIRTUAL）：把 substr(accept_time,1,7) 变为可索引列，月度聚合/筛选走索引

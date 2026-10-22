@@ -23,9 +23,10 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 
 SYNC_MODULES = {
     "completion_rate": {"name": "竣工率指标",
-                        "target": "completion_records（通报分析） + work_orders（工单口径）",
+                        "target": "completion_records（通报分析，按月替换）",
                         "columns": ["激励明细：装维人员/宽带收单/宽带回单/FTTR收单/FTTR回单/激励后金额/区县"],
-                        "note": "白名单解析「激励明细」sheet，人员粒度按月替换；上传时通过 month 参数指定通报月份"},
+                        "note": "白名单解析「激励明细」sheet，人员粒度按月替换；上传时通过 month 参数指定通报月份；"
+                                "竣工率页「工单口径」卡片在当月无系统工单时自动按装机宽表统计"},
     "extension": {"name": "延伸服务指标", "target": "extension_orders + extension_members",
                   "columns": ["当月明细：订单号/县域/受理人/受理时间/服务项目名称/服务项目收入",
                               "人员明细：区县/网格/姓名/职位/状态"],
@@ -34,8 +35,9 @@ SYNC_MODULES = {
                      "columns": ["工单编号(HB-058前缀)", "工单状态", "施工人", "受理时间"],
                      "note": "投诉 H5 工单列表"},
     "install_wide": {"name": "装机宽表", "target": "install_orders",
-                     "columns": ["数据1：定单编码/区县/网格/受理时间/业务主题/定单状态/宽带类型/是否FTTR/回单人员/回单时间/24小时及时/8小时及时/是否履约/是否退单/一级退单原因/装机时长/完工时长/H5装机满意度"],
-                     "note": "白名单解析「数据1」sheet（装机宽表月累计）；month 从受理时间推导；按月替换"},
+                     "columns": ["数据1：定单编码/区县/网格/受理时间/业务主题/定单状态/宽带类型/是否FTTR/回单人员/回单时间/24小时及时/8小时及时/是否履约/是否退单/一级退单原因/装机时长/完工时长/H5装机满意度",
+                                 "盯控列（旧版导出无这些列时取空）：首联时间/首联是否及时/上门时间/是否及时上门/首次激活时间/回访时间/回访结果/IVR回访(装通/满意/评分/最终)/催单次数/二级退单原因/退单人员/AI回访结果/综调回访结果/地市回访结果"],
+                     "note": "白名单解析「数据1」sheet（装机宽表月累计）；month 从受理时间推导；按月替换；供竣工率盯控卡片使用"},
     "complaint_wide": {"name": "投诉宽表", "target": "complaint_orders",
                        "columns": ["数据1：工单流水号/区县/投诉时间/智慧装维工单状态/当前处理人/投诉分类/24小时是否及时/8小时是否及时/是否履约/工单时长/故障是否解决/归档满意度"],
                        "note": "白名单解析「数据1」sheet（投诉宽表月累计）；month 从投诉时间推导；按月替换"},
@@ -736,6 +738,24 @@ def _normalize_install_wide(sheets: dict) -> list[dict]:
             "appointment_time": _norm_time(r.get("预约时间段结束时间") or r.get("首次预约时间")),
             "is_high_quality": str(r.get("高品质标签") or "").strip(),
             "current_step": str(r.get("当前环节") or "").strip(),
+            # 竣工率盯控维度（旧版导出无这些列时取空，不影响主链路）
+            "first_contact_time": _norm_time(r.get("首联时间")),
+            "first_contact_timely": str(r.get("首联是否及时") or "").strip(),
+            "visit_time": _norm_time(r.get("上门时间")),
+            "visit_timely": str(r.get("是否及时上门") or "").strip(),
+            "activate_time": _norm_time(r.get("首次激活时间")),
+            "revisit_time": _norm_time(r.get("回访时间")),
+            "revisit_result": str(r.get("回访结果") or "").strip(),
+            "ivr_pass": str(r.get("IVR人工回访是否装通") or "").strip(),
+            "ivr_satisfied": str(r.get("IVR人工回访是否满意") or "").strip(),
+            "ivr_score": str(r.get("IVR人工回访满意度评分") or "").strip(),
+            "ivr_final": str(r.get("IVR人工回访最终是否满意") or "").strip(),
+            "urge_cnt": _to_num(r.get("催单次数")),
+            "refund_reason2": str(r.get("二级退单原因") or "").strip(),
+            "refund_person": str(r.get("退单人员") or "").strip(),
+            "ai_result": str(r.get("AI回访结果") or "").strip(),
+            "zongdiao_result": str(r.get("综调回访结果") or "").strip(),
+            "city_result": str(r.get("地市回访结果") or "").strip(),
         })
     return out
 

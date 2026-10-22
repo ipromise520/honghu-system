@@ -65,9 +65,10 @@ import api from '../api'
 
 const modules = {
   completion_rate: {
-    name: '竣工率指标', target: 'work_orders（批量 upsert 2000行/批）',
-    columns: ['ORDER_ID', '区县', '网格', '定单状态', '受理时间', '宽带类型', '当前处理人或回单人'],
-    note: '自动补全 status / accept_time / district_id / construction_dept',
+    name: '竣工率指标', target: 'completion_records（通报分析，按月替换）',
+    columns: ['激励明细：装维人员/宽带收单/宽带回单/FTTR收单/FTTR回单/激励后金额/区县'],
+    note: '白名单解析「激励明细」sheet，人员粒度按月替换；月份上传时指定（通报表内无时间列）；' +
+          '竣工率页「工单口径」卡片在当月无系统工单时自动按装机宽表统计',
   },
   extension: {
     name: '延伸服务指标', target: 'extension_orders + extension_members',

@@ -301,6 +301,24 @@ class InstallOrder(Base):
     appointment_time: Mapped[str] = mapped_column(String(32), default="")   # 预约截止时间
     is_high_quality: Mapped[str] = mapped_column(String(128), default="")   # 高品质标签
     current_step: Mapped[str] = mapped_column(String(32), default="")       # 当前环节
+    # ---- 竣工率盯控维度（装机宽表回填，供盯控卡片使用）----
+    first_contact_time: Mapped[str] = mapped_column(String(32), default="")     # AL 首联时间
+    first_contact_timely: Mapped[str] = mapped_column(String(8), default="")    # AD 首联是否及时
+    visit_time: Mapped[str] = mapped_column(String(32), default="")             # AO 上门时间
+    visit_timely: Mapped[str] = mapped_column(String(8), default="")            # AV 是否及时上门
+    activate_time: Mapped[str] = mapped_column(String(32), default="")          # AQ 首次激活时间
+    revisit_time: Mapped[str] = mapped_column(String(32), default="")           # AS 回访时间
+    revisit_result: Mapped[str] = mapped_column(String(16), default="")         # AT 回访结果
+    ivr_pass: Mapped[str] = mapped_column(String(8), default="")                # BF IVR人工回访是否装通
+    ivr_satisfied: Mapped[str] = mapped_column(String(8), default="")           # BG IVR人工回访是否满意
+    ivr_score: Mapped[str] = mapped_column(String(16), default="")              # BH IVR人工回访满意度评分
+    ivr_final: Mapped[str] = mapped_column(String(8), default="")               # BI IVR人工回访最终是否满意
+    urge_cnt: Mapped[int] = mapped_column(Integer, default=0)                   # BJ 催单次数
+    refund_reason2: Mapped[str] = mapped_column(String(64), default="")         # BN 二级退单原因
+    refund_person: Mapped[str] = mapped_column(String(64), default="")          # BQ 退单人员
+    ai_result: Mapped[str] = mapped_column(String(16), default="")              # BV AI回访结果
+    zongdiao_result: Mapped[str] = mapped_column(String(16), default="")        # BY 综调回访结果
+    city_result: Mapped[str] = mapped_column(String(16), default="")            # CB 地市回访结果
 
 
 class ComplaintOrder(Base):
