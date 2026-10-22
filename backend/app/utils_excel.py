@@ -41,6 +41,14 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
         for ws in wb.worksheets:
             if wanted is not None and ws.title.strip() not in wanted:
                 continue
+            # 不信任 sheet XML 里的 <dimension> 声明：部分导出系统（SheetJS 系，如
+            # 装机/投诉综合查询导出件）会写入失实声明（<dimension ref="A1"/>），
+            # read_only 模式下 openpyxl 以 dimension 作为迭代行/列上界，导致只读出
+            # 首行首列、真实数据全部丢失（表现为上传后无预览、400「sheet 未解析到
+            # 数据行」）。reset_dimensions() 是 openpyxl 针对该场景的官方处理：清空
+            # 失实尺寸，按 XML 实际内容流式输出；对 dimension 声明过大（如 1048576
+            # 行）的文件同样受益——不再填充海量空行。
+            ws.reset_dimensions()
             n_skip = max(0, int(skip_map.get(ws.title.strip(), default_skip)))
             it = ws.iter_rows(values_only=True)
             for _ in range(n_skip):                  # 跳过表头前的标题行
@@ -112,6 +120,14 @@ async def parse_upload_raw(request, sheet_names=None) -> tuple[str, dict[str, li
         for ws in wb.worksheets:
             if wanted is not None and ws.title.strip() not in wanted:
                 continue
+            # 不信任 sheet XML 里的 <dimension> 声明：部分导出系统（SheetJS 系，如
+            # 装机/投诉综合查询导出件）会写入失实声明（<dimension ref="A1"/>），
+            # read_only 模式下 openpyxl 以 dimension 作为迭代行/列上界，导致只读出
+            # 首行首列、真实数据全部丢失（表现为上传后无预览、400「sheet 未解析到
+            # 数据行」）。reset_dimensions() 是 openpyxl 针对该场景的官方处理：清空
+            # 失实尺寸，按 XML 实际内容流式输出；对 dimension 声明过大（如 1048576
+            # 行）的文件同样受益——不再填充海量空行。
+            ws.reset_dimensions()
             out[ws.title] = [tuple(r) for r in ws.iter_rows(values_only=True)]
         wb.close()
         return filename, out
