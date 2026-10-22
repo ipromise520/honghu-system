@@ -49,11 +49,13 @@ SYNC_MODULES = {
                         "note": "实时数据（比宽表早约2小时）；白名单解析「家宽投诉综合工单列表」sheet；month 从投诉时间推导；按月替换"},
     "h5_survey": {"name": "H5满意度通报", "target": "h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores",
                   "columns": ["新版导出：装机/投诉参与率（人员）+ 装机/投诉回单 + 装机/投诉H5回复详单",
+                              "混合导出（无参与率sheet）：装机/投诉回单 + 装机/投诉H5回复详单 + H5数据统计 + 累计低分核实",
                               "旧版导出：H5数据统计（区县汇总）+ 装机/投诉H5回复详单 + 累计装机/投诉低分核实"],
-                  "note": "集团大音平台装维H5满意度通报；「H5参与率通报」图1 人员明细必须使用「装维H5满意度参与率」导出"
-                      "（含「装机参与率」「投诉参与率」sheet，人员粒度）；旧版「装维H5满意度（集团大音平台)」导出"
-                      "仅含「H5数据统计」区县汇总（无人员明细、仅当月），上传时预览会给出告警；"
-                      "新版导出由本地聚合出区县汇总（当日/当月）与人员参与率明细"
+                  "note": "集团大音平台装维H5满意度通报；「H5参与率通报」图1 人员明细需上传含人员粒度数据的导出："
+                      "「装维H5满意度参与率」导出（含「装机参与率」「投诉参与率」sheet），或含「装机回单」「投诉回单」"
+                      "sheet 的导出（系统按「区县×人员」聚合回单量与测评量成明细，与平台「H5数据统计」统计块逐格吻合）；"
+                      "旧版「装维H5满意度（集团大音平台)」导出仅含「H5数据统计」区县汇总（无人员明细、仅当月），"
+                      "上传时预览会给出告警；区县汇总（当日/当月）与人员参与率明细均由本地聚合"
                       "（满意度=0.4×Q1+0.2×Q2+0.4×Q3），驱动「H5参与率通报」页面与首页「重要通报 → H5满意度」卡片；"
                       "四表全量替换，保留最新快照"},
     "ai_visit": {"name": "AI装维即访", "target": "ai_visit_issues（不规范明细） + ai_visit_stats（规范率通报）",
@@ -264,8 +266,11 @@ def _xround(v: float) -> int:
 
 
 def _person_key(name) -> str:
-    """人员匹配键：剥「第三方」/任意区县前缀与括号备注（跨区县工单的人员名也归一）"""
+    """人员匹配键：剥「第三方」/任意区县前缀、括号备注与「-手机号」后缀
+    （跨表匹配需归一：投诉回单「最终回单人员」为「区县姓名-手机号」，
+    而详单「装维人员姓名」为「区县姓名」，不归一会把同一人拆成两行）"""
     n = _strip_district_prefix(name, "")
+    n = re.sub(r"-\d{6,}$", "", n)
     for p in ("第三方", "沙市区", "荆州区", "公安县", "监利市", "江陵县", "石首市", "洪湖市", "松滋市", "荆州开发区"):
         if n.startswith(p) and len(n) > len(p):
             n = n[len(p):]
@@ -273,13 +278,93 @@ def _person_key(name) -> str:
     return n.strip()
 
 
-def _normalize_h5_survey(sheets: dict, data_date: str = "") -> list[dict]:
-    """H5满意度通报双格式兼容（带 _kind，供 confirm 分表入库）：
-    - 新版导出（2026-10 起，含「装机/投诉参与率」人员 sheet）→ v2 本地聚合
-    - 旧版导出（含「H5数据统计」区县汇总 sheet）→ v1 原逻辑
+# 区县别名/角色后缀归一（投诉回单无独立区县列，区县藏在「最终回单角色」如「监利县装维人员」里；
+# 2026-10-21 混合格式实测全部取值：{区县}{网格长?}装维人员/装维管理员 + 「经开区」简称 + 「监利县」旧称）
+_H5_DISTRICT_ALIAS = {"监利县": "监利市", "经开区": "荆州开发区"}
+_H5_ROLE_SUFFIX = ("网格长装维人员", "装维管理员", "装维人员", "网格长")
+
+
+def _h5_norm_district(v) -> str:
+    """区县列归一：「监利县装维人员」「沙市区网格长装维人员」「经开区装维人员」→ 裸区县名；
+    已是裸区县名（如装机回单「区县」列）原样返回。"""
+    s = _hs(v)
+    if not s:
+        return ""
+    for suf in _H5_ROLE_SUFFIX:
+        if s.endswith(suf) and len(s) > len(suf):
+            s = s[: -len(suf)]
+            break
+    s = s.strip()
+    return _H5_DISTRICT_ALIAS.get(s, s)
+
+
+def _h5_survey_fmt(sheets: dict) -> str:
+    """导出格式识别（三种变体文件名相同，只能按 sheet 构成区分）：
+    - new：含「装机/投诉参与率」人员 sheet（2026-10-19 新版）
+    - mix：无参与率 sheet，但含「装机/投诉回单」+ 详单（2026-10-21 混合变体，可聚合出人员明细）
+    - old：仅「H5数据统计」区县汇总 + 详单 + 低分核实（无人员粒度，图1 必然为空）
     """
     if sheets.get("装机参与率") or sheets.get("投诉参与率"):
+        return "new"
+    if sheets.get("装机回单") or sheets.get("投诉回单"):
+        return "mix"
+    return "old"
+
+
+def _h5_synth_participation(sheets: dict) -> tuple[list[dict], list[dict]]:
+    """混合变体（无「装机/投诉参与率」sheet）→ 按「区县×人员」聚合出人员粒度参与率表
+    （区县/装维人员/回单量/H5测评量），使 v2 的区县汇总与人员明细逻辑原样复用：
+    - 回单量 ← 「装机/投诉回单」行数（当月累计；装机取「区县」列，投诉取「最终回单角色」前缀归一）
+    - H5测评量 ← 「装机/投诉H5回复详单」行数（当月累计）
+    10-21 实测与平台自带「H5数据统计」统计块合计精确一致：装机当月 7491/2015（洪湖 762/217）、
+    当日 410/125；投诉当月 1362/331、当日 64/16（回单/详单均无缺失人员行，合计无损；
+    投诉分区县按「最终回单角色」前缀归属，与平台统计存在 ≤3 单的分区县偏差，装机侧逐格吻合）。"""
+    back: dict = {}   # (kind, district, key) -> n
+    for sheet, kind, dcol, pcol in (("装机回单", "装机", "区县", "回单人员"),
+                                    ("投诉回单", "投诉", "最终回单角色", "最终回单人员")):
+        for r in sheets.get(sheet) or []:
+            d = _h5_norm_district(r.get(dcol))
+            if d not in _JZ_SET:
+                continue
+            k = _person_key(r.get(pcol))
+            if not k:
+                continue
+            back[(kind, d, k)] = back.get((kind, d, k), 0) + 1
+    ev: dict = {}     # (kind, district, key) -> n
+    for sheet, kind in (("装机H5回复详单", "装机"), ("投诉H5回复详单", "投诉")):
+        for r in sheets.get(sheet) or []:
+            d = _hs(_hcol(r, "区县名称", "区县名称(TCountyName)"))
+            if d not in _JZ_SET:
+                continue
+            k = _person_key(_hcol(r, "装维人员姓名(ServStaffName)"))
+            if not k:
+                continue
+            ev[(kind, d, k)] = ev.get((kind, d, k), 0) + 1
+
+    def _rows(kind: str) -> list[dict]:
+        keys = {k[1:] for k in back if k[0] == kind} | {k[1:] for k in ev if k[0] == kind}
+        return [{"区县": d, "装维人员": key,
+                 "回单量": back.get((kind, d, key), 0), "H5测评量": ev.get((kind, d, key), 0)}
+                for (d, key) in sorted(keys)]
+
+    return _rows("装机"), _rows("投诉")
+
+
+def _normalize_h5_survey(sheets: dict, data_date: str = "") -> list[dict]:
+    """H5满意度通报三格式兼容（带 _kind，供 confirm 分表入库）：
+    - 新版导出（含「装机/投诉参与率」人员 sheet）→ v2 本地聚合
+    - 混合导出（无参与率 sheet，含「装机/投诉回单」+详单）→ 聚合出参与率表后走 v2，并保留低分核实
+    - 旧版导出（含「H5数据统计」区县汇总 sheet）→ v1 原逻辑
+    """
+    fmt = _h5_survey_fmt(sheets)
+    if fmt == "new":
         return _normalize_h5_survey_v2(sheets, data_date)
+    if fmt == "mix":
+        sheets = dict(sheets)
+        sheets["装机参与率"], sheets["投诉参与率"] = _h5_synth_participation(sheets)
+        out = _normalize_h5_survey_v2(sheets, data_date)
+        out.extend(_h5_survey_lows(sheets))   # 混合变体仍带「累计装机/投诉低分核实」sheet
+        return out
     return _normalize_h5_survey_v1(sheets)
 
 
@@ -352,6 +437,13 @@ def _normalize_h5_survey_v1(sheets: dict) -> list[dict]:
     # ---- 2) 测评明细：装机/投诉 H5 回复详单 ----
     out.extend(_h5_survey_records(sheets))
     # ---- 3) 低分核实明细 ----
+    out.extend(_h5_survey_lows(sheets))
+    return out
+
+
+def _h5_survey_lows(sheets: dict) -> list[dict]:
+    """低分核实明细（旧版/混合格式共用：「累计装机/投诉低分核实」sheet）"""
+    out: list[dict] = []
     for kind, sh in (("装机", "累计装机低分核实"), ("投诉", "累计投诉低分核实")):
         for r in sheets.get(sh) or []:
             if not _hs(r.get("工单号")):
@@ -432,7 +524,7 @@ def _normalize_h5_survey_v2(sheets: dict, data_date: str = "") -> list[dict]:
             ("装机回单", "装机", "区县", "回单人员", "网格", "回单时间", None),
             ("投诉回单", "投诉", "最终回单角色", "最终回单人员", "最终回单网格", "回单时间", "当前处理人")):
         for r in sheets.get(sheet) or []:
-            d = _hs(r.get(dcol))
+            d = _h5_norm_district(r.get(dcol))
             if d not in _JZ_SET:
                 continue
             back_cnt[(d, kind, "当月")] = back_cnt.get((d, kind, "当月"), 0) + 1
@@ -957,16 +1049,17 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
                                        "（含「H5数据统计」或「装机/投诉参与率」等 sheet）")
         jz_rate = next((r["join_rate"] for r in rows if r["_kind"] == "district" and r["kind"] == "装机"
                         and r["period"] == "当月" and r["district"] == "洪湖市"), None)
-        # 格式识别：新版导出含人员粒度「装机/投诉参与率」sheet（可产出图1 人员明细）；
-        # 旧版导出仅「H5数据统计」区县汇总（无人员粒度），入库后「H5参与率通报」图1 将为空。
-        # 两种格式文件名都可能是「装维H5满意度（集团大音平台).xlsx」，无法从文件名区分，
-        # 故在上传预览即带告警，避免「确认入库后图1 空白」再次发生（2026-10-22 用户反馈）。
-        survey_fmt = "new" if (sheets.get("装机参与率") or sheets.get("投诉参与率")) else "old"
+        # 格式识别（三种变体文件名相同，按 sheet 构成区分）：new=含人员粒度「装机/投诉参与率」；
+        # mix=无参与率 sheet 但含「装机/投诉回单」+详单（可按人员聚合出图1 明细，2026-10-21 混合变体）；
+        # old=仅「H5数据统计」区县汇总（无人员粒度），入库后图1 将为空——上传预览即告警，
+        # 避免「确认入库后图1 空白」再次发生（2026-10-22 用户反馈）。
+        survey_fmt = _h5_survey_fmt(sheets)
         warn = ""
         if survey_fmt == "old":
-            warn = ("当前文件为旧版导出格式（「H5数据统计」区县汇总），无人员粒度数据："
-                    "入库后「H5参与率通报」图1 人员明细将为空、图2 仅有当月汇总。"
-                    "请改传「装维H5满意度参与率」导出（含「装机参与率」「投诉参与率」sheet）后再确认入库。")
+            warn = ("当前文件为旧版导出格式（仅「H5数据统计」区县汇总 + 详单 + 低分核实，无「装机/投诉回单」sheet），"
+                    "无人员粒度数据：入库后「H5参与率通报」图1 人员明细将为空、图2 仅有当月汇总。"
+                    "请改传「装维H5满意度参与率」导出（含「装机参与率」「投诉参与率」sheet），"
+                    "或含「装机回单」「投诉回单」sheet 的导出（系统可按人员聚合成明细）后再确认入库。")
         extra = {"districts": n_dist, "records": n_rec, "staff": n_staff, "lows": n_low,
                  "join_rate": f"{jz_rate}%" if jz_rate is not None else "",
                  "data_date": data_date, "format": survey_fmt, "warn": warn}
