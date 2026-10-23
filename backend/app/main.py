@@ -18,7 +18,7 @@ from app.database import engine, SessionLocal, Base
 from app.seed import seed
 from app.routers import auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users, alerts, honghu
 
-app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.2.0",
+app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.3.0",
               docs_url="/docs" if DOCS_ENABLED else None,
               redoc_url="/redoc" if DOCS_ENABLED else None,
               openapi_url="/openapi.json" if DOCS_ENABLED else None)
