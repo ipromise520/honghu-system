@@ -287,11 +287,57 @@ function cellCls(col, row) {
 }
 
 async function shot(el, name) {
-  const canvas = await html2canvas(el, { backgroundColor: '#ffffff', scale: 2, useCORS: true })
-  const a = document.createElement('a')
-  a.download = name
-  a.href = canvas.toDataURL('image/png')
-  a.click()
+  // html2canvas 宽表导出加固（避免勾选「显示奖励列」后导出的图片缺少右侧奖励列）：
+  // 1) windowWidth/Height 显式按元素滚动尺寸指定——默认按 window.innerWidth 布局，宽表右侧列会被裁掉；
+  // 2) onclone 放开祖先滚动容器 overflow——防止 .scroll-x 的横向裁剪；
+  // 3) 导出期间把表格切为 fixed 布局并按当前列宽固化（colgroup）——消除克隆文档中 auto 布局重排导致的末列丢失；
+  // 4) scrollX/Y 归零，避免窗口滚动偏移。
+  el.setAttribute('data-shot-root', '1')
+  const tables = Array.from(el.querySelectorAll('table'))
+  const backups = tables.map(t => {
+    const ths = Array.from(t.querySelectorAll('thead th'))
+    const colWs = ths.map(th => th.offsetWidth)
+    const tblW = t.offsetWidth
+    const cg = document.createElement('colgroup')
+    colWs.forEach(w => {
+      const col = document.createElement('col')
+      col.style.width = w + 'px'
+      cg.appendChild(col)
+    })
+    t.insertBefore(cg, t.firstChild)
+    return { t, cg, tblW, layout: t.style.tableLayout, width: t.style.width }
+  })
+  backups.forEach(b => { b.t.style.tableLayout = 'fixed'; b.t.style.width = b.tblW + 'px' })
+  try {
+    const canvas = await html2canvas(el, {
+      backgroundColor: '#ffffff', scale: 2, useCORS: true,
+      width: el.scrollWidth, height: el.scrollHeight,
+      windowWidth: el.scrollWidth, windowHeight: el.scrollHeight,
+      scrollX: 0, scrollY: 0,
+      onclone: (doc) => {
+        const root = doc.querySelector('[data-shot-root]')
+        let p = root && root.parentElement
+        while (p && p !== doc.body) {
+          p.style.overflowX = 'visible'
+          p.style.overflowY = 'visible'
+          p.style.maxWidth = 'none'
+          p.style.width = 'auto'
+          p = p.parentElement
+        }
+      },
+    })
+    const a = document.createElement('a')
+    a.download = name
+    a.href = canvas.toDataURL('image/png')
+    a.click()
+  } finally {
+    backups.forEach(b => {
+      b.cg.remove()
+      b.t.style.tableLayout = b.layout
+      b.t.style.width = b.width
+    })
+    el.removeAttribute('data-shot-root')
+  }
 }
 async function exportFig1() {
   if (!fig1.value.rows.length) {
@@ -301,7 +347,7 @@ async function exportFig1() {
   if (!fig1Ref.value) return
   busy1.value = true
   try {
-    await shot(fig1Ref.value, `H5参与率通报_图1_洪湖市明细_${meta.day_label}.png`)
+    await shot(fig1Ref.value, `H5参与率通报_图1_洪湖市明细_${meta.value.day_label}.png`)
     ElMessage.success('图1 通报图片已导出')
   } catch (e) { ElMessage.error('导出失败：' + (e?.message || e)) }
   finally { busy1.value = false }
@@ -310,7 +356,7 @@ async function exportFig2() {
   if (!fig2Ref.value) return
   busy2.value = true
   try {
-    await shot(fig2Ref.value, `H5参与率通报_图2_区县汇总_${meta.day_label}.png`)
+    await shot(fig2Ref.value, `H5参与率通报_图2_区县汇总_${meta.value.day_label}.png`)
     ElMessage.success('图2 通报图片已导出')
   } catch (e) { ElMessage.error('导出失败：' + (e?.message || e)) }
   finally { busy2.value = false }

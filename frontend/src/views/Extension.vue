@@ -74,7 +74,7 @@
       <el-table v-else :data="filteredTeam" size="small" max-height="520">
         <el-table-column type="index" label="#" width="50" />
         <el-table-column prop="district" label="区县" min-width="90" />
-        <el-table-column prop="position" label="岗位" min-width="90" />
+        <el-table-column prop="position" label="网格" min-width="90" />
         <el-table-column prop="people" label="人数" min-width="70" />
         <el-table-column prop="orders" label="单数" min-width="70" />
         <el-table-column prop="income" label="收入(元)" min-width="100" sortable />

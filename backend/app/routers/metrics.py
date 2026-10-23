@@ -1,8 +1,8 @@
 """指标计算 —— 竣工率 / 延伸服务 / 综合得分 / 短板分析（口径严格对齐开发手册 七、八）"""
-import re
 from collections import defaultdict
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func
+from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import COMPLETED_STATUS, PENDING_STATUS, TARGET_PER_PERSON
@@ -14,13 +14,8 @@ from ..deps import get_current_user, scope_district_ids, require_admin, get_role
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-# 服务端筛选：与前端 Dashboard 明细页过滤口径完全一致（布尔参数，True=隐藏该类）
-_DEFAULT_PAGE_SIZE = 500
-_MAX_PAGE_SIZE = 2000
-
 
 def _month_filter(col, month: str):
-    """无 month 列的旧表回退：字符串前缀匹配（走不了索引）"""
     return col.like(f"{month}%")
 
 
@@ -30,110 +25,11 @@ def _base_query(db: Session, user, month: str):
     q = (db.query(WorkOrder)
          .filter(WorkOrder.broadband_type == "个人",
                  ~WorkOrder.order_id.like("HB-%"),
-                 WorkOrder.month == month,
+                 _month_filter(WorkOrder.accept_time, month),
                  WorkOrder.district_id.isnot(None)))
     if ids is not None:
         q = q.filter(WorkOrder.district_id.in_(ids))
     return q
-
-
-def _has_work_orders(db: Session, month: str) -> bool:
-    return db.query(WorkOrder.id).filter(WorkOrder.month == month).first() is not None
-
-
-# 施工人字段常见前缀（区县名 / 第三方），规范化时剥离
-_HANDLER_PREFIXES = ("第三方", "沙市区", "荆州区", "公安县", "监利市", "江陵县",
-                     "石首市", "洪湖市", "松滋市", "荆州开发区")
-
-
-def _clean_handler(name) -> str:
-    """施工人字段规范化：'洪湖市代月新(峰口网格)' → '代月新'
-    （与 sync._strip_district_prefix 同规则：先截括号备注、再剥区县前缀）"""
-    if not name:
-        return ""
-    name = str(name).strip()
-    m = re.match(r"^([^\(（]+)", name)
-    if m:
-        name = m.group(1).strip()
-    for p in _HANDLER_PREFIXES:
-        if name.startswith(p) and len(name) > len(p):
-            name = name[len(p):]
-            break
-    return name.strip()
-
-
-def _install_scope_filter(db: Session, user, month: str):
-    """装机宽表回退统计的基础过滤 + 区县权限（scope_district_ids 的 id → 宽表 district 名称）"""
-    q = db.query(InstallOrder).filter(InstallOrder.month == month, InstallOrder.district != "")
-    ids = scope_district_ids(user, db)
-    if ids is not None:
-        names = {d.name for d in db.query(District).filter(District.id.in_(ids)).all()}
-        q = q.filter(InstallOrder.district.in_(names))
-    return q
-
-
-def _rank(rows: list, rate_key="rate"):
-    rows.sort(key=lambda x: -x[rate_key])
-    for i, r in enumerate(rows, 1):
-        r["rank"] = i
-    return rows
-
-
-def _install_districts(db: Session, user, month: str) -> list:
-    """工单口径回退：当月无系统工单(work_orders)时，按装机宽表(InstallOrder)统计区县竣工率"""
-    q = _install_scope_filter(db, user, month)
-    rows = q.with_entities(InstallOrder.district, InstallOrder.status,
-                           func.count(InstallOrder.order_id)).group_by(
-        InstallOrder.district, InstallOrder.status).all()
-    agg = defaultdict(lambda: {"total": 0, "done": 0})
-    for name, status, cnt in rows:
-        agg[name]["total"] += cnt
-        if status in COMPLETED_STATUS:
-            agg[name]["done"] += cnt
-    districts = {d.name: d.id for d in db.query(District).all()}
-    out = [{"district_id": districts.get(name), "district": name,
-            "total": v["total"], "completed": v["done"],
-            "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
-           for name, v in agg.items()]
-    return _rank(out)
-
-
-def _install_users(db: Session, user, month: str, district: str = "") -> list:
-    """工单口径回退：当月无系统工单时，按装机宽表统计回单人员竣工率（不过滤离职，宽表即实际回单人）"""
-    q = _install_scope_filter(db, user, month)
-    if district:
-        q = q.filter(InstallOrder.district == district)
-    rows = q.with_entities(InstallOrder.handler, InstallOrder.status,
-                           func.count(InstallOrder.order_id)).group_by(
-        InstallOrder.handler, InstallOrder.status).all()
-    agg = defaultdict(lambda: {"total": 0, "done": 0})
-    for handler, status, cnt in rows:
-        if not handler:
-            continue
-        agg[handler]["total"] += cnt
-        if status in COMPLETED_STATUS:
-            agg[handler]["done"] += cnt
-    out = [{"handler": name, "total": v["total"], "completed": v["done"],
-            "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
-           for name, v in agg.items()]
-    return _rank(out)[:100]
-
-
-def _install_daily(db: Session, user, month: str) -> list:
-    """工单口径回退：当月无系统工单时，按装机宽表受理时间统计每日趋势"""
-    q = _install_scope_filter(db, user, month)
-    rows = q.with_entities(func.substr(InstallOrder.accept_time, 1, 10).label("day"),
-                           InstallOrder.status, func.count(InstallOrder.order_id)).group_by(
-        "day", InstallOrder.status).all()
-    agg = defaultdict(lambda: {"total": 0, "done": 0, "pending": 0})
-    for day, status, cnt in rows:
-        agg[day]["total"] += cnt
-        if status in COMPLETED_STATUS:
-            agg[day]["done"] += cnt
-        elif status in PENDING_STATUS:
-            agg[day]["pending"] += cnt
-    return [{"day": d, **v, "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
-            for d, v in sorted(agg.items())]
 
 
 # ---------------- 竣工率（手册 7.5 / 8.1） ----------------
@@ -141,9 +37,6 @@ def _install_daily(db: Session, user, month: str) -> list:
 @router.get("/completion-rate/districts")
 def completion_districts(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                          user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if not _has_work_orders(db, month):
-        # 当月无系统工单 → 回退装机宽表统计（上传装机宽表后此卡即有数）
-        return _install_districts(db, user, month)
     q = _base_query(db, user, month)
     rows = q.with_entities(WorkOrder.district_id, WorkOrder.status,
                            func.count(WorkOrder.id)).group_by(WorkOrder.district_id, WorkOrder.status).all()
@@ -168,8 +61,6 @@ def completion_districts(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
 def completion_users(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                      district: str = Query("", description="区县名过滤，空为全部"),
                      user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if not _has_work_orders(db, month):
-        return _install_users(db, user, month, district)
     q = _base_query(db, user, month)
     if district:
         dids = [d.id for d in db.query(District).filter(District.name == district).all()]
@@ -178,36 +69,28 @@ def completion_users(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                            func.count(WorkOrder.id)).group_by(WorkOrder.construction_dept, WorkOrder.status).all()
     agg = defaultdict(lambda: {"total": 0, "done": 0})
     for handler, status, cnt in rows:
-        name = _clean_handler(handler)
-        if not name:
+        if not handler:
             continue
-        agg[name]["total"] += cnt
+        agg[handler]["total"] += cnt
         if status in COMPLETED_STATUS:
-            agg[name]["done"] += cnt
-
-    def _build(only_active: bool) -> list:
-        out = []
-        for name, v in agg.items():
-            if only_active and name not in active_names:
-                continue
-            rate = v["done"] / v["total"] * 100 if v["total"] else 0
-            out.append({"handler": name, "total": v["total"],
-                        "completed": v["done"], "rate": round(rate, 2)})
-        return _rank(out)[:100]
-
-    # 离职过滤：仅保留在册人员（手册 8.1 fetch_inactive_handler_values）；
-    # 但用户表未覆盖装维人员时（实名只在工单里、不在 users 表）不过滤，
-    # 与 _install_users 宽表回退口径一致，避免人员卡整卡为空
+            agg[handler]["done"] += cnt
+    # 离职过滤：仅保留在册人员（手册 8.1 fetch_inactive_handler_values）
     active_names = {u.real_name for u in db.query(User).filter(User.is_active == True).all()}  # noqa: E712
-    out = _build(True)
-    return out if out else _build(False)
+    out = []
+    for name, v in agg.items():
+        if name not in active_names:
+            continue
+        rate = v["done"] / v["total"] * 100 if v["total"] else 0
+        out.append({"handler": name, "total": v["total"], "completed": v["done"], "rate": round(rate, 2)})
+    out.sort(key=lambda x: -x["rate"])
+    for i, r in enumerate(out, 1):
+        r["rank"] = i
+    return out[:100]
 
 
 @router.get("/completion-rate/daily")
 def completion_daily(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                      user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if not _has_work_orders(db, month):
-        return _install_daily(db, user, month)
     q = _base_query(db, user, month)
     rows = q.with_entities(func.substr(WorkOrder.accept_time, 1, 10).label("day"), WorkOrder.status,
                            func.count(WorkOrder.id)).group_by("day", WorkOrder.status).all()
@@ -227,7 +110,7 @@ def completion_daily(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
 def completion_outlets(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                        user=Depends(get_current_user), db: Session = Depends(get_db)):
     from ..models import CancelRescheduleOrder
-    q = db.query(WorkOrder).filter(WorkOrder.month == month,
+    q = db.query(WorkOrder).filter(_month_filter(WorkOrder.accept_time, month),
                                    WorkOrder.district_id.isnot(None))
     ids = scope_district_ids(user, db)
     if ids is not None:
@@ -235,7 +118,7 @@ def completion_outlets(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     rows = q.with_entities(WorkOrder.order_theme, func.count(WorkOrder.id)).group_by(WorkOrder.order_theme).all()
     cr_q = db.query(WorkOrder.order_theme, func.count()).join(
         CancelRescheduleOrder, CancelRescheduleOrder.order_id == WorkOrder.order_id).filter(
-        WorkOrder.month == month).group_by(WorkOrder.order_theme)
+        _month_filter(WorkOrder.accept_time, month)).group_by(WorkOrder.order_theme)
     cancel_map = dict(cr_q.all())
     return [{"outlet": t, "accepted": c, "cancelled": cancel_map.get(t, 0)} for t, c in rows]
 
@@ -244,7 +127,7 @@ def completion_outlets(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
 def cancel_reschedule(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                       user=Depends(get_current_user), db: Session = Depends(get_db)):
     from ..models import CancelRescheduleOrder, District
-    q = db.query(CancelRescheduleOrder).filter(CancelRescheduleOrder.month == month)
+    q = db.query(CancelRescheduleOrder).filter(_month_filter(CancelRescheduleOrder.accept_time, month))
     ids = scope_district_ids(user, db)
     if ids is not None:
         q = q.filter(CancelRescheduleOrder.district_id.in_(ids))
@@ -266,7 +149,7 @@ def completion_report(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     """竣工率激励通报分析（数据来自上传的通报表「激励明细」，人员粒度按月替换）"""
     # 数据截止时间：工单口径取当月最大受理时间；通报取最近一次入库时间
     latest_order_time = db.query(func.max(WorkOrder.accept_time)).filter(
-        WorkOrder.month == month).scalar() or ""
+        _month_filter(WorkOrder.accept_time, month)).scalar() or ""
     up_job = db.query(SyncJob).filter(SyncJob.metric == "completion_rate",
                                       SyncJob.confirmed_at.isnot(None)).order_by(
         SyncJob.confirmed_at.desc()).first()
@@ -317,317 +200,274 @@ def completion_report(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             "districts": districts, "personal": personal}
 
 
-# ---------------- 竣工率盯控（装机宽表维度指标 + 短信情况） ----------------
-
-def _yes_rate(rows, field: str) -> dict:
-    """及时类文本列的及时率：兼容「是/否」与「及时/不及时」两种口径；
-    其余非空取值（如「无首联」）计入 other，不计入分母；空值计入 blank"""
-    yes = no = blank = other = 0
-    for r in rows:
-        v = str(getattr(r, field) or "").strip()
-        if not v:
-            blank += 1
-        elif v in ("是", "及时"):
-            yes += 1
-        elif v in ("否", "不及时"):
-            no += 1
-        else:
-            other += 1
-    denom = yes + no
-    return {"rate": round(yes / denom * 100, 1) if denom else None,
-            "yes": yes, "no": no, "blank": blank, "other": other, "total": len(rows)}
-
-
-def _num_or_none(v):
-    try:
-        f = float(v)
-        return f if f == f else None
-    except (TypeError, ValueError):
-        return None
-
-
-@router.get("/completion-rate/monitor")
-def completion_monitor(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
-                       district: str = Query("", description="区县名过滤，空为全部"),
-                       user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """竣工率盯控：基于装机宽表(InstallOrder)当月数据的维度指标（及时性/进度/质量/风险）+ 短信情况。
-    数据来自「数据同步 → 装机宽表」上传的宽表查询文件；短信情况暂无短信平台数据源，以场景估算呈现。"""
-    q = db.query(InstallOrder).filter(InstallOrder.month == month, InstallOrder.district != "")
-    if district:
-        q = q.filter(InstallOrder.district == district)
-    rows = q.all()
-    if not rows:
-        return {"has_data": False, "month": month}
-
-    # ---- 及时性 ----
-    timeliness = {
-        "rate_24h": _yes_rate(rows, "is_24h"),
-        "rate_8h": _yes_rate(rows, "is_8h"),
-        "first_contact": _yes_rate(rows, "first_contact_timely"),
-        "visit_timely": _yes_rate(rows, "visit_timely"),
-        "perform": _yes_rate(rows, "is_perform"),
-    }
-    # ---- 进度 ----
-    done = sum(1 for r in rows if r.status == "已施工")
-    inst_durs = [_num_or_none(r.install_duration) for r in rows]
-    inst_durs = [d for d in inst_durs if d is not None]
-    comp_durs = [_num_or_none(r.completion_duration) for r in rows]
-    comp_durs = [d for d in comp_durs if d is not None]
-    progress = {
-        "orders": len(rows), "done": done,
-        "done_rate": round(done / len(rows) * 100, 1),
-        "avg_install_duration": round(sum(inst_durs) / len(inst_durs), 1) if inst_durs else None,
-        "avg_completion_duration": round(sum(comp_durs) / len(comp_durs), 1) if comp_durs else None,
-        "duration_unit": "分钟（宽表原值）",
-    }
-    # ---- 质量 ----
-    h5_vals = [_num_or_none(r.h5_satisfaction) for r in rows]
-    h5_vals = [v for v in h5_vals if v is not None]
-    ai_unsat = sum(1 for r in rows if "不满意" in str(r.ai_result or ""))
-    zongdiao = defaultdict(int)
-    city = defaultdict(int)
-    for r in rows:
-        zongdiao[str(r.zongdiao_result or "空")] += 1
-        city[str(r.city_result or "空")] += 1
-    quality = {
-        "h5_avg": round(sum(h5_vals) / len(h5_vals), 2) if h5_vals else None,
-        "h5_cnt": len(h5_vals),
-        "ivr_pass": _yes_rate(rows, "ivr_pass"),
-        "ivr_satisfied": _yes_rate(rows, "ivr_satisfied"),
-        "ai_unsat": ai_unsat,
-        "zongdiao_top": sorted(zongdiao.items(), key=lambda x: -x[1])[:3],
-        "city_top": sorted(city.items(), key=lambda x: -x[1])[:3],
-    }
-    # ---- 风险 ----
-    urge_rows = [r for r in rows if (r.urge_cnt or 0) > 0]
-    urge_total = sum(r.urge_cnt or 0 for r in rows)
-    refund_rows = [r for r in rows if str(r.is_refund or "") == "是"]
-    reasons = defaultdict(int)
-    for r in refund_rows:
-        reasons[str(r.refund_reason or "未填原因")] += 1
-    risk = {
-        "urge_orders": len(urge_rows),
-        "urge_rate": round(len(urge_rows) / len(rows) * 100, 1),
-        "urge_total": urge_total,
-        "refund_orders": len(refund_rows),
-        "refund_rate": round(len(refund_rows) / len(rows) * 100, 1),
-        "top_refund_reasons": [{"reason": k, "count": v}
-                               for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:5]],
-    }
-    # ---- 短信情况（暂无短信平台数据源 → 场景估算）----
-    urge_no_revisit = sum(1 for r in urge_rows if not str(r.revisit_time or ""))
-    sms = {
-        "has_source": False,
-        "note": "两表均无短信平台字段，以下为基于装机宽表的「应提醒场景」估算（非短信实际发送统计）；"
-                "接入短信平台导出后可展示真实发送量/到达率/回复率。",
-        "scenes": [
-            {"scene": "超24小时未及时（应提醒督办）", "count": timeliness["rate_24h"]["no"]},
-            {"scene": "首联不及时（应提醒首联）", "count": timeliness["first_contact"]["no"]},
-            {"scene": "无首联（应提醒补首联）", "count": timeliness["first_contact"]["other"]},
-            {"scene": "催单后未回访（应提醒回访）", "count": urge_no_revisit},
-            {"scene": "退单工单（应提醒退单确认）", "count": len(refund_rows)},
-        ],
-    }
-    # 区县分布（供卡片下钻）
-    by_district = defaultdict(lambda: {"orders": 0, "done": 0, "refund": 0, "urge": 0})
-    for r in rows:
-        a = by_district[r.district or "未知"]
-        a["orders"] += 1
-        if r.status == "已施工":
-            a["done"] += 1
-        if str(r.is_refund or "") == "是":
-            a["refund"] += 1
-        if (r.urge_cnt or 0) > 0:
-            a["urge"] += 1
-    districts = [{"district": d, **v,
-                  "done_rate": round(v["done"] / v["orders"] * 100, 1) if v["orders"] else 0}
-                 for d, v in by_district.items()]
-    districts.sort(key=lambda x: -x["orders"])
-    return {"has_data": True, "month": month,
-            "scope": {"orders": len(rows), "districts": len(by_district),
-                      "district_filter": district or "全部"},
-            "timeliness": timeliness, "progress": progress, "quality": quality,
-            "risk": risk, "sms": sms, "by_district": districts}
-
-
 # ---------------- 宽表数据聚合（装机宽表 + 投诉宽表） ----------------
 
-def _district_key(col):
-    """区县分组键：NULL/空串归一为「未知」（与原 Python 端 r.district or "未知" 一致）"""
-    return func.coalesce(func.nullif(col, ""), "未知")
+# ---- 洪湖市 7 标准网格映射（子网格 → 标准网格） ----
+_HONGHU_GRID_MAP = {
+    "洪湖城区网格": "洪湖城区网格",
+    "洪湖荷花网格": "洪湖城区网格",
+    "洪湖柏枝网格": "洪湖柏枝网格",
+    "洪湖文泉网格": "洪湖柏枝网格",
+    "洪湖峰口网格": "洪湖峰口网格",
+    "洪湖沙口网格": "洪湖峰口网格",
+    "洪湖万全网格": "洪湖峰口网格",
+    "洪湖瞿家湾网格": "洪湖峰口网格",
+    "洪湖大同网格": "洪湖大同网格",
+    "洪湖乌林网格": "洪湖大同网格",
+    "洪湖老湾网格": "洪湖大同网格",
+    "洪湖新滩网格": "洪湖大同网格",
+    "洪湖曹市网格": "洪湖曹市网格",
+    "洪湖府场网格": "洪湖曹市网格",
+    "洪湖戴家场网格": "洪湖曹市网格",
+    "洪湖大沙网格": "洪湖大沙网格",
+    "洪湖龙口网格": "洪湖大沙网格",
+    "洪湖燕窝网格": "洪湖大沙网格",
+    "洪湖滨湖网格": "洪湖滨湖网格",
+    "洪湖汊河网格": "洪湖滨湖网格",
+    "洪湖螺山网格": "洪湖滨湖网格",
+    "洪湖小港网格": "洪湖滨湖网格",
+    "洪湖黄家口网格": "洪湖滨湖网格",
+}
 
 
-def _day_key(col):
-    """按天分组键：substr(accept_time,1,10)"""
-    return func.substr(col, 1, 10)
+def _std_grid(grid: str, district: str = "") -> str:
+    """只对洪湖市做 7 标准网格归并，其他区县原样返回"""
+    if district != "洪湖市" or not grid:
+        return grid
+    return _HONGHU_GRID_MAP.get(grid, grid)
 
 
-@router.get("/wide/summary")
-def wide_summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
-                 district: str = Query("", description="区县名过滤，空为全部"),
-                 user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """基于装机宽表(InstallOrder)+投诉宽表(ComplaintOrder)的当月汇总，供看板/竣工率/H5/退单页使用。
-
-    全部聚合下推 SQL（条件计数），不再把上万行 ORM 对象拉进内存。
-    """
+def _build_wide_summary(month: str, district: str, db: Session):
+    """宽表汇总核心逻辑"""
     iq = db.query(InstallOrder).filter(InstallOrder.month == month)
     cq = db.query(ComplaintOrder).filter(ComplaintOrder.month == month)
     if district:
         iq = iq.filter(InstallOrder.district == district)
         cq = cq.filter(ComplaintOrder.district == district)
-    if not iq.first() and not cq.first():
+    installs = iq.all()
+    complaints = cq.all()
+    if not installs and not complaints:
         return {"has_data": False, "month": month}
 
-    # ---- 装机总体（条件聚合一次扫描） ----
-    i_status = func.coalesce(InstallOrder.status, "")
-    i_theme = func.coalesce(InstallOrder.order_theme, "")
-    i_row = db.query(
-        func.count(InstallOrder.order_id),
-        func.sum(case((i_status == "已施工", 1), else_=0)),
-        func.sum(case((InstallOrder.is_refund == "是", 1), else_=0)),
-        # 待装口径与前端明细页过滤一致：非已施工、非退/撤、非延伸服务、非更换光猫
-        func.sum(case((i_status.like("已施工%"), 0),
-                      (i_status.like("%退%"), 0), (i_status.like("%撤%"), 0),
-                      (i_theme.like("%延伸服务%"), 0), (i_theme.like("%更换光猫%"), 0),
-                      else_=1)),
-        func.sum(case((InstallOrder.is_24h == "否", 1), else_=0)),
-        func.sum(case((InstallOrder.is_8h == "否", 1), else_=0)),
-        func.sum(case((InstallOrder.is_perform == "是", 1), else_=0)),
-        func.sum(case((InstallOrder.is_fttr == "是", 1), else_=0)),
-    ).filter(InstallOrder.month == month)
-    if district:
-        i_row = i_row.filter(InstallOrder.district == district)
-    (total, done, refund, pending, timeout_24h, timeout_8h,
-     perform, fttr) = i_row.one()
-    total = total or 0
-    done = int(done or 0); refund = int(refund or 0); pending = int(pending or 0)
-    timeout_24h = int(timeout_24h or 0); timeout_8h = int(timeout_8h or 0)
-    perform = int(perform or 0); fttr = int(fttr or 0)
+    # ---- 装机 ----
+    total = len(installs)
+    status_of = lambda r: r.status or ""
+    done = sum(1 for r in installs if status_of(r) == "已施工")
+    # 撤单/退单拆分（按 status 关键字，is_refund="是" 兜底）
+    cancel = sum(1 for r in installs if "撤" in status_of(r))
+    refund_only = sum(1 for r in installs if "退" in status_of(r) and "撤" not in status_of(r))
+    if cancel + refund_only == 0:
+        refund_total = sum(1 for r in installs if r.is_refund == "是")
+        cancel = refund_total  # 兜底：若 status 没细分，全部算撤单
+    refund = cancel + refund_only  # 退撤单合计
+    # 处理中：非已施工、非撤、非退、非延伸/换光猫
+    pending = sum(1 for r in installs
+                  if status_of(r) != "已施工"
+                  and "撤" not in status_of(r) and "退" not in status_of(r)
+                  and "延伸服务" not in (r.order_theme or "")
+                  and "更换光猫" not in (r.order_theme or ""))
     rate = round(done / total * 100, 1) if total else 0
+    refund_rate = round(refund / total * 100, 1) if total else 0
+    timeout_24h = sum(1 for r in installs if r.is_24h == "否")
+    timeout_8h = sum(1 for r in installs if r.is_8h == "否")
+    perform_yes = sum(1 for r in installs if r.is_perform == "是")
+    perform_no = sum(1 for r in installs if r.is_perform == "否")
+    perform = perform_yes
+    fttr = sum(1 for r in installs if r.is_fttr == "是")
 
-    # ---- 装机区县聚合 ----
-    dist_rows = db.query(
-        _district_key(InstallOrder.district).label("district"),
-        func.count(InstallOrder.order_id),
-        func.sum(case((InstallOrder.status == "已施工", 1), else_=0)),
-        func.sum(case((InstallOrder.is_refund == "是", 1), else_=0)),
-    ).filter(InstallOrder.month == month)
-    if district:
-        dist_rows = dist_rows.filter(InstallOrder.district == district)
-    by_district = [{"district": d, "total": t, "done": dn, "refund": rf,
-                    "rate": round(dn / t * 100, 1) if t else 0}
-                   for d, t, dn, rf in dist_rows.group_by(_district_key(InstallOrder.district)).all()]
+    # 区县聚合（保留）
+    dist_agg = defaultdict(lambda: {"total": 0, "done": 0, "refund": 0})
+    for r in installs:
+        d = dist_agg[r.district or "未知"]
+        d["total"] += 1; d["done"] += (1 if status_of(r) == "已施工" else 0)
+        d["refund"] += (1 if "退" in status_of(r) or "撤" in status_of(r) else 0)
+    by_district = [{"district": d, "total": a["total"], "done": a["done"], "refund": a["refund"],
+                    "rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0}
+                   for d, a in dist_agg.items()]
     by_district.sort(key=lambda x: -x["rate"])
     for i, d in enumerate(by_district, 1):
         d["rank"] = i
 
-    # ---- 装机人员聚合 ----
-    h_rows = db.query(
-        InstallOrder.handler,
-        func.count(InstallOrder.order_id),
-        func.sum(case((InstallOrder.status == "已施工", 1), else_=0)),
-    ).filter(InstallOrder.month == month,
-             func.coalesce(InstallOrder.handler, "") != "")
-    if district:
-        h_rows = h_rows.filter(InstallOrder.district == district)
-    by_handler = [{"handler": h, "total": t, "done": dn,
-                   "rate": round(dn / t * 100, 1) if t else 0}
-                  for h, t, dn in h_rows.group_by(InstallOrder.handler).all()]
+    # 人员聚合（保留）
+    handler_agg = defaultdict(lambda: {"total": 0, "done": 0})
+    for r in installs:
+        if not r.handler:
+            continue
+        a = handler_agg[r.handler]
+        a["total"] += 1; a["done"] += (1 if status_of(r) == "已施工" else 0)
+    by_handler = [{"handler": h, "total": a["total"], "done": a["done"],
+                   "rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0}
+                  for h, a in handler_agg.items()]
     by_handler.sort(key=lambda x: -x["done"])
 
-    # ---- 装机每日趋势 ----
-    d_rows = db.query(
-        _day_key(InstallOrder.accept_time).label("day"),
-        func.count(InstallOrder.order_id),
-        func.sum(case((InstallOrder.status == "已施工", 1), else_=0)),
-        func.sum(case((InstallOrder.is_refund == "是", 1), else_=0)),
-    ).filter(InstallOrder.month == month,
-             func.coalesce(InstallOrder.accept_time, "") != "")
-    if district:
-        d_rows = d_rows.filter(InstallOrder.district == district)
-    daily = [{"day": d, "total": t, "done": dn, "refund": rf,
-              "pending": t - dn - rf,
-              "rate": round(dn / t * 100, 1) if t else 0}
-             for d, t, dn, rf in d_rows.group_by(_day_key(InstallOrder.accept_time)).all()]
-    daily.sort(key=lambda x: x["day"])
+    # ---- 网格汇总（新，洪湖市按 7 标准网格归并） ----
+    grid_agg = defaultdict(lambda: {"total": 0, "done": 0, "cancel": 0, "refund_only": 0, "pending": 0})
+    for r in installs:
+        if not r.grid:
+            continue
+        g = grid_agg[_std_grid(r.grid, r.district)]
+        g["total"] += 1
+        s = status_of(r)
+        if s == "已施工":
+            g["done"] += 1
+        elif "撤" in s:
+            g["cancel"] += 1
+        elif "退" in s:
+            g["refund_only"] += 1
+        else:
+            g["pending"] += 1
+    by_grid = []
+    for g, a in sorted(grid_agg.items(), key=lambda x: -x[1]["done"]):
+        refund_g = a["cancel"] + a["refund_only"]
+        by_grid.append({
+            "grid": g, "total": a["total"], "done": a["done"],
+            "cancel": a["cancel"], "refund_only": a["refund_only"],
+            "pending": a["pending"], "refund_total": refund_g,
+            "completion_rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0,
+            "refund_rate": round(refund_g / a["total"] * 100, 1) if a["total"] else 0,
+        })
 
-    # ---- 退单原因 ----
-    rr_rows = db.query(
-        InstallOrder.refund_reason, func.count(InstallOrder.order_id),
-    ).filter(InstallOrder.month == month,
-             func.coalesce(InstallOrder.refund_reason, "") != "")
-    if district:
-        rr_rows = rr_rows.filter(InstallOrder.district == district)
-    refund_reasons = [{"reason": k, "count": c}
-                      for k, c in sorted(rr_rows.group_by(InstallOrder.refund_reason).all(),
-                                         key=lambda x: -x[1])]
+    # ---- 撤单分析-网格（新） ----
+    cancel_grid = []
+    for g, a in sorted(grid_agg.items(), key=lambda x: -x[1]["cancel"]):
+        refund_g = a["cancel"] + a["refund_only"]
+        cancel_grid.append({
+            "grid": g, "total": a["total"],
+            "cancel": a["cancel"],
+            "cancel_rate": round(a["cancel"] / a["total"] * 100, 1) if a["total"] else 0,
+            "refund_total": refund_g,
+            "cancel_share": round(a["cancel"] / refund_g * 100, 1) if refund_g else 0,
+        })
 
-    # ---- 投诉总体 ----
-    c_row = db.query(
-        func.count(ComplaintOrder.eoms_no),
-        func.sum(case((ComplaintOrder.is_solved == "已维修", 1), else_=0)),
-        func.sum(case((ComplaintOrder.is_24h == "否", 1), else_=0)),
-        func.sum(case((ComplaintOrder.is_8h == "否", 1), else_=0)),
-    ).filter(ComplaintOrder.month == month)
-    if district:
-        c_row = c_row.filter(ComplaintOrder.district == district)
-    c_total, solved, c_timeout_24h, c_timeout_8h = c_row.one()
-    c_total = c_total or 0
-    solved = int(solved or 0)
+    # ---- 撤单分析-人员 Top30（新） ----
+    person_agg = defaultdict(lambda: {"total": 0, "done": 0, "cancel": 0, "refund_only": 0, "pending": 0})
+    for r in installs:
+        if not r.handler:
+            continue
+        a = person_agg[r.handler]
+        a["total"] += 1
+        s = status_of(r)
+        if s == "已施工":
+            a["done"] += 1
+        elif "撤" in s:
+            a["cancel"] += 1
+        elif "退" in s:
+            a["refund_only"] += 1
+        else:
+            a["pending"] += 1
+    cancel_person = []
+    for h, a in sorted(person_agg.items(), key=lambda x: -x[1]["cancel"])[:30]:
+        refund_h = a["cancel"] + a["refund_only"]
+        cancel_person.append({
+            "handler": h, "total": a["total"], "done": a["done"],
+            "cancel": a["cancel"], "refund_only": a["refund_only"],
+            "pending": a["pending"],
+            "completion_rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0,
+            "cancel_rate": round(a["cancel"] / a["total"] * 100, 1) if a["total"] else 0,
+            "refund_rate": round(refund_h / a["total"] * 100, 1) if a["total"] else 0,
+        })
+
+    # ---- 装维人员履约 Top30（新） ----
+    perform_agg = defaultdict(lambda: {"done": 0, "perf_yes": 0, "perf_no": 0})
+    for r in installs:
+        if not r.handler or status_of(r) != "已施工":
+            continue
+        a = perform_agg[r.handler]
+        a["done"] += 1
+        if r.is_perform == "是":
+            a["perf_yes"] += 1
+        elif r.is_perform == "否":
+            a["perf_no"] += 1
+    total_done = sum(1 for r in installs if status_of(r) == "已施工") or 1
+    perform_person = []
+    for h, a in sorted(perform_agg.items(), key=lambda x: -x[1]["done"])[:30]:
+        perform_person.append({
+            "handler": h, "done": a["done"],
+            "perf_yes": a["perf_yes"], "perf_no": a["perf_no"],
+            "perform_rate": round(a["perf_yes"] / a["done"] * 100, 1) if a["done"] else 0,
+            "done_share": round(a["done"] / total_done * 100, 1),
+        })
+
+    # 每日趋势
+    daily_agg = defaultdict(lambda: {"total": 0, "done": 0, "refund": 0})
+    for r in installs:
+        day = r.accept_time[:10] if r.accept_time else ""
+        if not day:
+            continue
+        a = daily_agg[day]
+        a["total"] += 1; a["done"] += (1 if status_of(r) == "已施工" else 0)
+        a["refund"] += (1 if ("退" in status_of(r) or "撤" in status_of(r)) else 0)
+    daily = [{"day": d, "total": a["total"], "done": a["done"], "refund": a["refund"],
+              "pending": a["total"] - a["done"] - a["refund"],
+              "rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0}
+             for d, a in sorted(daily_agg.items())]
+
+    # 退单原因（一级 + 二级细分；按关键字归类前台 vs 用户）
+    reason_agg = defaultdict(int)
+    reason_category = defaultdict(int)   # 前台原因 vs 用户原因
+    for r in installs:
+        if not r.refund_reason:
+            continue
+        reason_agg[r.refund_reason] += 1
+        k = r.refund_reason
+        if "用户" in k or "不安装" in k or "拒接" in k:
+            reason_category["用户原因"] += 1
+        else:
+            reason_category["前台原因"] += 1
+    refund_reasons = [{"reason": k, "count": v} for k, v in sorted(reason_agg.items(), key=lambda x: -x[1])]
+    refund_reason_cat = [{"category": k, "count": v} for k, v in sorted(reason_category.items(), key=lambda x: -x[1])]
+
+    # ---- 投诉 ----
+    c_total = len(complaints)
+    solved = sum(1 for r in complaints if r.is_solved == "已维修")
     c_pending = c_total - solved
     c_rate = round(solved / c_total * 100, 1) if c_total else 0
-    c_timeout_24h = int(c_timeout_24h or 0); c_timeout_8h = int(c_timeout_8h or 0)
-
-    # ---- 投诉分类 ----
-    cat_rows = db.query(
-        ComplaintOrder.complaint_category, func.count(ComplaintOrder.eoms_no),
-    ).filter(ComplaintOrder.month == month,
-             func.coalesce(ComplaintOrder.complaint_category, "") != "")
-    if district:
-        cat_rows = cat_rows.filter(ComplaintOrder.district == district)
-    by_category = [{"category": k, "count": c}
-                   for k, c in sorted(cat_rows.group_by(ComplaintOrder.complaint_category).all(),
-                                      key=lambda x: -x[1])]
-
-    # ---- 投诉区县 ----
-    cd_rows = db.query(
-        _district_key(ComplaintOrder.district).label("district"),
-        func.count(ComplaintOrder.eoms_no),
-    ).filter(ComplaintOrder.month == month)
-    if district:
-        cd_rows = cd_rows.filter(ComplaintOrder.district == district)
-    c_by_district = [{"district": d, "count": c}
-                     for d, c in sorted(cd_rows.group_by(_district_key(ComplaintOrder.district)).all(),
-                                        key=lambda x: -x[1])]
-
-    # ---- 投诉处理人 ----
-    ch_rows = db.query(
-        ComplaintOrder.handler, func.count(ComplaintOrder.eoms_no),
-    ).filter(ComplaintOrder.month == month,
-             func.coalesce(ComplaintOrder.handler, "") != "")
-    if district:
-        ch_rows = ch_rows.filter(ComplaintOrder.district == district)
-    c_by_handler = [{"handler": h, "count": c}
-                    for h, c in sorted(ch_rows.group_by(ComplaintOrder.handler).all(),
-                                       key=lambda x: -x[1])]
-
-    # ---- 投诉每日 ----
-    cdly_rows = db.query(
-        _day_key(ComplaintOrder.accept_time).label("day"),
-        func.count(ComplaintOrder.eoms_no),
-    ).filter(ComplaintOrder.month == month,
-             func.coalesce(ComplaintOrder.accept_time, "") != "")
-    if district:
-        cdly_rows = cdly_rows.filter(ComplaintOrder.district == district)
-    c_daily = [{"day": d, "count": c}
-               for d, c in sorted(cdly_rows.group_by(_day_key(ComplaintOrder.accept_time)).all())]
+    c_timeout_24h = sum(1 for r in complaints if r.is_24h == "否")
+    c_timeout_8h = sum(1 for r in complaints if r.is_8h == "否")
+    cat_agg = defaultdict(int)
+    for r in complaints:
+        if r.complaint_category:
+            cat_agg[r.complaint_category] += 1
+    by_category = [{"category": k, "count": v} for k, v in sorted(cat_agg.items(), key=lambda x: -x[1])]
+    c_dist_agg = defaultdict(int)
+    for r in complaints:
+        c_dist_agg[r.district or "未知"] += 1
+    c_by_district = [{"district": d, "count": c} for d, c in sorted(c_dist_agg.items(), key=lambda x: -x[1])]
+    c_handler_agg = defaultdict(int)
+    for r in complaints:
+        if r.handler:
+            c_handler_agg[r.handler] += 1
+    c_by_handler = [{"handler": h, "count": c} for h, c in sorted(c_handler_agg.items(), key=lambda x: -x[1])]
+    c_daily_agg = defaultdict(int)
+    for r in complaints:
+        day = r.accept_time[:10] if r.accept_time else ""
+        if day:
+            c_daily_agg[day] += 1
+    c_daily = [{"day": d, "count": c} for d, c in sorted(c_daily_agg.items())]
 
     return {
         "has_data": True, "month": month,
-        "install": {"total": total, "done": done, "pending": pending, "refund": refund, "rate": rate,
-                    "timeout_24h": timeout_24h, "timeout_8h": timeout_8h, "perform": perform, "fttr": fttr,
-                    "by_district": by_district, "by_handler": by_handler, "daily": daily,
-                    "refund_reasons": refund_reasons},
+        "install": {
+            # 指标总览 8 卡
+            "total": total, "done": done, "cancel": cancel, "refund_only": refund_only,
+            "refund": refund, "pending": pending,
+            "rate": rate, "refund_rate": refund_rate,
+            "timeout_24h": timeout_24h, "timeout_8h": timeout_8h,
+            "perform": perform, "perform_yes": perform_yes, "perform_no": perform_no,
+            "fttr": fttr,
+            # 各维度聚合
+            "by_district": by_district,
+            "by_handler": by_handler,
+            "by_grid": by_grid,            # 网格汇总
+            "cancel_grid": cancel_grid,    # 撤单分析-网格
+            "cancel_person": cancel_person,  # 撤单分析-人员 Top30
+            "perform_person": perform_person,  # 装维履约 Top30
+            # 退单原因
+            "refund_reasons": refund_reasons,
+            "refund_reason_cat": refund_reason_cat,  # 前台原因 vs 用户原因
+            # 每日
+            "daily": daily,
+        },
         "complaint": {"total": c_total, "solved": solved, "pending": c_pending, "rate": c_rate,
                       "timeout_24h": c_timeout_24h, "timeout_8h": c_timeout_8h,
                       "by_category": by_category, "by_district": c_by_district,
@@ -635,62 +475,51 @@ def wide_summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     }
 
 
-# ---------------- 宽表明细（首页工单明细展示，服务端筛选 + 分页） ----------------
+@router.get("/wide/summary")
+def wide_summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+                 district: str = Query("", description="区县名过滤，空为全部"),
+                 user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """基于装机宽表(InstallOrder)+投诉宽表(ComplaintOrder)的当月汇总，供看板/竣工率/H5/退单页使用（兼容 GET）"""
+    return _build_wide_summary(month, district, db)
 
-def _apply_detail_filters(q, model, detail_type: str, hide_done: bool, hide_refund: bool,
-                          hide_ext: bool, hide_modem: bool, hide_hkbz: bool):
-    """明细过滤口径与前端 Dashboard 完全一致（hide_* = True 表示隐藏该类）"""
-    no_col = model.order_id if detail_type == "install" else model.eoms_no
-    theme_col = model.order_theme if detail_type == "install" else model.complaint_category
-    status_col = func.coalesce(model.status, "")
-    theme_expr = func.coalesce(theme_col, "")
-    if hide_hkbz:
-        q = q.filter(func.substr(no_col, 1, 7) != "HB-KHBZ")
-    if hide_done:
-        q = q.filter(status_col.notlike("%已施工%"))
-    if hide_refund and detail_type == "install":
-        q = q.filter(~(status_col.like("%退%") | status_col.like("%撤%")))
-    if hide_ext:
-        q = q.filter(theme_expr.notlike("%延伸服务%"))
-    if hide_modem and detail_type == "install":
-        q = q.filter(theme_expr.notlike("%更换光猫%"))
-    return q
 
+class _WideSummaryReq(BaseModel):
+    month: str
+    district: str = ""
+
+
+@router.post("/wide/summary")
+def wide_summary_post(req: _WideSummaryReq,
+                      user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """POST 版本：参数放 body，规避中文 query 被浏览器/uvicorn h11 拒绝的问题"""
+    return _build_wide_summary(req.month, req.district, db)
+
+
+# ---------------- 宽表明细（首页工单明细展示） ----------------
 
 @router.get("/wide/orders")
 def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                 type: str = Query("install", pattern="^(install|complaint)$"),
                 district: str = Query(""),
-                page: int = Query(1, ge=1),
-                page_size: int = Query(_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
-                hide_done: bool = Query(True),
-                hide_refund: bool = Query(True),
-                hide_ext: bool = Query(True),
-                hide_modem: bool = Query(True),
-                hide_hkbz: bool = Query(True),
+                limit: int = Query(20000, le=20000),
                 user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """宽表工单明细：装机/投诉按受理(投诉)时间倒序，服务端筛选 + 分页（不再一次性拉 2 万行）"""
+    """宽表工单明细：装机/投诉按受理(投诉)时间倒序"""
     if type == "complaint":
-        model = ComplaintOrder
-        pk_col = ComplaintOrder.eoms_no
-    else:
-        model = InstallOrder
-        pk_col = InstallOrder.order_id
-    q = db.query(model).filter(model.month == month)
-    if district:
-        q = q.filter(model.district == district)
-    q = _apply_detail_filters(q, model, type, hide_done, hide_refund, hide_ext, hide_modem, hide_hkbz)
-    total = q.count()
-    rows = (q.order_by(model.accept_time.desc(), pk_col.desc())
-            .offset((page - 1) * page_size).limit(page_size).all())
-    if type == "complaint":
-        return {"total": total, "rows": [{
+        q = db.query(ComplaintOrder).filter(ComplaintOrder.month == month)
+        if district:
+            q = q.filter(ComplaintOrder.district == district)
+        rows = q.order_by(ComplaintOrder.accept_time.desc()).limit(limit).all()
+        return {"rows": [{
             "no": r.eoms_no, "district": r.district, "accept_time": r.accept_time,
             "status": r.status, "handler": r.handler, "category": r.complaint_category,
             "is_solved": r.is_solved, "duration": r.order_duration,
             "appointment_time": r.appointment_time, "grid": r.grid,
             "is_high_quality": r.is_high_quality, "global_pass": r.global_pass} for r in rows]}
-    return {"total": total, "rows": [{
+    q = db.query(InstallOrder).filter(InstallOrder.month == month)
+    if district:
+        q = q.filter(InstallOrder.district == district)
+    rows = q.order_by(InstallOrder.accept_time.desc()).limit(limit).all()
+    return {"rows": [{
         "no": r.order_id, "district": r.district, "grid": r.grid,
         "accept_time": r.accept_time, "theme": r.order_theme, "status": r.status,
         "handler": r.handler, "completion_time": r.completion_time,
@@ -716,7 +545,7 @@ def get_ext_target(db: Session, month: str) -> float:
 def extension_target(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                      user=Depends(get_current_user), db: Session = Depends(get_db)):
     latest = db.query(func.max(ExtensionOrder.accept_time)).filter(
-        ExtensionOrder.month == month).scalar() or ""
+        _month_filter(ExtensionOrder.accept_time, month)).scalar() or ""
     return {"month": month, "target": get_ext_target(db, month), "default": TARGET_PER_PERSON,
             "latest": latest}
 
@@ -840,7 +669,7 @@ def district_ranking(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     receipts = {r[0]: r[1] for r in db.query(H5Receipt.order_no, H5Receipt.h5_received).all()}
     complaints = db.query(H5Complaint.eoms_order_no, H5Complaint.construction_dept_person).filter(
         H5Complaint.order_status == "已施工", H5Complaint.eoms_order_no.like("HB-058%"),
-        H5Complaint.month == month).all()
+        _month_filter(H5Complaint.accept_time, month)).all()
     comp_sent, comp_done = defaultdict(int), defaultdict(int)
     for no, person in complaints:
         comp_sent[person] += 1
@@ -848,7 +677,7 @@ def district_ranking(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             comp_done[person] += 1
     # 存量压降：处理中/待处理工单占比（低优）
     wo_q = db.query(WorkOrder.district_id, WorkOrder.status, func.count(WorkOrder.id)).filter(
-        WorkOrder.month == month, WorkOrder.district_id.isnot(None))
+        _month_filter(WorkOrder.accept_time, month), WorkOrder.district_id.isnot(None))
     ids = scope_district_ids(user, db)
     if ids is not None:
         wo_q = wo_q.filter(WorkOrder.district_id.in_(ids))

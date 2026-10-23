@@ -605,10 +605,7 @@ def h5_survey(user=Depends(get_current_user), db: Session = Depends(get_db)):
     """H5满意度通报（集团大音平台）：区县汇总 + 人员测评汇总 + 低分核实 + 快照信息"""
     from ..models import H5SurveyDistrict, H5SurveyRecord, H5LowScore
     from ..models import Setting
-    # 新版导出含「当日/当月」双周期行，Dashboard 汇总只用当月口径
-    dists = (db.query(H5SurveyDistrict)
-             .filter(H5SurveyDistrict.period == "当月")
-             .order_by(H5SurveyDistrict.id).all())
+    dists = db.query(H5SurveyDistrict).order_by(H5SurveyDistrict.id).all()
     recs = db.query(H5SurveyRecord).all()
     lows = db.query(H5LowScore).order_by(H5LowScore.id.desc()).all()
     # 人员测评汇总：姓名 → {装机测评/投诉测评/低分}；"开发区李平"等短前缀归一，与 h5staff 口径一致
@@ -649,9 +646,11 @@ def h5_survey(user=Depends(get_current_user), db: Session = Depends(get_db)):
 
 @router.get("/report-drill")
 def report_drill(kind: str = Query(...), district: str = Query(""), level: str = Query(""),
+                 show_done: bool = Query(False),
                  limit: int = Query(1000, le=2000),
                  user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """通报卡片下钻：untimely上门不及时 / timeout超时盯控 / complaint当日修不及时 / h5staff人员参评率 / dup广义重复 / global全球通投诉"""
+    """通报卡片下钻：untimely上门不及时 / timeout超时盯控 / complaint当日修不及时 / h5staff人员参评率 / dup广义重复 / global全球通投诉
+    global：默认只列「待施工」工单，show_done=true 时包含已完工"""
     if kind == "untimely":
         q = db.query(ReportWideOrder).filter(ReportWideOrder.visit_timely == "1")
         if district:
@@ -735,6 +734,8 @@ def report_drill(kind: str = Query(...), district: str = Query(""), level: str =
         elif level == "金":
             q = q.filter(ReportComplaintOrder.global_pass.like("%金卡%"),
                          ~ReportComplaintOrder.global_pass.like("%白金%"))
+        if not show_done:      # 默认只列待施工；勾选「显示已完工」后放开状态过滤
+            q = q.filter(ReportComplaintOrder.status.like("%待施工%"))
         if district:
             q = q.filter(ReportComplaintOrder.district == district)
         rows = q.order_by(ReportComplaintOrder.id.desc()).limit(limit).all()
@@ -789,14 +790,15 @@ def alert_summary(district: str = Query(""), user=Depends(get_current_user), db:
             for r in monitors if "告警" in (r.warn_level or "")]
 
     # 全球通客户投诉计数：来自最新【重要通报】受理明细（预警附件无全球通列）
+    # 口径：仅「待施工」工单；已完工工单通过下钻明细的「显示已完工」勾选查看
     cq = db.query(ReportComplaintOrder)
     if district:
         cq = cq.filter(ReportComplaintOrder.district == district)
-    gps = [r.global_pass or "" for r in cq.all()]
+    gps = [(r.global_pass or "", r.status or "") for r in cq.all()]
     global_cnt = {
-        "platinum": sum(1 for g in gps if "白金" in g),
-        "diamond": sum(1 for g in gps if "钻石" in g),
-        "gold": sum(1 for g in gps if "金卡" in g and "白金" not in g),
+        "platinum": sum(1 for g, s in gps if "白金" in g and "待施工" in s),
+        "diamond": sum(1 for g, s in gps if "钻石" in g and "待施工" in s),
+        "gold": sum(1 for g, s in gps if "金卡" in g and "白金" not in g and "待施工" in s),
         "total": len(gps),
     }
     return {

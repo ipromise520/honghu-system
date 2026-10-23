@@ -18,7 +18,7 @@ from app.database import engine, SessionLocal, Base
 from app.seed import seed
 from app.routers import auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users, alerts, honghu
 
-app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.1.0",
+app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.2.0",
               docs_url="/docs" if DOCS_ENABLED else None,
               redoc_url="/redoc" if DOCS_ENABLED else None,
               openapi_url="/openapi.json" if DOCS_ENABLED else None)
@@ -72,7 +72,7 @@ for r in [auth.router, dashboard.router, metrics.router, h5.router, work_orders.
     app.include_router(r, prefix="/api/v1")
 
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                             "frontend", "dist")
+                             "frontend", "dist-prod")
 
 # ---------------- 幂等迁移（create_all 只建新表，不会给已存在的表加列/加索引） ----------------
 

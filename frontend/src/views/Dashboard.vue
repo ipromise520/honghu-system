@@ -175,8 +175,8 @@
             <div class="stat-card red clickable" :class="{ active: alertType === 'book' }" @click="pickAlert('book')"><div class="label">预约异常</div><div class="value">{{ alertMeta.counts?.book ?? alertMeta.meta.book_abnormal }}<span class="unit">单</span></div><div class="sub">超时/临近/冲突</div></div>
             <div class="stat-card orange clickable" :class="{ active: alertType === 'monitor' && monitorLevel === '黄' }" @click="pickAlert('monitor', '黄')"><div class="label">黄色告警人员</div><div class="value">{{ alertMeta.counts?.warn_yellow ?? alertMeta.meta.warn_yellow }}<span class="unit">人</span></div><div class="sub">单量超负荷预警</div></div>
             <div class="stat-card red clickable" :class="{ active: alertType === 'monitor' && monitorLevel === '红' }" @click="pickAlert('monitor', '红')"><div class="label">红色告警人员</div><div class="value">{{ alertMeta.counts?.warn_red ?? alertMeta.meta.warn_red }}<span class="unit">人</span></div><div class="sub">需立即调单</div></div>
-            <div class="stat-card green clickable" @click="openDrill('global', { level: '白金' })"><div class="label">全球通-白金卡</div><div class="value">{{ alertMeta.global_cnt?.platinum ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报投诉 · 点击明细</div></div>
-            <div class="stat-card blue clickable" @click="openDrill('global', { level: '金' })"><div class="label">全球通-金卡</div><div class="value">{{ alertMeta.global_cnt?.gold ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报投诉 · 点击明细</div></div>
+            <div class="stat-card green clickable" @click="openDrill('global', { level: '白金' })"><div class="label">全球通-白金卡</div><div class="value">{{ alertMeta.global_cnt?.platinum ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报待施工 · 点击明细</div></div>
+            <div class="stat-card blue clickable" @click="openDrill('global', { level: '钻石' })"><div class="label">全球通-钻石</div><div class="value">{{ alertMeta.global_cnt?.diamond ?? 0 }}<span class="unit">单</span></div><div class="sub">当月通报待施工 · 点击明细</div></div>
           </div>
           <el-table v-if="alertType === 'install'" :data="alertRows" size="small" max-height="400">
             <el-table-column prop="district" label="区县" width="85" sortable />
@@ -480,6 +480,8 @@
                   title="参评率 = 该装维人员当月投诉工单中完成H5参评的比例；低于30%标红" />
         <el-alert v-if="drillKind === 'dup' && drillRows.length === 0 && !drillLoading" type="success" :closable="false"
                   title="当前区县无广义重复投诉工单" />
+        <el-checkbox v-if="drillKind === 'global'" v-model="drillShowDone" @change="reloadDrill"
+                     style="margin-bottom:8px">显示已完工</el-checkbox>
         <el-table v-if="drillKind === 'h5staff'" :data="drillRows" size="small" max-height="480">
           <el-table-column prop="staff" label="装维人员" min-width="110" sortable />
           <el-table-column prop="district" label="区县" width="100" sortable />
@@ -694,6 +696,7 @@ function buildCardsFromWide(wide) {
 
 function renderTrend(daily) {
   nextTick(() => {
+    if (!trendRef.value) return          // 组件已卸载（切走页面）：跳过渲染，避免对已 dispose 实例 setOption
     if (!chart) chart = echarts.init(trendRef.value)
     chart.setOption({
       tooltip: { trigger: 'axis' },
@@ -720,6 +723,7 @@ function renderComplaintCharts(wide) {
   const c = wide.complaint
   complaintDistricts.value = c.by_district
   nextTick(() => {
+    if (!catRef.value || !cDistRef.value) return   // 组件已卸载（切走页面）：跳过渲染
     if (!catChart) catChart = echarts.init(catRef.value)
     const topCat = c.by_category.slice(0, 6)
     catChart.setOption({
@@ -962,20 +966,22 @@ const DRILL_TITLES = {
   dup: '广义重复投诉工单明细',
   global: '',
 }
-const DRILL_LEVELS = { 白金: '全球通-白金卡投诉工单', 金: '全球通-金卡投诉工单', 钻石: '全球通-钻石卡投诉工单' }
+const DRILL_LEVELS = { 白金: '全球通-白金卡工单', 钻石: '全球通-钻石卡工单' }
 const drillVisible = ref(false)
 const drillLoading = ref(false)
 const drillKind = ref('timeout')
 const drillLevel = ref('')
 const drillRows = ref([])
+const drillShowDone = ref(false)   // 全球通明细「显示已完工」：默认不勾选（只列待施工）
 const drillTitle = computed(() =>
   drillKind.value === 'global'
-    ? `${DRILL_LEVELS[drillLevel.value] || '全球通投诉工单'}明细`
+    ? `${DRILL_LEVELS[drillLevel.value] || '全球通工单'}明细${drillShowDone.value ? '' : '（待施工）'}`
     : DRILL_TITLES[drillKind.value] || '明细')
 
 async function openDrill(kind, opt = {}) {
   drillKind.value = kind
   drillLevel.value = opt.level || ''
+  drillShowDone.value = false   // 每次打开重置：默认不勾选「显示已完工」
   // 预警区块的全球通卡片跟随预警区县筛选；通报卡片跟随顶部区县筛选
   const dist = kind === 'global' ? alertDistrict.value
     : (district.value === '全部' ? '' : district.value)
@@ -983,14 +989,30 @@ async function openDrill(kind, opt = {}) {
   drillLoading.value = true
   drillRows.value = []
   try {
-    const r = await api.get('/alerts/report-drill', { params: { kind, level: drillLevel.value, district: dist, limit: 1000 } })
+    const r = await api.get('/alerts/report-drill', { params: { kind, level: drillLevel.value, district: dist, show_done: drillShowDone.value, limit: 1000 } })
+    drillRows.value = r.rows || []
+  } catch (e) { drillRows.value = [] }
+  finally { drillLoading.value = false }
+}
+
+// 全球通明细：「显示已完工」勾选变化后重拉（跟随预警区县筛选）
+async function reloadDrill() {
+  if (drillKind.value !== 'global') return
+  drillLoading.value = true
+  drillRows.value = []
+  try {
+    const r = await api.get('/alerts/report-drill', { params: { kind: 'global', level: drillLevel.value, district: alertDistrict.value, show_done: drillShowDone.value, limit: 1000 } })
     drillRows.value = r.rows || []
   } catch (e) { drillRows.value = [] }
   finally { drillLoading.value = false }
 }
 
 onMounted(() => { load(); loadAlerts(); loadReport(); window.addEventListener('resize', onRz) })
-onBeforeUnmount(() => { window.removeEventListener('resize', onRz); chart?.dispose(); catChart?.dispose(); cDistChart?.dispose() })
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onRz)
+  chart?.dispose(); catChart?.dispose(); cDistChart?.dispose()
+  chart = catChart = cDistChart = null   // dispose 后置空：防止卸载竞态中的异步回调触达已销毁实例
+})
 </script>
 
 <style scoped>

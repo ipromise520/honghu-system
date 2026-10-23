@@ -5,3 +5,8 @@ frontend/dist/
 backend/honghu_new.db
 backend/honghu_new.db-wal
 backend/honghu_new.db-shm
+*.bak-*
+frontend/dist-prod/
+frontend/dist.bak-*/
+backend/logs/
+frontend/assets.syncbak-*/
