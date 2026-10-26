@@ -225,7 +225,17 @@ def health():
 
 
 if os.path.isdir(FRONTEND_DIST):
-    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+    class _NoCacheStatic(StaticFiles):
+        """带 hash 的静态资源本可长缓存，但发版后用户浏览器常拿旧 JS 不放，
+        导致「明明改了界面还是老样子」。这里统一加 no-cache + 强校验，
+        代价只是多一次 304 协商，换来发版必生效。"""
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
+
+    app.mount("/assets", _NoCacheStatic(directory=os.path.join(FRONTEND_DIST, "assets")),
+              name="assets")
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
