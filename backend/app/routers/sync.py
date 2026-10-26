@@ -861,8 +861,12 @@ def _normalize_install_wide(sheets: dict) -> list[dict]:
             "handler": _strip_district_prefix(r.get("回单人员") or r.get("当前处理人或回单人"),
                                                r.get("区县")),
             "completion_time": _norm_time(r.get("回单时间")),
-            "is_24h": str(r.get("24小时及时") or "").strip(),
-            "is_8h": str(r.get("8小时及时") or "").strip(),
+            # 列名兼容：新版导出用「24小时是否及时」，旧版用「24小时及时」
+            # 两者都没有时，按 受理→回单 时长重算，避免整列为空导致看板超时恒为 0
+            "is_24h": (str(r.get("24小时及时") or r.get("24小时是否及时") or "").strip()
+                       or _calc_timely(accept, _norm_time(r.get("回单时间")), 24)),
+            "is_8h": (str(r.get("8小时及时") or r.get("8小时是否及时") or "").strip()
+                      or _calc_timely(accept, _norm_time(r.get("回单时间")), 8)),
             "is_perform": str(r.get("是否履约(新)") or r.get("是否履约") or "").strip(),
             "is_refund": str(r.get("是否退单") or "").strip(),
             "refund_reason": str(r.get("一级退单原因") or "").strip(),
