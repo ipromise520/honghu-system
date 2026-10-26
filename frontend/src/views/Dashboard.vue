@@ -90,7 +90,8 @@
         <el-table-column prop="broadband_type" label="宽带类型" width="90" sortable />
         <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
           <template #default="{ row }">
-            <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+            <el-tag v-if="row.is_high_quality === '是'" size="small" type="danger" effect="dark">是</el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">否</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="is_fttr" label="是否FTTR" width="95" sortable>
@@ -116,15 +117,18 @@
         <el-table-column prop="no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
         <el-table-column prop="category" label="投诉分类" min-width="150" show-overflow-tooltip sortable />
         <el-table-column label="是否触发H5" width="105" sortable
-                         sort-by="row => row.category && row.category.startsWith('家庭市场') ? 1 : 0">
+                         sort-by="row => row.trigger_h5 ? 1 : 0">
           <template #default="{ row }">
-            <el-tag v-if="row.category && row.category.startsWith('家庭市场')" size="small" type="danger">触发H5</el-tag>
-            <el-tag v-else size="small" type="info">未触发</el-tag>
+            <!-- 真实口径：后端按单号 HB-058 前缀判定，HB-KHBZ / HB-ZHZW 均不触发 -->
+            <el-tag v-if="row.trigger_h5" size="small" type="danger" effect="dark">触发H5</el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">不触发</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
           <template #default="{ row }">
-            <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+            <!-- 「是」用红色实心标记，与「触发H5」视觉一致，便于一眼扫出 -->
+            <el-tag v-if="row.is_high_quality === '是'" size="small" type="danger" effect="dark">是</el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">否</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="global_pass" label="全球通标识" width="110" sortable>

@@ -557,6 +557,20 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
         q = db.query(ComplaintOrder).filter(ComplaintOrder.month == month)
         if district:
             q = q.filter(ComplaintOrder.district == district)
+        # ---- 过滤下推到 SQL，与明细页签复选框一一对应 ----
+        # 2026-10-26 修复：此前投诉分支完全没有 hide_* 过滤，5 个复选框在投诉页签全部失效
+        if hide_done:      # 不显示已完成（投诉表用「已施工」表示完成，实测 1348/1655 行）
+            q = q.filter(func.coalesce(ComplaintOrder.status, "").notin_(
+                ("已施工", "已归档", "已完工", "已回单")))
+        if hide_refund:    # 不显示已退/撤单
+            q = q.filter(~func.coalesce(ComplaintOrder.status, "").like("%撤%"),
+                         ~func.coalesce(ComplaintOrder.status, "").like("%退%"))
+        if hide_ext:       # 不显示延伸服务
+            q = q.filter(~func.coalesce(ComplaintOrder.complaint_category, "").like("%延伸服务%"))
+        if hide_modem:     # 不显示更换光猫
+            q = q.filter(~func.coalesce(ComplaintOrder.complaint_category, "").like("%光猫%"))
+        if hide_hkbz:      # 不显示 HB-KHBZ 单
+            q = q.filter(~func.coalesce(ComplaintOrder.eoms_no, "").like("%KHBZ%"))
         total = q.count()
         # 同时间点多条时 SQLite 排序不稳定，补主键(eoms_no)保证翻页不跳行
         rows = q.order_by(ComplaintOrder.accept_time.desc(),
@@ -567,7 +581,10 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             "status": r.status, "handler": r.handler, "category": r.complaint_category,
             "is_solved": r.is_solved, "duration": r.order_duration,
             "appointment_time": r.appointment_time, "grid": r.grid,
-            "is_high_quality": r.is_high_quality, "global_pass": r.global_pass} for r in rows],
+            "is_high_quality": r.is_high_quality, "global_pass": r.global_pass,
+            # 是否触发H5：真实口径见 h5.py COMPLAINT_PREFIX="HB-058"
+            # 即单号以 HB-058 开头才触发；HB-KHBZ / HB-ZHZW 均不触发
+            "trigger_h5": (r.eoms_no or "").startswith("HB-058")} for r in rows],
             "total": total, "page": page, "page_size": page_size}
 
     q = db.query(InstallOrder).filter(InstallOrder.month == month)
