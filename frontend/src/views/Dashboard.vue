@@ -208,6 +208,11 @@
               <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
             </el-table-column>
             <el-table-column prop="order_type" label="工单类型" width="90" sortable />
+            <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
             <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
             <el-table-column prop="handler" label="处理人" min-width="80" sortable />
