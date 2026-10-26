@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from ..config import COMPLETED_STATUS
 from ..database import get_db
-from ..models import (WorkOrder, ExtensionOrder, Task, Alert, H5Complaint, H5Receipt, District, User,
-                      AiVisitIssue, AiVisitStat)
+from ..models import (WorkOrder, InstallOrder, ExtensionOrder, Task, Alert, H5Complaint, H5Receipt,
+                      District, User, AiVisitIssue, AiVisitStat)
 from ..deps import get_current_user, scope_district_ids
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -23,17 +23,46 @@ def current_month():
     return datetime.now().strftime("%Y-%m")
 
 
+# v1.3.7 数据源开关：1=用装机宽表 InstallOrder（推荐，与宽表/排名/趋势同源）
+#                  0=回退旧表 WorkOrder（改动前的行为），改这一个数字即可还原
+OVERVIEW_USE_INSTALL = 1
+
+
+def _district_names(ids, db):
+    """区县管理员是 district_id 列表，装机宽表存的是区县名称，这里做映射"""
+    if ids is None:
+        return None
+    if not ids:
+        return []
+    return [d.name for d in db.query(District).filter(District.id.in_(ids)).all()]
+
+
 @router.get("/overview")
 def overview(user=Depends(get_current_user), db: Session = Depends(get_db)):
     month = current_month()
     ids = _district_filter_ids(user, db)
-    q = db.query(WorkOrder).filter(WorkOrder.month == month)
-    if ids is not None:
-        q = q.filter(WorkOrder.district_id.in_(ids))
-    total = q.count()
-    done = q.filter(WorkOrder.status.in_(COMPLETED_STATUS)).count()
-    personal_total = q.filter(WorkOrder.broadband_type == "个人").count()
-    personal_done = q.filter(WorkOrder.broadband_type == "个人", WorkOrder.status.in_(COMPLETED_STATUS)).count()
+    if OVERVIEW_USE_INSTALL:
+        # ---- 与 /metrics/wide/summary 完全同源，消除 1505 / 1728 并存 ----
+        q = db.query(InstallOrder).filter(InstallOrder.month == month)
+        names = _district_names(ids, db)
+        if names is not None:
+            q = q.filter(InstallOrder.district.in_(names)) if names else q.filter(False)
+        total = q.count()
+        done = q.filter(InstallOrder.status.in_(COMPLETED_STATUS)).count()
+        # 装机宽表 broadband_type 目前全为空（导出列未填），业务主题均为家宽类，
+        # 按业务确认口径：空值视为「个人」，与旧表 WorkOrder（全为个人）对齐
+        is_personal = func.coalesce(InstallOrder.broadband_type, "").in_(("个人", ""))
+        personal_total = q.filter(is_personal).count()
+        personal_done = q.filter(is_personal,
+                                 InstallOrder.status.in_(COMPLETED_STATUS)).count()
+    else:
+        q = db.query(WorkOrder).filter(WorkOrder.month == month)
+        if ids is not None:
+            q = q.filter(WorkOrder.district_id.in_(ids))
+        total = q.count()
+        done = q.filter(WorkOrder.status.in_(COMPLETED_STATUS)).count()
+        personal_total = q.filter(WorkOrder.broadband_type == "个人").count()
+        personal_done = q.filter(WorkOrder.broadband_type == "个人", WorkOrder.status.in_(COMPLETED_STATUS)).count()
     ext_q = db.query(func.sum(ExtensionOrder.income)).filter(ExtensionOrder.month == month)
     ext_income = ext_q.scalar() or 0
     task_q = db.query(Task).filter(Task.status.in_(["assigned", "accepted", "submitted"]))
@@ -84,22 +113,40 @@ def district_ranking(user=Depends(get_current_user), month: str = Query(None),
                      db: Session = Depends(get_db)):
     """首页区县排名（按竣工率简化版）"""
     month = month or current_month()
-    q = db.query(WorkOrder).filter(WorkOrder.month == month,
-                                   WorkOrder.district_id.isnot(None))
     ids = _district_filter_ids(user, db)
-    if ids is not None:
-        q = q.filter(WorkOrder.district_id.in_(ids))
-    rows = q.with_entities(WorkOrder.district_id, WorkOrder.status, func.count(WorkOrder.id)).group_by(
-        WorkOrder.district_id, WorkOrder.status).all()
-    agg = defaultdict(lambda: {"total": 0, "done": 0})
-    for did, status, cnt in rows:
-        agg[did]["total"] += cnt
-        if status in COMPLETED_STATUS:
-            agg[did]["done"] += cnt
-    districts = {d.id: d.name for d in db.query(District).all()}
-    out = [{"district": districts.get(did, "未知"), "total": v["total"], "completed": v["done"],
-            "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
-           for did, v in agg.items()]
+    if OVERVIEW_USE_INSTALL:
+        # 与 overview 同源：装机宽表按 district 名称分组
+        q = db.query(InstallOrder).filter(InstallOrder.month == month)
+        names = _district_names(ids, db)
+        if names is not None:
+            q = q.filter(InstallOrder.district.in_(names)) if names else q.filter(False)
+        rows = q.with_entities(InstallOrder.district, InstallOrder.status,
+                               func.count(InstallOrder.order_id)).group_by(
+            InstallOrder.district, InstallOrder.status).all()
+        agg = defaultdict(lambda: {"total": 0, "done": 0})
+        for dname, status, cnt in rows:
+            agg[dname]["total"] += cnt
+            if status in COMPLETED_STATUS:
+                agg[dname]["done"] += cnt
+        out = [{"district": dname or "未知", "total": v["total"], "completed": v["done"],
+                "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
+               for dname, v in agg.items()]
+    else:
+        q = db.query(WorkOrder).filter(WorkOrder.month == month,
+                                       WorkOrder.district_id.isnot(None))
+        if ids is not None:
+            q = q.filter(WorkOrder.district_id.in_(ids))
+        rows = q.with_entities(WorkOrder.district_id, WorkOrder.status, func.count(WorkOrder.id)).group_by(
+            WorkOrder.district_id, WorkOrder.status).all()
+        agg = defaultdict(lambda: {"total": 0, "done": 0})
+        for did, status, cnt in rows:
+            agg[did]["total"] += cnt
+            if status in COMPLETED_STATUS:
+                agg[did]["done"] += cnt
+        districts = {d.id: d.name for d in db.query(District).all()}
+        out = [{"district": districts.get(did, "未知"), "total": v["total"], "completed": v["done"],
+                "rate": round(v["done"] / v["total"] * 100, 2) if v["total"] else 0}
+               for did, v in agg.items()]
     out.sort(key=lambda x: -x["rate"])
     for i, r in enumerate(out, 1):
         r["rank"] = i
@@ -110,12 +157,22 @@ def district_ranking(user=Depends(get_current_user), month: str = Query(None),
 def trend(days: int = 7, user=Depends(get_current_user), db: Session = Depends(get_db)):
     start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
     # accept_time 为 'YYYY-MM-DD HH:MM:SS' 定长格式，直接字符串比较等价于按天截断比较
-    q = db.query(WorkOrder).filter(WorkOrder.accept_time >= start)
     ids = _district_filter_ids(user, db)
-    if ids is not None:
-        q = q.filter(WorkOrder.district_id.in_(ids))
-    rows = q.with_entities(func.substr(WorkOrder.accept_time, 1, 10).label("day"),
-                           WorkOrder.status, func.count(WorkOrder.id)).group_by("day", WorkOrder.status).all()
+    if OVERVIEW_USE_INSTALL:
+        q = db.query(InstallOrder).filter(InstallOrder.accept_time >= start)
+        names = _district_names(ids, db)
+        if names is not None:
+            q = q.filter(InstallOrder.district.in_(names)) if names else q.filter(False)
+        rows = q.with_entities(func.substr(InstallOrder.accept_time, 1, 10).label("day"),
+                               InstallOrder.status, func.count(InstallOrder.order_id)).group_by(
+            "day", InstallOrder.status).all()
+    else:
+        q = db.query(WorkOrder).filter(WorkOrder.accept_time >= start)
+        if ids is not None:
+            q = q.filter(WorkOrder.district_id.in_(ids))
+        rows = q.with_entities(func.substr(WorkOrder.accept_time, 1, 10).label("day"),
+                               WorkOrder.status, func.count(WorkOrder.id)).group_by(
+            "day", WorkOrder.status).all()
     agg = defaultdict(lambda: {"accepted": 0, "completed": 0})
     for day, status, cnt in rows:
         agg[day]["accepted"] += cnt
