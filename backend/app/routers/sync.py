@@ -95,9 +95,16 @@ def sync_wide_batch(db: Session, model, key_field: str, rows: list[dict]) -> dic
     """宽表批次比较入库（邮件同步与手动上传共用，保证 Web 展示始终为最新快照）：
     对新数据涉及的每个月，与库内同月数据比较 (最新受理时间, 行数)——
     新批次 >= 库内 → 整月替换；新批次 < 库内 → 跳过该月（保留更新的现有数据）。
-    rows 需已按 model 字段名映射好，且 month 从受理时间推导（铁律 2）"""
+    rows 需已按 model 字段名映射好，且 month 从受理时间推导（铁律 2）
+
+    ⚠ 缩水保护（2026-10-26 新增）：装机宽表/装机查询/投诉宽表/投诉查询共用本函数
+    且都写 install_orders / complaint_orders，后传的批次会整月覆盖前一批次。
+    曾发生「19823 行全荆州宽表」被「2048 行仅洪湖的综合查询」覆盖，
+    导致区县排名只剩 1 个区县、24h超时归零。故当新批次行数不足库内 60%
+    （或区县数明显减少）时拒绝覆盖，只在 skipped 里说明，由用户确认后手动处理。
+    """
     months = sorted({r["month"] for r in rows if r.get("month")})
-    replaced, skipped = [], []
+    replaced, skipped, guarded = [], [], []
     for m in months:
         new_rows = [r for r in rows if r["month"] == m]
         # 同批次同键去重：导出文件常见同一工单多段/重复记录，保留受理时间最新的一条，
@@ -112,16 +119,28 @@ def sync_wide_batch(db: Session, model, key_field: str, rows: list[dict]) -> dic
         new_key = _batch_key(new_rows)
         cur = db.query(model).filter(model.month == m).all()
         old_key = (max((getattr(r, "accept_time") or "" for r in cur), default=""), len(cur))
-        if new_key >= old_key:
-            db.query(model).filter(model.month == m).delete(synchronize_session=False)
-            # 分批插入：避免大文件触发 SQLite 变量数上限（too many SQL variables）
-            CHUNK = 500
-            for i in range(0, len(new_rows), CHUNK):
-                db.bulk_insert_mappings(model, new_rows[i:i + CHUNK])
-            replaced.append(f"{m}({len(new_rows)}行,受理至{new_key[0][:16]})")
-        else:
+        if new_key < old_key:
             skipped.append(f"{m}: 库内较新(受理至{old_key[0][:16]}/{old_key[1]}行)≥上传(受理至{new_key[0][:16]}/{new_key[1]}行)，未覆盖")
-    return {"replaced": replaced, "skipped": skipped}
+            continue
+        # 缩水保护：行数或区县覆盖度明显下降时拒绝覆盖
+        old_n, new_n = len(cur), len(new_rows)
+        if old_n >= 100 and new_n < old_n * 0.6:
+            old_d = {getattr(r, "district", "") for r in cur if getattr(r, "district", "")}
+            new_d = {r.get("district") for r in new_rows if r.get("district")}
+            msg = (f"{m}: 上传仅 {new_n} 行/{len(new_d)} 个区县，"
+                   f"少于库内 {old_n} 行/{len(old_d)} 个区县的 60%，已拒绝覆盖"
+                   f"（疑似综合查询小批次覆盖宽表；如确需缩减请联系管理员）")
+            if len(old_d) > len(new_d) and old_d - new_d:
+                msg += f"；将丢失区县：{'、'.join(sorted(old_d - new_d))}"
+            guarded.append(msg)
+            continue
+        db.query(model).filter(model.month == m).delete(synchronize_session=False)
+        # 分批插入：避免大文件触发 SQLite 变量数上限（too many SQL variables）
+        CHUNK = 500
+        for i in range(0, len(new_rows), CHUNK):
+            db.bulk_insert_mappings(model, new_rows[i:i + CHUNK])
+        replaced.append(f"{m}({len(new_rows)}行,受理至{new_key[0][:16]})")
+    return {"replaced": replaced, "skipped": skipped, "guarded": guarded}
 
 
 def _normalize_completion(sheets: dict, month: str) -> list[dict]:
@@ -905,6 +924,20 @@ def _normalize_complaint_wide(sheets: dict) -> list[dict]:
     return out
 
 
+def _calc_timely(accept: str, done: str, hours: int) -> str:
+    """综合查询导出无「24/8小时及时」列，按 受理→施工 时长推算：
+    未施工返回 ""（不计入超时统计，避免把在途单误判为超时），
+    已施工按 hours 阈值判 是/否。"""
+    if not accept or not done:
+        return ""
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        delta = (datetime.strptime(done[:19], fmt) - datetime.strptime(accept[:19], fmt)).total_seconds()
+    except (ValueError, TypeError):
+        return ""
+    return "是" if delta <= hours * 3600 else "否"
+
+
 def _normalize_install_query(sheets: dict) -> list[dict]:
     """装机综合查询「导出信息」→ InstallOrder（实时数据）"""
     out: list[dict] = []
@@ -913,6 +946,7 @@ def _normalize_install_query(sheets: dict) -> list[dict]:
         if not oid:
             continue
         accept = _norm_time(r.get("受理时间"))
+        done_time = _norm_time(r.get("施工时间"))
         refund_reason = str(r.get("一级退单原因") or "").strip()
         out.append({
             "order_id": oid, "month": accept[:7] if len(accept) >= 7 else "",
@@ -923,8 +957,12 @@ def _normalize_install_query(sheets: dict) -> list[dict]:
             "status": str(r.get("工单状态") or "").strip(),
             "broadband_type": "", "is_fttr": str(r.get("是否FTTR") or "").strip(),
             "handler": _strip_district_prefix(r.get("施工人") or r.get("当前处理人"), r.get("区域")),
-            "completion_time": _norm_time(r.get("施工时间")),
-            "is_24h": "", "is_8h": "", "is_perform": "",
+            "completion_time": done_time,
+            # 综合查询无及时性列 → 按受理→施工时长推算
+            # （此前硬编码空串，整月替换宽表后「24h超时」恒为 0）
+            "is_24h": _calc_timely(accept, done_time, 24),
+            "is_8h": _calc_timely(accept, done_time, 8),
+            "is_perform": "",
             "is_refund": "是" if refund_reason else "",
             "refund_reason": refund_reason,
             "install_duration": 0.0, "completion_duration": 0.0, "h5_satisfaction": "",
@@ -1211,6 +1249,7 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
         n = sum(_rep_count(s) for s in res["replaced"])
         msg = (f"入库成功：装机宽表替换 {('、'.join(res['replaced']) or '无月份')}；"
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
+               + (f"；⚠ 已阻止缩水覆盖：{('；'.join(res['guarded']))}" if res.get("guarded") else "")
                + "，指标已实时生效")
     elif job.metric in ("complaint_wide", "complaint_query"):
         rows = [r for r in rows if r.get("eoms_no") and r.get("month")]
@@ -1218,6 +1257,7 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
         n = sum(_rep_count(s) for s in res["replaced"])
         msg = (f"入库成功：投诉宽表替换 {('、'.join(res['replaced']) or '无月份')}；"
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
+               + (f"；⚠ 已阻止缩水覆盖：{('；'.join(res['guarded']))}" if res.get("guarded") else "")
                + "，指标已实时生效")
     elif job.metric == "h5_survey":
         # H5满意度通报：四表全量替换（快照），保留最新上传

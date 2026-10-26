@@ -19,7 +19,14 @@
     <el-row :gutter="16">
       <el-col :xs="24" :md="10">
         <el-card class="page-card">
-          <template #header><div class="card-header"><span class="title">区县竣工率排名（{{ month }}）</span></div></template>
+          <template #header>
+            <div class="card-header">
+              <span class="title">
+                区县竣工率排名（{{ month }}）
+                <el-tag size="small" type="info" style="margin-left:6px">全荆州 {{ districtRanking.length }} 区县 · 不受区县筛选影响</el-tag>
+              </span>
+            </div>
+          </template>
           <div class="rank-table-wrap">
             <el-table :data="districtRanking" size="small" height="100%">
               <el-table-column prop="rank" label="#" width="50" />
@@ -694,16 +701,49 @@ function buildCardsFromWide(wide) {
   ]
 }
 
+// 全荆州标准区县（与后端 _JZ_ORDER 一致）：排名以此为准，缺数据的区县补 0 占位，
+// 保证「区县竣工率排名」始终展示完整 9 个区县，不因筛选或数据缺失而减少
+const JZ_DISTRICTS = ['沙市区', '荆州区', '公安县', '监利市', '江陵县', '石首市', '洪湖市', '松滋市', '荆州开发区']
+
+function buildRanking(list) {
+  const map = new Map((list || []).map(d => [d.district, d]))
+  const merged = JZ_DISTRICTS.map(name => {
+    const d = map.get(name)
+    return d
+      ? { ...d, completed: d.done }
+      : { district: name, total: 0, done: 0, completed: 0, refund: 0, rate: 0, empty: true }
+  })
+  // 排序：有数据的按竣工率降序在前，无数据的（total=0）置底
+  merged.sort((a, b) => (b.total > 0) - (a.total > 0) || b.rate - a.rate)
+  merged.forEach((d, i) => { d.rank = i + 1 })
+  return merged
+}
+
 function renderTrend(daily) {
   nextTick(() => {
     if (!trendRef.value) return          // 组件已卸载（切走页面）：跳过渲染，避免对已 dispose 实例 setOption
     if (!chart) chart = echarts.init(trendRef.value)
     chart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: ['受理', '已施工', '退单'] },
-      grid: { left: 40, right: 20, top: 40, bottom: 30 },
+      tooltip: {
+        trigger: 'axis',
+        formatter: (ps) => {
+          const day = ps[0]?.axisValue || ''
+          const line = ps.filter(p => p.seriesType === 'line')[0]
+          const bars = ps.filter(p => p.seriesType === 'bar')
+            .map(p => `${p.marker}${p.seriesName} ${p.value}`).join('<br/>')
+          const rateTxt = line ? `<br/>${line.marker}竣工率 <b>${line.value}%</b>` : ''
+          return `${day}<br/>${bars}${rateTxt}`
+        },
+      },
+      legend: { data: ['受理', '已施工', '退单', '每日竣工率'], top: 4 },
+      grid: { left: 40, right: 48, top: 44, bottom: 30 },
       xAxis: { type: 'category', data: daily.map(d => d.day.slice(5)) },
-      yAxis: { type: 'value' },
+      // 左轴：工单量（柱）；右轴：竣工率 %（线）
+      yAxis: [
+        { type: 'value', name: '单', nameTextStyle: { fontSize: 10 }, axisLabel: { fontSize: 10 } },
+        { type: 'value', name: '竣工率%', min: 0, max: 100, nameTextStyle: { fontSize: 10 },
+          axisLabel: { fontSize: 10, formatter: '{value}%' }, splitLine: { show: false } },
+      ],
       series: [
         { name: '受理', type: 'bar', data: daily.map(d => d.total), itemStyle: { color: '#1a6fdb' },
           label: { show: true, position: 'top', fontSize: 9, color: '#1a6fdb' },
@@ -714,6 +754,12 @@ function renderTrend(daily) {
         { name: '退单', type: 'bar', data: daily.map(d => d.refund), itemStyle: { color: '#e6a23c' },
           label: { show: true, position: 'top', fontSize: 9, color: '#e6a23c' },
           labelLayout: { hideOverlap: true } },
+        { name: '每日竣工率', type: 'line', yAxisIndex: 1, smooth: true,
+          data: daily.map(d => d.rate), symbol: 'circle', symbolSize: 5,
+          itemStyle: { color: '#f56c6c' }, lineStyle: { width: 2, color: '#f56c6c' },
+          label: { show: true, position: 'top', fontSize: 9, color: '#f56c6c', formatter: '{c}%' },
+          labelLayout: { hideOverlap: true },
+          z: 5 },
       ],
     })
   })
@@ -759,7 +805,8 @@ async function load() {
       const f = wf.has_data ? wf : wa
       buildCardsFromWide(f)
       renderTrend(f.install.daily)
-      districtRanking.value = wa.install.by_district.map(d => ({ ...d, completed: d.done }))
+      // 排名固定取全量（wa，不带 district 参数）：始终展示全荆州所有区县，不受筛选影响
+      districtRanking.value = buildRanking(wa.install.by_district)
       renderComplaintCharts(wa)
       loadDetail()
       return
