@@ -148,7 +148,7 @@
       <el-pagination v-if="detailTotal > pageSize"
                      layout="total, sizes, prev, pager, next, jumper"
                      :total="detailTotal" :current-page="detailPage" :page-size="pageSize"
-                     :page-sizes="[200, 500, 1000, 2000]"
+                     :page-sizes="[50, 100, 200, 500]"
                      small background style="margin-top:10px;justify-content:flex-end"
                      @current-change="onDetailPageChange" @size-change="onDetailSizeChange" />
 
@@ -600,7 +600,7 @@ const detailType = ref('install')
 const detailRows = ref([])
 const detailTotal = ref(0)
 const detailPage = ref(1)
-const pageSize = ref(500)
+const pageSize = ref(50)
 const showDone = ref(false)
 const showExt = ref(false)
 const showRefund = ref(false)
@@ -689,7 +689,7 @@ function onDetailPageChange(page) {
 
 function onDetailSizeChange(size) {
   // size-change 抛出新每页条数，回写 pageSize 并回到第 1 页
-  pageSize.value = size || 500
+  pageSize.value = size || 50
   detailPage.value = 1
   loadDetail()
 }
@@ -801,10 +801,9 @@ async function load() {
   loadAiVisit()
   try {
     // 卡片/趋势随区县过滤；排名/投诉概况固定全量 9 区县
-    const [wf, wa] = await Promise.all([
-      api.get('/metrics/wide/summary', { params: { month: month.value, district: dq } }),
-      api.get('/metrics/wide/summary', { params: { month: month.value } }),
-    ])
+    // dq 为空（全部）时两次请求参数完全相同，只发一次，省一个往返
+    const wa = await api.get('/metrics/wide/summary', { params: { month: month.value } })
+    const wf = dq ? await api.get('/metrics/wide/summary', { params: { month: month.value, district: dq } }) : wa
     if (wa.has_data) {
       hasWide.value = true
       const f = wf.has_data ? wf : wa

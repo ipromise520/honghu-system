@@ -83,7 +83,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '../store'
@@ -154,17 +154,32 @@ async function changePwd() {
 }
 
 async function loadOverdue() {
+  // 页面不可见时不发请求（后台标签页无需轮询，避免多开时成倍放大服务端压力）
+  if (document.hidden) return
   try {
     const data = await api.get('/h5/alerts', { params: { date: 'today' } })
     overdueCount.value = data?.count || 0
   } catch (e) { /* ignore */ }
 }
 
+let overdueTimer = null
+function onVisibilityChange() {
+  // 切回前台立即刷新一次，保证数字不是旧的
+  if (!document.hidden) loadOverdue()
+}
+
 onMounted(() => {
   window.addEventListener('resize', onResize)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   store.refreshMe()
   loadOverdue()
-  setInterval(loadOverdue, 120000)
+  overdueTimer = setInterval(loadOverdue, 120000)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  if (overdueTimer) { clearInterval(overdueTimer); overdueTimer = null }
 })
 </script>
 

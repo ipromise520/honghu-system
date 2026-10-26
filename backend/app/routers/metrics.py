@@ -2,7 +2,7 @@
 from collections import defaultdict
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from ..config import COMPLETED_STATUS, PENDING_STATUS, TARGET_PER_PERSON
@@ -480,7 +480,44 @@ def wide_summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                  district: str = Query("", description="区县名过滤，空为全部"),
                  user=Depends(get_current_user), db: Session = Depends(get_db)):
     """基于装机宽表(InstallOrder)+投诉宽表(ComplaintOrder)的当月汇总，供看板/竣工率/H5/退单页使用（兼容 GET）"""
-    return _build_wide_summary(month, district, db)
+    return _build_wide_summary_cached(month, district, db)
+
+
+# ---------------- 宽表汇总 TTL 缓存（2026-10-26 性能优化） ----------------
+import time as _time
+import threading as _threading
+
+_WIDE_CACHE: dict = {}          # (month, district) -> (ver, expire_ts, payload)
+_WIDE_CACHE_TTL = 60            # 秒
+_WIDE_CACHE_LOCK = _threading.Lock()
+
+
+def _wide_data_version(db) -> str:
+    """数据版本位：两张宽表的行数 + 最大 rowid。上传/覆盖后必然变化，用于让缓存失效。"""
+    try:
+        i = db.execute(text("SELECT COUNT(*), COALESCE(MAX(rowid),0) FROM install_orders")).fetchone()
+        c = db.execute(text("SELECT COUNT(*), COALESCE(MAX(rowid),0) FROM complaint_orders")).fetchone()
+        return f"{i[0]}-{i[1]}-{c[0]}-{c[1]}"
+    except Exception:
+        return ""
+
+
+def _build_wide_summary_cached(month: str, district: str, db):
+    key = (month, district)
+    now = _time.time()
+    ver = _wide_data_version(db)
+    with _WIDE_CACHE_LOCK:
+        hit = _WIDE_CACHE.get(key)
+        if hit and hit[0] == ver and hit[1] > now:
+            return hit[2]
+    payload = _build_wide_summary(month, district, db)   # 未命中才真算
+    with _WIDE_CACHE_LOCK:
+        _WIDE_CACHE[key] = (ver, _time.time() + _WIDE_CACHE_TTL, payload)
+        # 防止字典无界增长
+        if len(_WIDE_CACHE) > 64:
+            for k in [k for k, v in _WIDE_CACHE.items() if v[1] <= _time.time()]:
+                _WIDE_CACHE.pop(k, None)
+    return payload
 
 
 class _WideSummaryReq(BaseModel):
@@ -492,7 +529,7 @@ class _WideSummaryReq(BaseModel):
 def wide_summary_post(req: _WideSummaryReq,
                       user=Depends(get_current_user), db: Session = Depends(get_db)):
     """POST 版本：参数放 body，规避中文 query 被浏览器/uvicorn h11 拒绝的问题"""
-    return _build_wide_summary(req.month, req.district, db)
+    return _build_wide_summary_cached(req.month, req.district, db)
 
 
 # ---------------- 宽表明细（首页工单明细展示） ----------------
@@ -501,24 +538,59 @@ def wide_summary_post(req: _WideSummaryReq,
 def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                 type: str = Query("install", pattern="^(install|complaint)$"),
                 district: str = Query(""),
+                page: int = Query(1, ge=1),
+                page_size: int = Query(100, ge=1, le=500),
+                hide_done: bool = Query(False),
+                hide_refund: bool = Query(False),
+                hide_ext: bool = Query(False),
+                hide_modem: bool = Query(False),
+                hide_hkbz: bool = Query(False),
                 limit: int = Query(20000, le=20000),
                 user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """宽表工单明细：装机/投诉按受理(投诉)时间倒序"""
+    """宽表工单明细：装机/投诉按受理(投诉)时间倒序
+
+    2026-10-26 性能修复：原实现只认 limit(默认20000)，前端传的 page/page_size/hide_*
+    被 FastAPI 静默丢弃，导致每次全量返回 640KB+、分页与复选框全部失效。
+    现改为 SQL 层过滤 + 真分页，只回传当前页，并返回 total 供分页器。
+    """
     if type == "complaint":
         q = db.query(ComplaintOrder).filter(ComplaintOrder.month == month)
         if district:
             q = q.filter(ComplaintOrder.district == district)
-        rows = q.order_by(ComplaintOrder.accept_time.desc()).limit(limit).all()
+        total = q.count()
+        # 同时间点多条时 SQLite 排序不稳定，补主键(eoms_no)保证翻页不跳行
+        rows = q.order_by(ComplaintOrder.accept_time.desc(),
+                          ComplaintOrder.eoms_no.desc()).offset(
+            (page - 1) * page_size).limit(page_size).all()
         return {"rows": [{
             "no": r.eoms_no, "district": r.district, "accept_time": r.accept_time,
             "status": r.status, "handler": r.handler, "category": r.complaint_category,
             "is_solved": r.is_solved, "duration": r.order_duration,
             "appointment_time": r.appointment_time, "grid": r.grid,
-            "is_high_quality": r.is_high_quality, "global_pass": r.global_pass} for r in rows]}
+            "is_high_quality": r.is_high_quality, "global_pass": r.global_pass} for r in rows],
+            "total": total, "page": page, "page_size": page_size}
+
     q = db.query(InstallOrder).filter(InstallOrder.month == month)
     if district:
         q = q.filter(InstallOrder.district == district)
-    rows = q.order_by(InstallOrder.accept_time.desc()).limit(limit).all()
+    # ---- 过滤下推到 SQL，与明细页签复选框一一对应 ----
+    if hide_done:      # 不显示「已施工」
+        q = q.filter(func.coalesce(InstallOrder.status, "") != "已施工")
+    if hide_refund:    # 不显示已退/撤单
+        q = q.filter(~func.coalesce(InstallOrder.status, "").like("%撤%"),
+                     ~func.coalesce(InstallOrder.status, "").like("%退%"),
+                     func.coalesce(InstallOrder.is_refund, "") != "是")
+    if hide_ext:       # 不显示延伸服务
+        q = q.filter(~func.coalesce(InstallOrder.order_theme, "").like("%延伸服务%"))
+    if hide_modem:     # 不显示更换光猫
+        q = q.filter(~func.coalesce(InstallOrder.order_theme, "").like("%更换光猫%"))
+    if hide_hkbz:      # 不显示 HB-KHBZ 单（定单编码含 KHBZ）
+        q = q.filter(~func.coalesce(InstallOrder.order_id, "").like("%KHBZ%"))
+    total = q.count()
+    # 同时间点多条时 SQLite 排序不稳定，补主键(order_id)保证翻页不跳行
+    rows = q.order_by(InstallOrder.accept_time.desc(),
+                      InstallOrder.order_id.desc()).offset(
+        (page - 1) * page_size).limit(page_size).all()
     return {"rows": [{
         "no": r.order_id, "district": r.district, "grid": r.grid,
         "accept_time": r.accept_time, "theme": r.order_theme, "status": r.status,
@@ -527,7 +599,8 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
         "appointment_time": r.appointment_time,
         "is_high_quality": "是" if r.is_high_quality else "否",
         "is_fttr": r.is_fttr or "否",
-        "current_step": r.current_step or r.status} for r in rows]}
+        "current_step": r.current_step or r.status} for r in rows],
+        "total": total, "page": page, "page_size": page_size}
 
 
 # ---------------- 延伸服务（手册 7.6 / 8.2） ----------------
