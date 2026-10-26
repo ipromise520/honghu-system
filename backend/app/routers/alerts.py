@@ -852,4 +852,26 @@ def alert_orders(type: str = Query("install", pattern="^(install|complaint|book|
             "community", "is_fttr", "is_high_quality", "accept_time", "appoint_time",
             "visit_time", "punch_time", "pkg_name", "book_status", "supervise_info",
             "supervise_person", "warn_level", "warn_time", "order_count")
-    return {"rows": [{k: getattr(r, k) for k in keys} for r in rows]}
+
+    # v1.3.10：预警附件本身没有「投诉分类」列（alert_orders 无该字段），
+    # 这里用单号去【重要通报】投诉受理明细 report_complaint_orders 里补一份。
+    # 一次批量查询，避免逐行 N+1。
+    # ⚠️ 两表时间窗不同：通报明细是 T-1（如 10-24 之前），预警投诉多为当天新受理，
+    #    因此新单大概率关联不上，返回空串，前端显示「-」。
+    cat_map = {}
+    if type == "complaint":
+        nos = [r.order_no for r in rows if r.order_no]
+        if nos:
+            for fno, cat in db.query(ReportComplaintOrder.flow_no,
+                                     ReportComplaintOrder.category).filter(
+                    ReportComplaintOrder.flow_no.in_(nos)).all():
+                if fno:
+                    cat_map[fno] = cat or ""
+
+    out = []
+    for r in rows:
+        d = {k: getattr(r, k) for k in keys}
+        if type == "complaint":
+            d["category"] = cat_map.get(r.order_no, "")
+        out.append(d)
+    return {"rows": out}

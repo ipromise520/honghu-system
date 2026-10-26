@@ -114,6 +114,17 @@
               <el-table-column prop="status" label="工单状态" width="105" sortable>
                 <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
               </el-table-column>
+              <!-- v1.3.10：预警附件无分类列，按单号关联【重要通报】投诉明细补出；
+                   通报是 T-1 数据，当天新受理的单关联不上，显示「-」 -->
+              <el-table-column prop="category" label="投诉分类" min-width="150" sortable
+                               :sort-method="(a, b) => (a.category || '').localeCompare(b.category || '', 'zh')">
+                <template #default="{ row }">
+                  <el-tooltip v-if="row.category" :content="row.category" placement="top" :show-after="300">
+                    <span class="cat-text">{{ catShort(row.category) }}</span>
+                  </el-tooltip>
+                  <span v-else class="cat-empty">-</span>
+                </template>
+              </el-table-column>
               <el-table-column prop="order_type" label="工单类型" width="90" sortable />
               <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
               <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
@@ -239,6 +250,15 @@ const h5 = ref({ overdue_hours: 2, count: 0, items: [] })
 
 const alertStTag = s => (s || '').includes('施工') ? 'warning'
   : (s || '').includes('回访') || (s || '').includes('接收') ? 'success' : 'info'
+// v1.3.10 投诉分类原始值是「家庭市场→通信连接→家庭宽带→本省宽带→网络体验→网络无法连接→全局流转」
+// 这种多级串，整串塞进表格太挤。取「业务大类→具体问题」两级，末级「全局流转」无信息量直接略过。
+function catShort(cat) {
+  const parts = (cat || '').split('→').map(x => x.trim()).filter(Boolean)
+  if (!parts.length) return ''
+  const tail = parts.filter(x => x !== '全局流转')
+  if (tail.length <= 2) return tail.join(' → ')
+  return tail[tail.length - 2] + ' → ' + tail[tail.length - 1]
+}
 const alertInstallTop = computed(() => {
   const st = alertMeta.value.install_status || []
   return st.length ? `最多：${st[0].status} ${st[0].count}` : ''
@@ -320,6 +340,9 @@ onMounted(() => { loadH5(); load() })
 </script>
 
 <style scoped>
+/* 投诉分类关联不到时的占位（通报 T-1，当日新单常见） */
+.cat-empty { color: #c0c4cc; }
+.cat-text { cursor: default; border-bottom: 1px dashed #d9d9d9; }
 /* v1.3.9：本页共 7 张卡（原 5 张 + 全球通 2 张），Dashboard.vue 全局定义的是 6 列，
    导致第 7 张掉到第二行。这里覆盖为 7 等分，窄屏按 4/2 列自适应。 */
 .stat-cards { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }
