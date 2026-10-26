@@ -629,6 +629,22 @@ def extension_personal(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     return out
 
 
+# 洪湖市按标准 7 网格通报（2026-10-26 新增）；其他区县仍按岗位汇总
+HONGHU_GRID_DISTRICT = "洪湖市"
+HONGHU_STD_GRIDS = ("洪湖柏枝网格", "洪湖滨湖网格", "洪湖曹市网格", "洪湖大沙网格",
+                    "洪湖大同网格", "洪湖峰口网格", "洪湖新堤网格")
+HONGHU_OTHER_LABEL = "洪湖市分公司/其他"
+
+
+def _norm_honghu_grid(grid: str) -> str:
+    """把洪湖花名册的 grid 归类到 7 个标准网格；分公司/临时网格/空值归入「分公司/其他」。
+    非标准名（未来新增的网格）原样保留，避免静默丢数据。"""
+    g = (grid or "").strip()
+    if not g or "分公司" in g or "临时" in g:
+        return HONGHU_OTHER_LABEL
+    return g
+
+
 @router.get("/extension/team")
 def extension_team(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                    user=Depends(get_current_user), db: Session = Depends(get_db)):
@@ -636,16 +652,36 @@ def extension_team(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                     func.count(ExtensionOrder.id)).filter(ExtensionOrder.month == month).group_by(
         ExtensionOrder.handler, ExtensionOrder.district).all()
     member_pos = {}
+    member_grid = {}
     for m in db.query(ExtensionMember).all():
         member_pos[m.name] = m.position
+        member_grid[m.name] = m.grid
     team_agg = defaultdict(lambda: {"income": 0.0, "orders": 0, "people": set()})
+
+    # 洪湖市：以花名册为基准按真实网格铺底（含 0 单人员），保证 7 网格即使无人接单也出现在通报里
+    hh_agg = defaultdict(lambda: {"income": 0.0, "orders": 0, "people": set()})
+    for m in db.query(ExtensionMember).filter(ExtensionMember.district == HONGHU_GRID_DISTRICT).all():
+        hh_agg[_norm_honghu_grid(m.grid)]["people"].add(m.name)
+
     for h, d, i, c in rows:
-        key = (d, member_pos.get(h, "施工员"))
-        team_agg[key]["income"] += i or 0
-        team_agg[key]["orders"] += c
-        team_agg[key]["people"].add(h)
+        if d == HONGHU_GRID_DISTRICT:
+            g = _norm_honghu_grid(member_grid.get(h))
+            hh_agg[g]["income"] += i or 0
+            hh_agg[g]["orders"] += c
+            hh_agg[g]["people"].add(h)
+        else:
+            key = (d, member_pos.get(h, "施工员"))
+            team_agg[key]["income"] += i or 0
+            team_agg[key]["orders"] += c
+            team_agg[key]["people"].add(h)
+
     out = [{"district": d, "position": p, "people": len(v["people"]), "orders": v["orders"],
             "income": round(v["income"], 1)} for (d, p), v in team_agg.items()]
+    # 洪湖网格行：position 字段承载网格名，前端「网格」列直接展示；group_by='grid' 供前端区分渲染
+    for g, v in hh_agg.items():
+        out.append({"district": HONGHU_GRID_DISTRICT, "position": g, "grid": g,
+                    "group_by": "grid", "people": len(v["people"]),
+                    "orders": v["orders"], "income": round(v["income"], 1)})
     out.sort(key=lambda x: -x["income"])
     return out
 
