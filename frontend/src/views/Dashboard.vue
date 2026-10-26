@@ -70,17 +70,29 @@
 
     <el-card class="page-card">
       <template #header>
-        <div class="card-header">
-          <el-radio-group v-model="detailType" size="small" @change="onDetailTypeChange">
-            <el-radio-button value="install">装机工单明细</el-radio-button>
-            <el-radio-button value="complaint">投诉工单明细</el-radio-button>
-          </el-radio-group>
-          <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
-          <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
-          <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
-          <el-checkbox v-model="showModem" size="small" @change="onDetailFilterChange">显示更换光猫</el-checkbox>
-          <el-checkbox v-model="showHkbz" size="small" @change="onDetailFilterChange">显示HB-KHBZ单</el-checkbox>
-          <span class="header-tip">共 {{ detailTotal }} 条 · 按时间倒序</span>
+        <div class="detail-header">
+          <div class="detail-header-left">
+            <el-radio-group v-model="detailType" size="small" @change="onDetailTypeChange">
+              <el-radio-button value="install">装机工单明细</el-radio-button>
+              <el-radio-button value="complaint">投诉工单明细</el-radio-button>
+            </el-radio-group>
+            <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
+            <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
+            <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
+            <el-checkbox v-model="showModem" size="small" @change="onDetailFilterChange">显示更换光猫</el-checkbox>
+            <el-checkbox v-model="showHkbz" size="small" @change="onDetailFilterChange">显示HB-KHBZ单</el-checkbox>
+          </div>
+          <div class="detail-header-right">
+            <!-- 该表数据来自「重要通报」邮件附件，与下方「重要通报」卡片同一数据源 -->
+            <template v-if="reportMeta.has_data">
+              <el-tag size="small" type="warning" effect="plain">数据 {{ reportMeta.meta.data_date }}</el-tag>
+              <el-tag size="small" type="danger" effect="plain">收件 {{ reportMeta.meta.mail_time }}</el-tag>
+              <span class="header-tip">拉取 {{ reportMeta.meta.fetched_at }}</span>
+            </template>
+            <span class="header-tip">共 {{ detailTotal }} 条</span>
+            <el-button v-if="isAdmin" size="small" type="danger" plain
+                       :loading="reportSyncing" @click="syncReport">同步邮件</el-button>
+          </div>
         </div>
       </template>
       <el-table v-if="detailType === 'install'" :data="detailRows" size="small" max-height="440" :empty-text="emptyTip">
@@ -1071,6 +1083,25 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* v1.3.8 明细卡片头部：左控件 + 右同步信息/按钮，窄屏自动换行 */
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.detail-header-left,
+.detail-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 左侧占满剩余宽度，右侧才能被推到最右；否则 flex-wrap 换行后右侧会贴左 */
+.detail-header-left { flex: 1 1 auto; min-width: 0; }
+.detail-header-right { margin-left: auto; justify-content: flex-end; }
+
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .data-tag { font-size: 12px; padding: 2px 10px; border-radius: 10px; background: #909399; color: #fff; }
 .data-tag.wide { background: #1a6fdb; }
