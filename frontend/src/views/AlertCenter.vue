@@ -114,18 +114,25 @@
               <el-table-column prop="status" label="工单状态" width="105" sortable>
                 <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
               </el-table-column>
-              <!-- v1.3.10：预警附件无分类列，按单号关联【重要通报】投诉明细补出；
+              <!-- v1.3.11：原「工单类型」（家庭宽带/商客宽带）不是投诉类型，用户要求替换。
+                   改为「投诉类型」，数据按单号关联【重要通报】投诉明细的 category。
                    通报是 T-1 数据，当天新受理的单关联不上，显示「-」 -->
-              <el-table-column prop="category" label="投诉分类" min-width="150" sortable
+              <el-table-column prop="category" label="投诉类型" min-width="175" sortable
                                :sort-method="(a, b) => (a.category || '').localeCompare(b.category || '', 'zh')">
                 <template #default="{ row }">
-                  <el-tooltip v-if="row.category" :content="row.category" placement="top" :show-after="300">
+                  <!-- 真实分类：多级串精简为末两级，hover 看全路径 -->
+                  <el-tooltip v-if="row.category && row.category_src !== '兜底'"
+                              :content="row.category + '（来源：' + row.category_src + '）'"
+                              placement="top" :show-after="300">
                     <span class="cat-text">{{ catShort(row.category) }}</span>
+                  </el-tooltip>
+                  <!-- 兜底：关联不到时用工单类型占位，灰显 + 虚线，避免与真实分类混淆 -->
+                  <el-tooltip v-else-if="row.category" content="通报/宽表暂无此单，暂用工单类型占位" placement="top">
+                    <span class="cat-fallback">{{ row.category }}</span>
                   </el-tooltip>
                   <span v-else class="cat-empty">-</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="order_type" label="工单类型" width="90" sortable />
               <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
               <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
               <el-table-column prop="handler" label="处理人" min-width="80" sortable />
@@ -343,6 +350,7 @@ onMounted(() => { loadH5(); load() })
 /* 投诉分类关联不到时的占位（通报 T-1，当日新单常见） */
 .cat-empty { color: #c0c4cc; }
 .cat-text { cursor: default; border-bottom: 1px dashed #d9d9d9; }
+.cat-fallback { color: #a8abb2; font-style: italic; cursor: default; border-bottom: 1px dashed #dcdfe6; }
 /* v1.3.9：本页共 7 张卡（原 5 张 + 全球通 2 张），Dashboard.vue 全局定义的是 6 列，
    导致第 7 张掉到第二行。这里覆盖为 7 等分，窄屏按 4/2 列自适应。 */
 .stat-cards { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }

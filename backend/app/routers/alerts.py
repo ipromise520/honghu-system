@@ -853,25 +853,44 @@ def alert_orders(type: str = Query("install", pattern="^(install|complaint|book|
             "visit_time", "punch_time", "pkg_name", "book_status", "supervise_info",
             "supervise_person", "warn_level", "warn_time", "order_count")
 
-    # v1.3.10：预警附件本身没有「投诉分类」列（alert_orders 无该字段），
-    # 这里用单号去【重要通报】投诉受理明细 report_complaint_orders 里补一份。
-    # 一次批量查询，避免逐行 N+1。
-    # ⚠️ 两表时间窗不同：通报明细是 T-1（如 10-24 之前），预警投诉多为当天新受理，
-    #    因此新单大概率关联不上，返回空串，前端显示「-」。
-    cat_map = {}
+    # v1.3.11 投诉类型（category 字段）
+    # 预警附件 alert_orders 没有「投诉类型」字段，只有 order_type（家庭宽带/商客宽带），
+    # 那是工单类型不是投诉类型。这里用单号去两张带分类的表反查，都查不到时用
+    # order_type 兜底（用户确认：宁可显示兜底值也不要大片空白）。
+    # 批量 in_() 查询，避免逐行 N+1。
+    # ⚠️ 时效限制：预警投诉多为当天 17-19 点受理的新单，而 complaint_orders(宽表)
+    #    停在当天上午的上传时刻、report_complaint_orders(通报) 是 T-1，
+    #    因此当天新单基本关联不上，此时回落到 order_type。
+    cat_map, src_map = {}, {}
     if type == "complaint":
         nos = [r.order_no for r in rows if r.order_no]
         if nos:
+            # 源1：通报投诉明细（T-1，精度最高，多级分类串）
             for fno, cat in db.query(ReportComplaintOrder.flow_no,
                                      ReportComplaintOrder.category).filter(
                     ReportComplaintOrder.flow_no.in_(nos)).all():
-                if fno:
-                    cat_map[fno] = cat or ""
+                if fno and cat:
+                    cat_map[fno] = cat
+                    src_map[fno] = "通报"
+            # 源2：投诉宽表（当日上传，补通报还没覆盖到的单）
+            for eno, cat in db.query(ComplaintOrder.eoms_no,
+                                     ComplaintOrder.complaint_category).filter(
+                    ComplaintOrder.eoms_no.in_(nos)).all():
+                if eno and cat and eno not in cat_map:
+                    cat_map[eno] = cat
+                    src_map[eno] = "宽表"
 
     out = []
     for r in rows:
         d = {k: getattr(r, k) for k in keys}
         if type == "complaint":
-            d["category"] = cat_map.get(r.order_no, "")
+            real = cat_map.get(r.order_no, "")
+            if real:
+                d["category"] = real
+                d["category_src"] = src_map.get(r.order_no, "")
+            else:
+                # 兜底：用工单类型占位，并标记来源，前端灰显区分
+                d["category"] = r.order_type or ""
+                d["category_src"] = "兜底"
         out.append(d)
     return {"rows": out}
