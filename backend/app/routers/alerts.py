@@ -10,6 +10,7 @@ from email.header import decode_header
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import MAIL_USER, MAIL_AUTH
@@ -734,8 +735,11 @@ def report_drill(kind: str = Query(...), district: str = Query(""), level: str =
         elif level == "金":
             q = q.filter(ReportComplaintOrder.global_pass.like("%金卡%"),
                          ~ReportComplaintOrder.global_pass.like("%白金%"))
-        if not show_done:      # 默认只列待施工；勾选「显示已完工」后放开状态过滤
-            q = q.filter(ReportComplaintOrder.status.like("%待施工%"))
+        # v1.3.9：该表没有「待施工」状态（实测全是「已施工」），原过滤必然返回空。
+        # 改为默认排除已完成（已施工/已归档/已完工/已回单），show_done=true 时全部列出。
+        if not show_done:
+            q = q.filter(func.coalesce(ReportComplaintOrder.status, "").notin_(
+                ("已施工", "已归档", "已完工", "已回单")))
         if district:
             q = q.filter(ReportComplaintOrder.district == district)
         rows = q.order_by(ReportComplaintOrder.id.desc()).limit(limit).all()
@@ -789,16 +793,32 @@ def alert_summary(district: str = Query(""), user=Depends(get_current_user), db:
              "level": r.warn_level, "count": r.order_count, "warn_time": r.warn_time}
             for r in monitors if "告警" in (r.warn_level or "")]
 
-    # 全球通客户投诉计数：来自最新【重要通报】受理明细（预警附件无全球通列）
-    # 口径：仅「待施工」工单；已完工工单通过下钻明细的「显示已完工」勾选查看
+    # 全球通客户投诉计数：来自最新【重要通报】投诉受理明细（预警附件无全球通列）
+    # v1.3.9 修复：原口径只统计 status 含「待施工」的单子，但这张表实测 4207/4212 行
+    # 全是「已施工」，从来没有「待施工」状态 → 白金卡/钻石卡恒显示 0，与实际不符。
+    # 现改为同时给出两个数：total=当月该等级全部工单，open=尚未完成的工单。
+    # 「已完成」判定与投诉明细页签一致（已施工/已归档/已完工/已回单）。
+    DONE_ST = ("已施工", "已归档", "已完工", "已回单")
+
+    def _is_done(s):
+        return any(k in (s or "") for k in DONE_ST)
+
     cq = db.query(ReportComplaintOrder)
     if district:
         cq = cq.filter(ReportComplaintOrder.district == district)
     gps = [(r.global_pass or "", r.status or "") for r in cq.all()]
+
+    def _cnt(pred):
+        hit = [s for g, s in gps if pred(g)]
+        return {"total": len(hit), "open": sum(1 for s in hit if not _is_done(s))}
+
     global_cnt = {
-        "platinum": sum(1 for g, s in gps if "白金" in g and "待施工" in s),
-        "diamond": sum(1 for g, s in gps if "钻石" in g and "待施工" in s),
-        "gold": sum(1 for g, s in gps if "金卡" in g and "白金" not in g and "待施工" in s),
+        "platinum": _cnt(lambda g: "白金" in g)["total"],
+        "diamond": _cnt(lambda g: "钻石" in g)["total"],
+        "gold": _cnt(lambda g: "金卡" in g and "白金" not in g)["total"],
+        "platinum_open": _cnt(lambda g: "白金" in g)["open"],
+        "diamond_open": _cnt(lambda g: "钻石" in g)["open"],
+        "gold_open": _cnt(lambda g: "金卡" in g and "白金" not in g)["open"],
         "total": len(gps),
     }
     return {

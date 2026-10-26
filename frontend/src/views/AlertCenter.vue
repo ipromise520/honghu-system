@@ -61,15 +61,19 @@
                 <div class="value">{{ alertMeta.counts?.warn_red ?? alertMeta.meta.warn_red }}<span class="unit">人</span></div>
                 <div class="sub">需立即调单</div>
               </div>
-              <div class="stat-card green">
+              <!-- v1.3.9：原口径错用「待施工」，该表实际全是「已施工」→ 恒为 0。
+                   现改为 大字=当月全部工单数，小字=其中未完成数，可点开下钻 -->
+              <div class="stat-card green clickable" :class="{ active: alertType === 'global' && globalLevel === '白金' }"
+                   @click="pickAlert('global', '白金')">
                 <div class="label">全球通-白金卡</div>
                 <div class="value">{{ alertMeta.global_cnt?.platinum ?? 0 }}<span class="unit">单</span></div>
-                <div class="sub">当月通报待施工</div>
+                <div class="sub">当月通报 · 未完成 {{ alertMeta.global_cnt?.platinum_open ?? 0 }} 单</div>
               </div>
-              <div class="stat-card blue">
+              <div class="stat-card blue clickable" :class="{ active: alertType === 'global' && globalLevel === '钻石' }"
+                   @click="pickAlert('global', '钻石')">
                 <div class="label">全球通-钻石</div>
                 <div class="value">{{ alertMeta.global_cnt?.diamond ?? 0 }}<span class="unit">单</span></div>
-                <div class="sub">当月通报待施工</div>
+                <div class="sub">当月通报 · 未完成 {{ alertMeta.global_cnt?.diamond_open ?? 0 }} 单</div>
               </div>
             </div>
 
@@ -80,8 +84,12 @@
                 <el-radio-button value="complaint">投诉待处理</el-radio-button>
                 <el-radio-button value="book">预约异常</el-radio-button>
                 <el-radio-button value="monitor">人员预警</el-radio-button>
+                <el-radio-button value="global">全球通投诉</el-radio-button>
               </el-radio-group>
               <span class="header-tip" v-if="monitorLevel">仅看{{ monitorLevel }}色告警</span>
+              <span class="header-tip" v-if="alertType === 'global' && globalLevel">仅看{{ globalLevel }}卡</span>
+              <el-checkbox v-if="alertType === 'global'" v-model="globalShowDone" size="small"
+                           @change="loadAlertOrders">显示已完成</el-checkbox>
             </div>
 
             <el-table v-if="alertType === 'install'" :data="alertRows" size="small" max-height="560">
@@ -112,6 +120,28 @@
               <el-table-column prop="handler" label="处理人" min-width="80" sortable />
               <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
               <el-table-column prop="community" label="小区" min-width="110" show-overflow-tooltip sortable />
+            </el-table>
+            <el-table v-else-if="alertType === 'global'" :data="alertRows" size="small" max-height="560">
+              <el-table-column prop="district" label="区县" width="85" sortable />
+              <el-table-column prop="flow_no" label="流水号" min-width="150" show-overflow-tooltip sortable />
+              <el-table-column prop="global_pass" label="全球通等级" width="115" sortable>
+                <template #default="{ row }">
+                  <el-tag size="small" :type="(row.global_pass || '').includes('钻石') ? 'danger'
+                    : (row.global_pass || '').includes('白金') ? 'warning'
+                    : (row.global_pass || '').includes('金卡') ? 'success' : 'info'">
+                    {{ row.global_pass || '-' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="工单状态" width="100" sortable>
+                <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column prop="category" label="投诉分类" min-width="180" show-overflow-tooltip sortable />
+              <el-table-column prop="theme" label="投诉主题" min-width="240" show-overflow-tooltip sortable />
+              <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
+              <el-table-column prop="handler" label="处理人" min-width="80" sortable />
+              <el-table-column prop="phone" label="联系电话" width="115" sortable />
+              <el-table-column prop="is_high_quality" label="高品质" width="80" sortable />
             </el-table>
             <el-table v-else-if="alertType === 'book'" :data="alertRows" size="small" max-height="560">
               <el-table-column prop="district" label="区县" width="85" sortable />
@@ -203,6 +233,8 @@ const alertRows = ref([])
 const alertSyncing = ref(false)
 const alertDistrict = ref('')
 const monitorLevel = ref('')
+const globalLevel = ref('')          // 全球通下钻等级：白金 / 钻石
+const globalShowDone = ref(false)    // 全球通是否显示已完成
 const h5 = ref({ overdue_hours: 2, count: 0, items: [] })
 
 const alertStTag = s => (s || '').includes('施工') ? 'warning'
@@ -237,6 +269,15 @@ async function loadAlerts() {
 
 async function loadAlertOrders() {
   try {
+    // 全球通走通报下钻接口（预警附件无全球通列），其余走预警快照接口
+    if (alertType.value === 'global') {
+      const r = await api.get('/alerts/report-drill', {
+        params: { kind: 'global', district: alertDistrict.value, level: globalLevel.value,
+                  show_done: globalShowDone.value, limit: 2000 },
+      })
+      alertRows.value = r.rows || []
+      return
+    }
     const r = await api.get('/alerts/orders', {
       params: { type: alertType.value, district: alertDistrict.value, limit: 2000 },
     })
@@ -254,6 +295,7 @@ async function loadH5() {
 function pickAlert(type, level = '') {
   alertType.value = type
   monitorLevel.value = type === 'monitor' ? level : ''
+  globalLevel.value = type === 'global' ? level : ''
   loadAlertOrders()
 }
 
@@ -276,3 +318,11 @@ async function syncAlert() {
 // 页面加载即拉 H5 实时超时（横幅需要），与当前 tab 无关
 onMounted(() => { loadH5(); load() })
 </script>
+
+<style scoped>
+/* v1.3.9：本页共 7 张卡（原 5 张 + 全球通 2 张），Dashboard.vue 全局定义的是 6 列，
+   导致第 7 张掉到第二行。这里覆盖为 7 等分，窄屏按 4/2 列自适应。 */
+.stat-cards { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }
+@media (max-width: 1400px) { .stat-cards { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; } }
+@media (max-width: 900px)  { .stat-cards { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+</style>
