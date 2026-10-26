@@ -29,6 +29,8 @@ api.interceptors.response.use(
       }
     } else if (err.code === 'ECONNABORTED') {
       ElMessage.error('请求超时，请稍后重试或联系管理员')
+    } else if (status >= 500) {
+      ElMessage.error('服务端处理异常，请稍后重试；若反复出现请联系管理员')
     } else {
       ElMessage.error(typeof detail === 'string' ? detail : (detail?.[0]?.msg || '请求失败'))
     }

@@ -35,6 +35,9 @@
       <!-- 后端格式告警（如 H5满意度通报旧版导出无人员明细）：入库前明确提示 -->
       <el-alert v-if="preview.warn" :title="preview.warn" type="warning" :closable="false" show-icon
                 style="margin-bottom:12px" />
+      <!-- 重复工单号告警（投诉综合查询等）：同键重复时入库自动保留最新记录 -->
+      <el-alert v-if="preview.dup_warning" :title="preview.dup_warning" type="warning" :closable="false"
+                show-icon style="margin-bottom:12px" />
       <el-table :data="preview.preview" size="small" max-height="400">
         <el-table-column v-for="c in preview.columns" :key="c" :prop="c" :label="c" min-width="120" show-overflow-tooltip />
       </el-table>

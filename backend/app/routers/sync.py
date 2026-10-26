@@ -83,6 +83,14 @@ def _batch_key(rows: list[dict], time_field: str = "accept_time") -> tuple:
     return (max(times) if times else "", len(rows))
 
 
+def _rep_count(s: str) -> int:
+    """从 sync_wide_batch 的 replaced 描述串中取行数；格式异常时容错为 0，避免确认入库再 500"""
+    try:
+        return int(s.split("(")[1].split("行")[0])
+    except (IndexError, ValueError, AttributeError):
+        return 0
+
+
 def sync_wide_batch(db: Session, model, key_field: str, rows: list[dict]) -> dict:
     """宽表批次比较入库（邮件同步与手动上传共用，保证 Web 展示始终为最新快照）：
     对新数据涉及的每个月，与库内同月数据比较 (最新受理时间, 行数)——
@@ -92,12 +100,24 @@ def sync_wide_batch(db: Session, model, key_field: str, rows: list[dict]) -> dic
     replaced, skipped = [], []
     for m in months:
         new_rows = [r for r in rows if r["month"] == m]
+        # 同批次同键去重：导出文件常见同一工单多段/重复记录，保留受理时间最新的一条，
+        # 否则 bulk_insert 遇重复主键直接 IntegrityError（确认入库 500）
+        best: dict = {}
+        for r in new_rows:
+            k = r.get(key_field) or ""
+            if k and (k not in best
+                      or str(r.get("accept_time") or "") > str(best[k].get("accept_time") or "")):
+                best[k] = r
+        new_rows = list(best.values())
         new_key = _batch_key(new_rows)
         cur = db.query(model).filter(model.month == m).all()
         old_key = (max((getattr(r, "accept_time") or "" for r in cur), default=""), len(cur))
         if new_key >= old_key:
             db.query(model).filter(model.month == m).delete(synchronize_session=False)
-            db.bulk_insert_mappings(model, new_rows)
+            # 分批插入：避免大文件触发 SQLite 变量数上限（too many SQL variables）
+            CHUNK = 500
+            for i in range(0, len(new_rows), CHUNK):
+                db.bulk_insert_mappings(model, new_rows[i:i + CHUNK])
             replaced.append(f"{m}({len(new_rows)}行,受理至{new_key[0][:16]})")
         else:
             skipped.append(f"{m}: 库内较新(受理至{old_key[0][:16]}/{old_key[1]}行)≥上传(受理至{new_key[0][:16]}/{new_key[1]}行)，未覆盖")
@@ -1024,7 +1044,10 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
             raise HTTPException(status_code=400,
                                 detail="「家宽投诉综合工单列表」sheet 未解析到数据行，请确认上传的是投诉综合查询表")
         months = sorted({r["month"] for r in rows if r["month"]})
+        dup = len(rows) - len({r["eoms_no"] for r in rows if r.get("eoms_no")})
         extra = {"orders": len(rows), "months": months}
+        if dup:
+            extra["dup_warning"] = f"检出 {dup} 个重复工单号，入库时将自动保留每条最新记录"
         preview = rows[:100]
     elif metric == "h5_survey":
         # H5满意度通报（集团大音平台）双格式：
@@ -1185,14 +1208,14 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
         # 装机宽表为当月累计快照：批次比较入库（与邮件明细同机制，旧快照不覆盖新数据）
         rows = [r for r in rows if r.get("order_id") and r.get("month")]
         res = sync_wide_batch(db, InstallOrder, "order_id", rows)
-        n = sum(int(s.split("(")[1].split("行")[0]) for s in res["replaced"])
+        n = sum(_rep_count(s) for s in res["replaced"])
         msg = (f"入库成功：装机宽表替换 {('、'.join(res['replaced']) or '无月份')}；"
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
                + "，指标已实时生效")
     elif job.metric in ("complaint_wide", "complaint_query"):
         rows = [r for r in rows if r.get("eoms_no") and r.get("month")]
         res = sync_wide_batch(db, ComplaintOrder, "eoms_no", rows)
-        n = sum(int(s.split("(")[1].split("行")[0]) for s in res["replaced"])
+        n = sum(_rep_count(s) for s in res["replaced"])
         msg = (f"入库成功：投诉宽表替换 {('、'.join(res['replaced']) or '无月份')}；"
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
                + "，指标已实时生效")
