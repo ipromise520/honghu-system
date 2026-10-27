@@ -545,6 +545,7 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                 hide_ext: bool = Query(False),
                 hide_modem: bool = Query(False),
                 hide_hkbz: bool = Query(False),
+                hide_zhzw: bool = Query(False),
                 limit: int = Query(20000, le=20000),
                 user=Depends(get_current_user), db: Session = Depends(get_db)):
     """宽表工单明细：装机/投诉按受理(投诉)时间倒序
@@ -571,6 +572,8 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             q = q.filter(~func.coalesce(ComplaintOrder.complaint_category, "").like("%光猫%"))
         if hide_hkbz:      # 不显示 HB-KHBZ 单
             q = q.filter(~func.coalesce(ComplaintOrder.eoms_no, "").like("%KHBZ%"))
+        if hide_zhzw:      # 不显示 HB-ZHZW 单（政企支撑类，前缀匹配）
+            q = q.filter(~func.coalesce(ComplaintOrder.eoms_no, "").like("HB-ZHZW%"))
         total = q.count()
         # 同时间点多条时 SQLite 排序不稳定，补主键(eoms_no)保证翻页不跳行
         rows = q.order_by(ComplaintOrder.accept_time.desc(),

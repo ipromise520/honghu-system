@@ -76,11 +76,18 @@
               <el-radio-button value="install">装机工单明细</el-radio-button>
               <el-radio-button value="complaint">投诉工单明细</el-radio-button>
             </el-radio-group>
-            <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
-            <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
-            <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
-            <el-checkbox v-model="showModem" size="small" @change="onDetailFilterChange">显示更换光猫</el-checkbox>
-            <el-checkbox v-model="showHkbz" size="small" @change="onDetailFilterChange">显示HB-KHBZ单</el-checkbox>
+            <!-- 勾选项随页签切换：装机页签管「已施工/延伸服务/已退撤/更换光猫」，
+                 投诉页签只留「HB-KHBZ / HB-ZHZW」两个单号类开关 -->
+            <template v-if="detailType === 'install'">
+              <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
+              <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
+              <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
+              <el-checkbox v-model="showModem" size="small" @change="onDetailFilterChange">显示更换光猫</el-checkbox>
+            </template>
+            <template v-else>
+              <el-checkbox v-model="showHkbz" size="small" @change="onDetailFilterChange">显示HB-KHBZ单</el-checkbox>
+              <el-checkbox v-model="showZhzw" size="small" @change="onDetailFilterChange">显示HB-ZHZW工单</el-checkbox>
+            </template>
           </div>
           <div class="detail-header-right">
             <!-- 该表数据来自「重要通报」邮件附件，与下方「重要通报」卡片同一数据源 -->
@@ -622,6 +629,7 @@ const showExt = ref(false)
 const showRefund = ref(false)
 const showModem = ref(false)
 const showHkbz = ref(false)
+const showZhzw = ref(false)   // 投诉页签：默认不勾选 = 明细里过滤掉 HB-ZHZW 工单
 const emptyTip = computed(() =>
   detailTotal.value === 0 && detailRows.value.length === 0 ? '暂无数据，请先上传对应宽表' : '暂无符合条件的数据')
 const trendRef = ref()
@@ -673,21 +681,42 @@ async function loadAiVisit() {
 
 async function loadDetail() {
   try {
-    const r = await api.get('/metrics/wide/orders', {
-      params: { month: month.value, type: detailType.value,
+    const p = { month: month.value, type: detailType.value,
                 district: district.value === '全部' ? '' : district.value,
-                page: detailPage.value, page_size: pageSize.value,
-                hide_done: !showDone.value, hide_refund: !showRefund.value,
-                hide_ext: !showExt.value, hide_modem: !showModem.value,
-                hide_hkbz: !showHkbz.value } })
+                page: detailPage.value, page_size: pageSize.value }
+    if (detailType.value === 'install') {
+      // 装机：四个开关全部可控；装机表无 HB-KHBZ / HB-ZHZW 单，不过滤单号
+      p.hide_done = !showDone.value
+      p.hide_ext = !showExt.value
+      p.hide_refund = !showRefund.value
+      p.hide_modem = !showModem.value
+      p.hide_hkbz = false
+      p.hide_zhzw = false
+    } else {
+      // 投诉：只留 HB-KHBZ / HB-ZHZW 两个开关；
+      // 已施工固定隐藏（与历史 299 条口径一致，用户 2026-10-27 确认），
+      // 延伸服务 / 更换光猫 / 已退撤 也固定维持原来的隐藏口径
+      p.hide_done = true
+      p.hide_ext = true
+      p.hide_refund = true
+      p.hide_modem = true
+      p.hide_hkbz = !showHkbz.value
+      p.hide_zhzw = !showZhzw.value
+    }
+    const r = await api.get('/metrics/wide/orders', { params: p })
     detailRows.value = r.rows || []
     detailTotal.value = r.total || 0
   } catch (e) { detailRows.value = []; detailTotal.value = 0 }
 }
 
 function onDetailTypeChange() {
-  // 默认不勾选「显示已施工」，两个明细页签均从默认（隐藏已施工）开始
+  // 切页签时两侧开关全部复位为默认不勾选，避免隐藏着的开关仍在过滤数据
   showDone.value = false
+  showExt.value = false
+  showRefund.value = false
+  showModem.value = false
+  showHkbz.value = false
+  showZhzw.value = false
   detailPage.value = 1
   loadDetail()
 }
