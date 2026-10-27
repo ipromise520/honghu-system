@@ -433,79 +433,137 @@
     </el-card>
 
     <!-- AI装维即访-不规范（人员通报，随顶部区县/月份筛选联动；数据同步页上传） -->
-    <el-card class="page-card">
+    <el-card class="page-card ai-visit-card" shadow="never">
       <template #header>
-        <div class="card-header">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <span class="title">AI装维即访-不规范</span>
-            <el-tag v-if="aiVisit.month" size="small" type="info">{{ aiVisit.month }}</el-tag>
-            <el-tag v-if="aiVisit.total" size="small" type="danger">共 {{ aiVisit.total }} 条</el-tag>
-            <span class="header-tip">
-              {{ district === '全部' ? '全部区县' : district }} · 仅统计「外呼成功」且勾选项为「不是」的工单 · 按责任人排序
+        <div class="av-head">
+          <div class="av-head-left">
+            <span class="av-title">AI装维即访 · 不规范</span>
+            <span v-if="aiVisit.month" class="av-pill">{{ aiVisit.month }}</span>
+            <span v-if="aiVisit.total" class="av-pill danger">共 {{ aiVisit.total }} 条</span>
+            <span class="av-head-note">
+              {{ district === '全部' ? '全部区县' : district }} · 仅统计「外呼成功」且勾选「不是」的工单 · 按责任人排序
             </span>
-            <span v-if="isAdmin" class="header-tip">上传入口：数据同步页 → 「AI装维即访」</span>
           </div>
+          <span v-if="isAdmin" class="av-head-note is-admin">上传入口：数据同步页 → 「AI装维即访」</span>
         </div>
       </template>
-      <!-- 区县规范率（当日 / 当月；低于 99% 标红） -->
-      <div class="rate-block">
-        <div class="rate-title">
-          <span>区县规范率（全部区县）</span>
-          <el-tag v-if="aiRates.date" size="small" type="info">当日数据：{{ aiRates.date }}</el-tag>
-          <span class="header-tip">口径：规范率 =（接通量 − 有问题工单量）/ 接通量 · 低于 99% 标红 · 指标明细见左侧「AI装维即访」页</span>
+
+      <!-- ① 区县规范率矩阵 -->
+      <section class="av-section">
+        <div class="av-sec-head">
+          <span class="av-sec-title">区县规范率</span>
+          <span v-if="aiRates.date" class="av-pill light">{{ aiRates.date }}</span>
+          <span class="av-sec-note">规范率 =（接通量 − 有问题工单量）/ 接通量 · 低于 99% 标红 · 条形长度按 95–100% 区间映射</span>
+          <span v-if="aiRateRows.length" class="av-sec-right">
+            全部区县 · <b :class="{ warn: lowRateCells > 0 }">{{ lowRateCells }}</b> 项低于 99%
+          </span>
         </div>
-        <el-table :data="aiRateRows" size="small" border style="margin-bottom:14px"
+        <el-table :data="aiRateRows" size="small" class="av-table av-rate-table"
+                  :row-class-name="aiRateRowClass"
                   empty-text="暂无规范率通报，请在数据同步页上传「AI装维即访」回访清单">
-          <el-table-column prop="district" label="区县" width="110" fixed />
-          <el-table-column label="装机 · 当日" min-width="110" align="right">
-            <template #default="{ row }">
-              <span :class="{ 'gp-red': row.iDay && row.iDay.rate < 99 }"
-                    :title="row.iDay ? `接通 ${row.iDay.connected} · 问题 ${row.iDay.problem} 单` : ''">
-                {{ row.iDay ? row.iDay.rate + '%' : '-' }}
-              </span>
-            </template>
+          <el-table-column prop="district" label="区县" width="104">
+            <template #default="{ row }"><span class="av-dist">{{ row.district }}</span></template>
           </el-table-column>
-          <el-table-column label="装机 · 当月" min-width="110" align="right">
-            <template #default="{ row }">
-              <span :class="{ 'gp-red': row.iMonth && row.iMonth.rate < 99 }"
-                    :title="row.iMonth ? `接通 ${row.iMonth.connected} · 问题 ${row.iMonth.problem} 单` : ''">
-                {{ row.iMonth ? row.iMonth.rate + '%' : '-' }}
-              </span>
-            </template>
+          <el-table-column label="装机" align="center">
+            <el-table-column label="当日" min-width="116" align="center">
+              <template #default="{ row }">
+                <div v-if="row.iDay" class="av-cell-wrap" :title="`接通 ${row.iDay.connected} · 问题 ${row.iDay.problem} 单`">
+                  <span class="av-num" :class="{ low: row.iDay.rate < 99 }">{{ row.iDay.rate }}%</span>
+                  <span class="av-track"><i :style="{ width: barW(row.iDay.rate) }"></i></span>
+                </div>
+                <span v-else class="av-na">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="当月" min-width="116" align="center">
+              <template #default="{ row }">
+                <div v-if="row.iMonth" class="av-cell-wrap" :title="`接通 ${row.iMonth.connected} · 问题 ${row.iMonth.problem} 单`">
+                  <span class="av-num" :class="{ low: row.iMonth.rate < 99 }">{{ row.iMonth.rate }}%</span>
+                  <span class="av-track"><i :style="{ width: barW(row.iMonth.rate) }"></i></span>
+                </div>
+                <span v-else class="av-na">—</span>
+              </template>
+            </el-table-column>
           </el-table-column>
-          <el-table-column label="投诉 · 当日" min-width="110" align="right">
-            <template #default="{ row }">
-              <span :class="{ 'gp-red': row.cDay && row.cDay.rate < 99 }"
-                    :title="row.cDay ? `接通 ${row.cDay.connected} · 问题 ${row.cDay.problem} 单` : ''">
-                {{ row.cDay ? row.cDay.rate + '%' : '-' }}
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column label="投诉 · 当月" min-width="110" align="right">
-            <template #default="{ row }">
-              <span :class="{ 'gp-red': row.cMonth && row.cMonth.rate < 99 }"
-                    :title="row.cMonth ? `接通 ${row.cMonth.connected} · 问题 ${row.cMonth.problem} 单` : ''">
-                {{ row.cMonth ? row.cMonth.rate + '%' : '-' }}
-              </span>
-            </template>
+          <el-table-column label="投诉" align="center">
+            <el-table-column label="当日" min-width="116" align="center">
+              <template #default="{ row }">
+                <div v-if="row.cDay" class="av-cell-wrap" :title="`接通 ${row.cDay.connected} · 问题 ${row.cDay.problem} 单`">
+                  <span class="av-num" :class="{ low: row.cDay.rate < 99 }">{{ row.cDay.rate }}%</span>
+                  <span class="av-track"><i :style="{ width: barW(row.cDay.rate) }"></i></span>
+                </div>
+                <span v-else class="av-na">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="当月" min-width="116" align="center">
+              <template #default="{ row }">
+                <div v-if="row.cMonth" class="av-cell-wrap" :title="`接通 ${row.cMonth.connected} · 问题 ${row.cMonth.problem} 单`">
+                  <span class="av-num" :class="{ low: row.cMonth.rate < 99 }">{{ row.cMonth.rate }}%</span>
+                  <span class="av-track"><i :style="{ width: barW(row.cMonth.rate) }"></i></span>
+                </div>
+                <span v-else class="av-na">—</span>
+              </template>
+            </el-table-column>
           </el-table-column>
         </el-table>
-      </div>
+      </section>
 
-      <el-table :data="aiVisitRows" size="small" max-height="440" v-loading="aiVisitLoading"
-                :default-sort="{ prop: 'handler', order: 'ascending' }"
-                empty-text="当前月份/区县暂无「不规范」记录，可在数据同步页上传「AI装维即访」回访清单">
-        <el-table-column prop="district" label="区县" width="95" sortable />
-        <el-table-column prop="handler" label="责任人" min-width="110" sortable />
-        <el-table-column prop="item" label="不规范项" min-width="110" sortable>
-          <template #default="{ row }">
-            <el-tag size="small" type="danger">{{ row.item }}</el-tag>
-            <el-tag size="small" :type="row.kind === '装机' ? 'primary' : 'warning'" style="margin-left:6px">{{ row.kind }}</el-tag>
+      <!-- ② 不规范明细 -->
+      <section class="av-section">
+        <div class="av-sec-head">
+          <span class="av-sec-title">不规范明细</span>
+          <span v-if="aiVisitRows.length" class="av-pill light">{{ aiVisitRows.length }} 条</span>
+          <span class="av-sec-note">点击工单号可复制</span>
+          <div v-if="aiItemStat.length" class="av-chips">
+            <span v-for="c in aiItemStat" :key="c.item" class="av-chip"
+                  :class="c.kind === '装机' ? 'k-install' : (c.kind === '投诉' ? 'k-complaint' : 'k-mixed')">
+              {{ c.item }}<b>{{ c.count }}</b>
+            </span>
+          </div>
+        </div>
+        <el-table :data="aiVisitRows" size="small" max-height="512" v-loading="aiVisitLoading"
+                  class="av-table av-issue-table"
+                  :default-sort="{ prop: 'handler', order: 'ascending' }">
+          <el-table-column v-if="district === '全部'" prop="district" label="区县" width="94" sortable>
+            <template #default="{ row }"><span class="av-dist-sm">{{ row.district }}</span></template>
+          </el-table-column>
+          <el-table-column prop="handler" label="责任人" min-width="156" sortable>
+            <template #default="{ row }">
+              <div class="av-person">
+                <span class="av-avatar">{{ (row.handler || '?').slice(0, 1) }}</span>
+                <span class="av-name">{{ row.handler }}</span>
+                <span v-if="aiHandlerCount[row.handler] > 1" class="av-repeat"
+                      :title="`本表共 ${aiHandlerCount[row.handler]} 条不规范`">×{{ aiHandlerCount[row.handler] }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="item" label="不规范项" min-width="176" sortable>
+            <template #default="{ row }">
+              <div class="av-item" :class="row.kind === '装机' ? 'k-install' : 'k-complaint'">
+                <span class="av-dot"></span>
+                <span class="av-item-name">{{ row.item }}</span>
+                <span class="av-item-kind">{{ row.kind }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="order_no" label="工单号" min-width="196" sortable>
+            <template #default="{ row }">
+              <span class="av-order" :title="'点击复制 ' + row.order_no"
+                    @click="copyOrder(row.order_no)">{{ row.order_no }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="completion_time" label="回单时间" width="132" sortable>
+            <template #default="{ row }">
+              <span class="av-time">
+                <b>{{ (row.completion_time || '').slice(0, 10) }}</b>
+                <i>{{ (row.completion_time || '').slice(11, 16) }}</i>
+              </span>
+            </template>
+          </el-table-column>
+          <template #empty>
+            <div class="av-empty">当前月份 / 区县暂无「不规范」记录</div>
           </template>
-        </el-table-column>
-        <el-table-column prop="order_no" label="工单号" min-width="170" show-overflow-tooltip sortable />
-        <el-table-column prop="completion_time" label="回单时间" width="160" sortable />
-      </el-table>
+        </el-table>
+      </section>
     </el-card>
 
     <!-- 通报/预警卡片下钻明细对话框 -->
@@ -659,6 +717,63 @@ const aiRateRows = computed(() => {
   let list = AI_DIST_ORDER.filter(d => map[d]).map(d => map[d])
   return list
 })
+
+// 规范率矩阵：低于 99% 的格数 / 合计行高亮 / 条形长度映射（95–100% → 6–100%）
+const lowRateCells = computed(() => {
+  let n = 0
+  for (const r of aiRateRows.value) {
+    if (r.district === '荆州') continue  // 荆州是合计行，不参与区县口径计数
+    for (const k of ['iDay', 'iMonth', 'cDay', 'cMonth']) {
+      if (r[k] && typeof r[k].rate === 'number' && r[k].rate < 99) n++
+    }
+  }
+  return n
+})
+const aiRateRowClass = ({ rowIndex }) => {
+  const r = aiRateRows.value[rowIndex]
+  return r && r.district === '荆州' ? 'av-sum-row' : ''
+}
+const barW = r => Math.max(6, Math.min(100, (Number(r) - 95) * 20)) + '%'
+
+// 不规范明细：责任人被通报次数、不规范项分布
+const aiHandlerCount = computed(() => {
+  const m = {}
+  for (const r of aiVisitRows.value) m[r.handler] = (m[r.handler] || 0) + 1
+  return m
+})
+const aiItemStat = computed(() => {
+  const m = {}
+  for (const r of aiVisitRows.value) {
+    const it = r.item || '未分类'
+    if (!m[it]) m[it] = { item: it, count: 0, kinds: new Set() }
+    m[it].count++
+    m[it].kinds.add(r.kind)
+  }
+  return Object.values(m)
+    .map(x => ({ item: x.item, count: x.count, kind: x.kinds.size === 1 ? [...x.kinds][0] : '' }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+})
+
+function copyOrder(no) {
+  if (!no) return
+  const ok = () => ElMessage.success('已复制工单号 ' + no)
+  const fallback = () => {
+    const ta = document.createElement('textarea')
+    ta.value = no
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy'); ok() } catch (e) { ElMessage.warning('复制失败，请手动选择') }
+    document.body.removeChild(ta)
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(no).then(ok).catch(fallback)
+  } else {
+    fallback()
+  }
+}
 
 async function loadAiVisit() {
   aiVisitLoading.value = true
@@ -1171,5 +1286,125 @@ onBeforeUnmount(() => {
   .toolbar { flex-wrap: wrap; margin-bottom: 10px; }
   .page-card { margin-bottom: 10px; }
   .page-card :deep(.el-card__body) { padding: 12px; }
+}
+
+/* ============ AI装维即访 · 不规范 卡片（v1.3.15 视觉重构） ============ */
+.ai-visit-card { border: 1px solid #edf0f5; }
+.ai-visit-card :deep(.el-card__header) {
+  padding: 12px 16px;
+  background: linear-gradient(90deg, #f6faff 0%, #ffffff 62%);
+  border-bottom: 1px solid #edf0f5;
+}
+.av-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.av-head-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.av-title { font-size: 15px; font-weight: 700; color: #1f2d3d; letter-spacing: .3px; }
+.av-title::before {
+  content: ''; display: inline-block; width: 3px; height: 14px; border-radius: 2px;
+  background: #1a6fdb; margin-right: 8px; vertical-align: -2px;
+}
+.av-pill {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 600; background: #eef2f7; color: #5a6474; white-space: nowrap;
+}
+.av-pill.danger { background: #fef0f0; color: #f56c6c; }
+.av-pill.light { background: #eef5ff; color: #1a6fdb; font-weight: 500; }
+.av-head-note { font-size: 12px; color: #9aa3af; }
+
+.av-section { margin-top: 14px; }
+.av-section + .av-section { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #e9edf3; }
+.av-sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.av-sec-title { font-size: 13px; font-weight: 700; color: #303133; }
+.av-sec-title::before {
+  content: ''; display: inline-block; width: 3px; height: 12px; background: #c4ccd8;
+  border-radius: 2px; margin-right: 7px; vertical-align: -1px;
+}
+.av-sec-note { font-size: 11.5px; color: #a8b1bd; }
+.av-sec-right { margin-left: auto; font-size: 12px; color: #8a94a6; white-space: nowrap; }
+.av-sec-right b { font-size: 13px; color: #5a6474; }
+.av-sec-right b.warn { color: #f56c6c; }
+
+.av-table { --el-table-border-color: #eef1f6; font-variant-numeric: tabular-nums; }
+.av-table :deep(th.el-table__cell) {
+  background: #f7f9fc !important; color: #5f6b7d; font-weight: 600; font-size: 12px;
+  letter-spacing: .3px; padding: 7px 0; border-bottom: 1px solid #e6ebf2;
+}
+.av-table :deep(.el-table__row > td) { border-bottom: 1px solid #f2f5f9; }
+.av-table :deep(.el-table__row--striped > td) { background: #fafcfe; }
+.av-table :deep(.el-table__row:hover > td) { background: #eef6ff !important; }
+.av-table :deep(.el-table__inner-wrapper::before) { display: none; }
+.av-table :deep(.el-table__empty-block) { min-height: 120px; }
+
+/* ① 规范率矩阵 */
+.av-rate-table :deep(.el-table__header tr:first-child th) {
+  background: #eef2f8 !important; color: #445066; font-size: 12.5px; font-weight: 700;
+}
+.av-rate-table :deep(.el-table__cell) { padding: 5px 0; }
+.av-dist { font-weight: 600; color: #303133; font-size: 12.5px; padding-left: 10px; }
+.av-cell-wrap {
+  display: flex; align-items: center; gap: 10px; padding: 0 18px;
+}
+.av-num {
+  flex: none; width: 50px; text-align: right; font-size: 12.5px; font-weight: 700;
+  color: #2f3a4a; line-height: 1.2;
+}
+.av-num.low { color: #f56c6c; }
+.av-track { flex: 1; min-width: 40px; height: 5px; border-radius: 3px; background: #eef1f6; overflow: hidden; display: block; }
+.av-track i { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, #9cc4f5, #1a6fdb); transition: width .3s; }
+.av-num.low ~ .av-track i { background: linear-gradient(90deg, #ffb8b8, #f56c6c); }
+.av-na { color: #dcdfe6; }
+.av-rate-table :deep(.av-sum-row > td) { background: #f2f7ff !important; }
+.av-rate-table :deep(.av-sum-row) .av-dist { color: #1a6fdb; }
+.av-rate-table :deep(.av-sum-row) .av-num { color: #1a6fdb; }
+.av-rate-table :deep(.av-sum-row) .av-num.low { color: #f56c6c; }
+
+/* ② 不规范明细 */
+.av-issue-table :deep(.el-table__cell) { padding: 7px 0; }
+.av-dist-sm { font-size: 12px; color: #6b7688; padding-left: 6px; }
+.av-person { display: flex; align-items: center; gap: 8px; padding-left: 6px; }
+.av-avatar {
+  width: 22px; height: 22px; border-radius: 50%; background: #eaf0f8; color: #5a6474;
+  font-size: 11px; font-weight: 700; display: inline-flex; align-items: center;
+  justify-content: center; flex: none;
+}
+.av-name { font-weight: 600; color: #303133; font-size: 12.5px; }
+.av-repeat {
+  font-size: 10.5px; font-weight: 700; color: #6b7688; background: #eef2f7;
+  border-radius: 8px; padding: 0 5px; line-height: 16px;
+}
+.av-item { display: flex; align-items: center; gap: 7px; padding-left: 6px; }
+.av-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.av-item.k-install .av-dot { background: #1a6fdb; }
+.av-item.k-complaint .av-dot { background: #e6a23c; }
+.av-item-name { font-weight: 600; color: #303133; font-size: 12.5px; }
+.av-item-kind { font-size: 11px; padding: 0 6px; border-radius: 8px; line-height: 16px; }
+.av-item.k-install .av-item-kind { color: #1a6fdb; background: #eef5ff; }
+.av-item.k-complaint .av-item-kind { color: #b8791c; background: #fdf6ec; }
+.av-order {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+  color: #5a6474; letter-spacing: -.2px; cursor: pointer; border-bottom: 1px dashed transparent;
+}
+.av-order:hover { color: #1a6fdb; border-bottom-color: #b3d0f5; }
+.av-time { display: flex; flex-direction: column; line-height: 1.35; padding-left: 4px; }
+.av-time b { font-weight: 600; font-size: 12px; color: #303133; }
+.av-time i { font-style: normal; font-size: 11px; color: #9aa3af; }
+.av-empty { padding: 28px 0; text-align: center; color: #b3bac5; font-size: 12.5px; }
+
+.av-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.av-chip {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px;
+  border-radius: 11px; background: #f5f7fa; font-size: 11.5px; color: #5f6b7d;
+}
+.av-chip b { font-weight: 700; color: #2f3a4a; }
+.av-chip.k-install { background: #eef5ff; }
+.av-chip.k-complaint { background: #fdf6ec; }
+.av-chip.k-mixed { background: #f2f4f8; color: #6b7688; }
+
+@media (max-width: 1280px) {
+  .av-head-note.is-admin { display: none; }
+}
+@media (max-width: 900px) {
+  .av-sec-note, .av-chips { display: none; }
+  .av-head-note { display: none; }
+  .av-cell-wrap { padding: 0 8px; }
 }
 </style>
