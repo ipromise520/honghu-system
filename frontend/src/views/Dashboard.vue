@@ -932,7 +932,7 @@ const reportCards = computed(() => {
       sub: all ? `九区县平均 · ${rSum(iv, 'month_order')} 收单 / ${rSum(iv, 'month_done')} 竣工` : `收单 ${i.month_order ?? dash} · 竣工 ${i.month_done ?? dash}` },
     { key: 'trate', label: '装机及时率', tone: 'blue', unit: '%', drill: 'untimely',
       value: all ? rAvg(iv, 'timely_rate') : (i.timely_rate ?? dash),
-      sub: all ? '九区县平均 · 全部上门不及时明细' : `不及时 ${i.untimely ?? dash} 单 · 上门及时率 ${i.visit_timely_rate ?? dash}%` },
+      sub: all ? '九区县平均 · 全部上门不及时明细' : `不及时 ${i.visit_untimely ?? dash} 单 · 上门及时率 ${i.visit_timely_rate ?? dash}%` },
     { key: 'timeout', label: '装机超时工单', tone: 'red', unit: '单', drill: 'timeout',
       value: all ? rSum(iv, 'timeout_orders') : (i.timeout_orders ?? dash),
       sub: all ? '九区县合计 · 全部超时盯控明细' : `超时占比 ${i.timeout_rate ?? dash}%` },

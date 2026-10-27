@@ -74,6 +74,26 @@ def _t(v) -> str:
     return "" if s.lower() in ("nan", "nat", "none") else s
 
 
+def _first_t(r, *keys) -> str:
+    """按顺序取第一个非空时间列。
+
+    背景：通报装机宽表明细的「预约结束时间」列只有日期（源表即如此），
+    而「预约时间段结束时间」带完整时分秒，两者日期实测 18327 行完全一致。
+    pandas 的 NaN 是"真值"，不能用 `a or b`，必须显式判空。
+    """
+    for k in keys:
+        v = r.get(k)
+        try:
+            if v is None or pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        s = _t(v)
+        if s:
+            return s
+    return ""
+
+
 def fetch_mail() -> dict:
     """拉取最新预警邮件，返回 {subject, mail_date, attachments: {name: bytes}}"""
     m = _conn()
@@ -346,7 +366,8 @@ def sync_report(db: Session) -> dict:
                 continue
             timeouts.append(dict(
                 district=_s(r.get("区县")), order_no=_s(r.get("单号")), theme=_s(r.get("定单主题")),
-                accept_time=_t(r.get("受理时间")), appoint_end=_t(r.get("预约结束时间")),
+                accept_time=_t(r.get("受理时间")),
+                appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
                 step=_s(r.get("当前环节")), handler=_s(r.get("当前处理人")),
                 phone=_s(r.get("当前处理人电话")), ctrl_type=_s(r.get("预约盯控类型"))))
     # ---- 4) 投诉通报（sheet 投诉指标通报，header=1；白名单排除荆州市全市行/通报文字行）----
@@ -413,7 +434,8 @@ def sync_report(db: Session) -> dict:
                 district=_s(r.get("区县")), grid=_s(r.get("网格")), order_no=_s(r.get("定单编码")),
                 theme=_s(r.get("业务主题")), broadband_type=_s(r.get("宽带类型")),
                 status=_s(r.get("定单状态")), step=_s(r.get("当前环节")),
-                accept_time=_t(r.get("受理时间")), appoint_end=_t(r.get("预约结束时间")),
+                accept_time=_t(r.get("受理时间")),
+                appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
                 handler=_s(r.get("当前处理人或回单人")),
                 is_timely=str(_num(r.get("是否及时"))), visit_timely=str(_num(r.get(vcol))),
                 fttr_over=str(_num(r.get("FTTR超2.5小时"))), is_high_quality=_s(r.get("高品质标签"))))
