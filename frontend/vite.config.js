@@ -37,7 +37,7 @@ export default defineConfig({
         // 按需引入后各组件已自动切成独立小 chunk
         manualChunks: {
           vue: ['vue', 'vue-router', 'pinia'],
-          echarts: ['echarts'],
+          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers'],
         }
       }
     }

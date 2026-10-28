@@ -1,29 +1,124 @@
-:root {
-  --hh-primary: #1a6fdb;
-  --hh-sidebar: #1d2b3a;
+@import './styles/tokens.css';
+
+/* ============================================================
+ * style.css — Web8011 全局样式（政务数据台）
+ * 全局类契约（视图依赖）：page-card / card-header(.title) / toolbar /
+ *   stat-cards / stat-card(.label/.value/.unit) / nowrap-cell
+ * ============================================================ */
+
+/* —— base —— */
+* { box-sizing: border-box; }
+html, body { max-width: 100%; }
+body {
+  margin: 0;
+  font-family: var(--hh-font);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--hh-text);
+  background: var(--hh-bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#app { height: 100%; }
+h1, h2, h3, h4 { margin: 0; color: var(--hh-text); font-weight: 600; }
+a { color: var(--hh-primary); text-decoration: none; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* 可见焦点圈（键盘可达性） */
+:focus-visible { outline: 2px solid var(--hh-primary); outline-offset: 2px; border-radius: 4px; }
+
+/* —— 卡片统一（el-card 也走这套，未包 page-card 的视图自动受益） —— */
+.el-card {
+  border: 1px solid var(--hh-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1) !important;
+  transition: box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.el-card:hover { box-shadow: var(--shadow-2) !important; }
+.el-card__header {
+  border-bottom: 1px solid var(--hh-border);
+  font-weight: 600; color: var(--hh-text);
+  padding: 14px 16px !important;
+}
+.el-card__body { padding: 16px !important; }
+
+/* —— 全局类契约 —— */
+.page-card { margin-bottom: var(--space-4); }
+.card-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.card-header .title { font-weight: 600; font-size: var(--fs-h3); color: var(--hh-text); }
+.card-header .actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+
+.toolbar {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-2); margin-bottom: var(--space-3);
 }
 
-.page-card { margin-bottom: 16px; }
-.card-header { display: flex; align-items: center; justify-content: space-between; }
-.card-header .title { font-weight: 600; font-size: 15px; color: #303133; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.stat-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px; }
-@media (max-width: 1200px) { .stat-cards { grid-template-columns: repeat(3, 1fr); } }
-.stat-card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
-.stat-card .label { color: #909399; font-size: 13px; }
-.stat-card .value { font-size: 26px; font-weight: 700; color: #303133; margin-top: 6px; }
-.stat-card .unit { font-size: 13px; color: #909399; margin-left: 4px; }
-.el-table { --el-table-header-bg-color: #f7f9fc; }
+.stat-cards {
+  display: grid; grid-template-columns: repeat(6, 1fr);
+  gap: var(--space-3); margin-bottom: var(--space-4);
+}
+.stat-card {
+  background: var(--hh-surface); border: 1px solid var(--hh-border);
+  border-radius: var(--radius-md); padding: var(--space-4);
+  box-shadow: var(--shadow-1);
+  transition: box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.stat-card:hover { box-shadow: var(--shadow-2); transform: translateY(-2px); }
+.stat-card .label { color: var(--hh-muted); font-size: var(--fs-sm); }
+.stat-card .value {
+  font-size: 26px; font-weight: 700; color: var(--hh-text);
+  margin-top: 6px; font-variant-numeric: tabular-nums; line-height: var(--lh-tight);
+}
+.stat-card .unit { font-size: var(--fs-sm); color: var(--hh-muted); margin-left: 4px; }
+
+/* 表格表头底色（与令牌对齐） */
+.el-table { --el-table-header-bg-color: var(--hh-surface-2); --el-table-border-color: var(--hh-border); }
+.el-table th.el-table__cell { font-weight: 600; color: var(--hh-text-2); }
+.el-table .cell { color: var(--hh-text); }
 .nowrap-cell .cell { white-space: nowrap; }
 
-/* 移动端适配 */
-html, body { overflow-x: hidden; }
+/* —— 响应式工具类 —— */
+/* 表格横向滚动容器：移动端表格可横滑且不被裁 */
+.table-scroll {
+  width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  border-radius: var(--radius-md);
+}
+.table-scroll .el-table { width: 100%; }
+/* 移动端隐藏低频列 */
+.hh-hide-sm { }
+@media (max-width: 768px) { .hh-hide-sm { display: none !important; } }
+@media (max-width: 1024px) { .hh-hide-md { display: none !important; } }
+
+/* 入场动效（错峰淡入上移，仅 transform/opacity） */
+@keyframes hhIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+.hh-reveal { animation: hhIn var(--dur-base) var(--ease-out) both; }
+
+/* —— 响应式断点 —— */
+@media (max-width: 1200px) {
+  .stat-cards { grid-template-columns: repeat(3, 1fr); }
+}
 @media (max-width: 768px) {
   .stat-cards { grid-template-columns: repeat(2, 1fr) !important; gap: 10px; }
   .stat-card { padding: 12px; }
   .stat-card .value { font-size: 20px; }
-  /* 表格在窄屏可横向滑动，避免撑破布局 */
-  .el-table { width: 100%; }
-  .el-dialog { width: 92% !important; }
-  .el-date-picker, .el-select { width: 100% !important; }
+  /* 弹窗手机全宽可用（覆盖内联 width） */
+  .el-dialog { width: 92vw !important; max-width: 92vw !important; }
+  .el-overlay-dialog .el-dialog { margin-top: 8vh !important; }
+  .el-date-picker, .el-select, .el-input { width: 100% !important; }
+  .el-form-item { margin-bottom: 14px; }
+}
+@media (max-width: 480px) {
+  .stat-cards { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+/* 移动端弹窗内表单纵向堆叠更顺手（全局兜底） */
+@media (max-width: 768px) {
+  .el-dialog .el-form--label-top .el-form-item__label { padding-bottom: 4px; }
+}
+
+/* 降级动效 */
+@media (prefers-reduced-motion: reduce) {
+  .hh-reveal { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .stat-card:hover { transform: none !important; }
+  * { scroll-behavior: auto !important; }
 }

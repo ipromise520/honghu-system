@@ -1,6 +1,6 @@
 """工单管理（手册 7.3）"""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from ..database import get_db

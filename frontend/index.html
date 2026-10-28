@@ -2,11 +2,29 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#16263a" />
+  <meta name="description" content="洪湖支撑服务中心管理系统（Web8011）" />
   <title>洪湖支撑服务中心管理系统</title>
+  <style>
+    /* 首屏占位：JS 未就绪时即给出品牌与加载态，弱网下避免白屏（感知性能） */
+    html, body { margin: 0; height: 100%; background: #eef1f6; }
+    .boot-splash { position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px;
+      background: radial-gradient(120% 120% at 50% 0%, #1d3a63 0%, #16263a 55%, #0f1b2c 100%); }
+    .boot-splash .boot-logo { color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 1px; }
+    .boot-spin { width: 30px; height: 30px; border: 3px solid rgba(255,255,255,.25);
+      border-top-color: #4da1ff; border-radius: 50%; animation: bootSpin .8s linear infinite; }
+    @keyframes bootSpin { to { transform: rotate(360deg); } }
+  </style>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app">
+    <div class="boot-splash">
+      <div class="boot-logo">洪湖支撑服务中心</div>
+      <div class="boot-spin"></div>
+    </div>
+  </div>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

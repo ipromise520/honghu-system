@@ -5,7 +5,7 @@
         <el-icon size="22" color="#4da1ff"><Platform /></el-icon>
         <div>
           <div class="logo-title">洪湖支撑服务中心</div>
-          <div class="logo-sub">8080 管理系统</div>
+          <div class="logo-sub">Web8011 运维平台</div>
         </div>
       </div>
       <el-menu :default-active="$route.path" router background-color="#1d2b3a" text-color="#aeb9c5"
@@ -54,7 +54,7 @@
           <el-icon size="22" color="#4da1ff"><Platform /></el-icon>
           <div>
             <div class="logo-title">洪湖支撑服务中心</div>
-            <div class="logo-sub">8080 管理系统</div>
+            <div class="logo-sub">Web8011 运维平台</div>
           </div>
         </div>
         <el-menu :default-active="$route.path" router background-color="#1d2b3a" text-color="#aeb9c5"
@@ -185,22 +185,35 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .logo { display: flex; gap: 10px; align-items: center; padding: 18px 16px; color: #fff; }
-.logo-title { font-weight: 700; font-size: 15px; }
+.logo-title { font-weight: 700; font-size: 15px; letter-spacing: .5px; }
 .logo-sub { font-size: 12px; color: #7f93a8; margin-top: 2px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; background: #fff; border-bottom: 1px solid #e8ecf1; height: 56px; }
-.left { display: flex; align-items: center; }
-.hamburger { cursor: pointer; margin-right: 10px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; background: var(--hh-surface); border-bottom: 1px solid var(--hh-border); height: var(--hh-topbar-h); box-shadow: var(--shadow-1); }
+.left { display: flex; align-items: center; min-width: 0; }
+.hamburger { cursor: pointer; margin-right: 10px; padding: 6px; border-radius: var(--radius-sm); }
+.hamburger:hover { background: var(--hh-surface-2); }
+.crumb { font-weight: 600; font-size: 16px; color: var(--hh-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.right { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.uname { color: var(--hh-text-2); font-size: 14px; white-space: nowrap; }
+
+/* 侧栏菜单：激活项左侧主色条 + 高亮底（深海军蓝侧栏的清晰层级） */
+:deep(.el-menu) { border-right: none; }
+:deep(.el-menu-item) { height: 46px; margin: 2px 8px; border-radius: var(--radius-sm); width: calc(100% - 16px); }
+:deep(.el-menu-item:hover) { background: rgba(255,255,255,.06); }
+:deep(.el-menu-item.is-active) { background: var(--hh-sidebar-2); position: relative; font-weight: 600; }
+:deep(.el-menu-item.is-active)::before {
+  content: ''; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--hh-primary);
+}
+
+.alert-banner { background: var(--hh-bad-weak); color: var(--hh-bad); padding: 8px 20px; display: flex; gap: 8px; align-items: center; cursor: pointer; font-size: 14px; border-bottom: 1px solid #fbd5d6; line-height: 1.5; word-break: break-word; }
+.alert-banner b { color: var(--hh-bad); }
+
 @media (max-width: 768px) {
   .topbar { padding: 0 12px; }
   .crumb { font-size: 14px; }
   .uname { display: none; }
   .alert-banner { font-size: 12px; padding: 6px 12px; flex-wrap: wrap; }
-  .hamburger { padding: 8px; margin-right: 6px; border-radius: 6px; background: #f0f4f8; }
-  .main-area { padding: 10px !important; }
+  .hamburger { margin-right: 6px; background: var(--hh-surface-2); }
+  .main-area { padding: 12px !important; }
 }
-.crumb { font-weight: 600; font-size: 16px; }
-.right { display: flex; align-items: center; gap: 12px; }
-.uname { color: #606266; font-size: 14px; }
-.alert-banner { background: #fef0f0; color: #c45656; padding: 8px 20px; display: flex; gap: 8px; align-items: center; cursor: pointer; font-size: 14px; border-bottom: 1px solid #fde2e2; }
-.alert-banner b { color: #f56c6c; }
 </style>

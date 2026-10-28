@@ -2,7 +2,7 @@
   <div class="login-wrap">
     <div class="login-card">
       <h2>洪湖支撑服务中心</h2>
-      <p class="sub">装维支撑管理平台 · 本地运行版</p>
+      <p class="sub">装维支撑管理平台 · Web8011</p>
       <el-form @keyup.enter="doLogin">
         <el-form-item>
           <el-input v-model="form.username" placeholder="用户名" size="large">
@@ -51,11 +51,15 @@ async function doLogin() {
 </script>
 
 <style scoped>
-.login-wrap { height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(135deg, #16355e 0%, #1a6fdb 55%, #3f8efc 100%); }
-.login-card { width: 380px; background: #fff; border-radius: 12px; padding: 36px; box-shadow: 0 8px 40px rgba(0,0,0,.25); }
+.login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: radial-gradient(120% 120% at 50% 0%, #1d3a63 0%, #16263a 55%, #0f1b2c 100%); }
+.login-card { width: min(380px, 92vw); background: #fff; border-radius: var(--radius-lg); padding: clamp(24px, 6vw, 36px); box-shadow: var(--shadow-3); }
 h2 { margin: 0 0 4px; text-align: center; color: #1d2b3a; }
 .sub { text-align: center; color: #909399; font-size: 13px; margin-bottom: 24px; }
 .tips { font-size: 12px; color: #909399; line-height: 1.9; }
 .t { font-weight: 600; color: #606266; }
+@media (max-width: 768px) {
+  .login-card { border-radius: var(--radius-md); }
+  h2 { font-size: 20px; }
+}
 </style>

@@ -1,0 +1,110 @@
+/* ============================================================
+ * tokens.css — Web8011 设计令牌层（政务数据台 / Refined Industrial）
+ * 所有语义颜色、间距、圆角、阴影、字阶、状态色统一在此。
+ * 组件内禁止硬编码色值；改主题只动这里。
+ * 同时覆盖 Element Plus 的主题变量（--el-*），使全站组件自动换肤。
+ * ============================================================ */
+:root {
+  /* —— 表面与背景 —— */
+  --hh-bg: #eef1f6;            /* 页面底色（冷调近白，替代原 #f5f7fa） */
+  --hh-surface: #ffffff;       /* 卡片/面板 */
+  --hh-surface-2: #f7f9fc;     /* 表头/次级面 */
+  --hh-sidebar: #16263a;       /* 深海军蓝侧栏 */
+  --hh-sidebar-2: #1d2f47;     /* 侧栏高亮项 */
+  --hh-sidebar-text: #aeb9c5;
+  --hh-sidebar-text-active: #ffffff;
+
+  /* —— 主色（单一强调色，仅留给关键动作） —— */
+  --hh-primary: #2563eb;
+  --hh-primary-weak: #e7eefd;  /* 主色浅底 */
+  --hh-primary-strong: #1e51c4;
+
+  /* —— 文字 —— */
+  --hh-text: #1f2733;
+  --hh-text-2: #46505e;
+  --hh-muted: #6b7785;
+  --hh-faint: #9aa4b2;
+
+  /* —— 发丝边框 —— */
+  --hh-border: #e6eaf0;
+  --hh-border-strong: #d4dae3;
+
+  /* —— 状态色（全站一套；禁只用颜色表意，配文字/图标） —— */
+  --hh-ok: #1f9d55;            /* 及时 / 完成 */
+  --hh-ok-weak: #e6f5ec;
+  --hh-bad: #e5484d;           /* 超时 / 预警 */
+  --hh-bad-weak: #fdeced;
+  --hh-warn: #f5a623;          /* 临界 */
+  --hh-warn-weak: #fef3e0;
+  --hh-info: #2563eb;
+
+  /* —— 圆角（三级） —— */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* —— 阴影（三级，带环境色非纯黑） —— */
+  --shadow-1: 0 1px 3px rgba(22, 38, 58, .08), 0 1px 2px rgba(22, 38, 58, .04);
+  --shadow-2: 0 6px 18px rgba(22, 38, 58, .10), 0 2px 6px rgba(22, 38, 58, .06);
+  --shadow-3: 0 16px 40px rgba(22, 38, 58, .14), 0 4px 12px rgba(22, 38, 58, .08);
+
+  /* —— 间距梯度 —— */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px; --space-5: 24px; --space-6: 40px; --space-7: 64px;
+
+  /* —— 字阶（模块化，禁随手写数值） —— */
+  --fs-display: 30px; --fs-h1: 22px; --fs-h2: 18px;
+  --fs-h3: 15px;    --fs-body: 14px; --fs-sm: 13px; --fs-xs: 12px;
+  --lh-body: 1.6;   --lh-tight: 1.25;
+
+  /* —— 字体（刻意不引中文 Web 字体：中文网字 MB 级，是性能红线） —— */
+  --hh-font: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB",
+             "Source Han Sans SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --hh-font-num: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace,
+                 "Menlo", "Consolas", monospace;
+
+  /* —— 动效 —— */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 160ms; --dur-base: 320ms; --dur-slow: 600ms;
+
+  /* —— 布局 —— */
+  --hh-sidebar-w: 212px;
+  --hh-topbar-h: 56px;
+
+  /* ============ Element Plus 主题变量覆盖（自动换肤） ============ */
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #6f9bf3;
+  --el-color-primary-light-5: #92b5f7;
+  --el-color-primary-light-7: #b6cffb;
+  --el-color-primary-light-8: #c9ddfc;
+  --el-color-primary-light-9: #e7eefd;
+  --el-color-primary-dark-2: #1e51c4;
+
+  --el-color-success: #1f9d55;
+  --el-color-success-light-9: #e6f5ec;
+  --el-color-danger: #e5484d;
+  --el-color-danger-light-9: #fdeced;
+  --el-color-warning: #f5a623;
+  --el-color-warning-light-9: #fef3e0;
+  --el-color-error: #e5484d;
+
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #eef1f6;
+  --el-bg-color-overlay: #ffffff;
+  --el-fill-color-blank: #ffffff;
+  --el-fill-color-light: #f7f9fc;
+  --el-fill-color-lighter: #fafbfd;
+  --el-border-color: #e6eaf0;
+  --el-border-color-light: #eef1f6;
+  --el-border-color-lighter: #f2f4f8;
+  --el-border-color-hover: #d4dae3;
+  --el-text-color-primary: #1f2733;
+  --el-text-color-regular: #46505e;
+  --el-text-color-secondary: #6b7785;
+  --el-text-color-placeholder: #9aa4b2;
+
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-font-size-base: 14px;
+  --el-font-family: var(--hh-font);
+}

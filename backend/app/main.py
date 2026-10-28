@@ -225,16 +225,18 @@ def health():
 
 
 if os.path.isdir(FRONTEND_DIST):
-    class _NoCacheStatic(StaticFiles):
-        """带 hash 的静态资源本可长缓存，但发版后用户浏览器常拿旧 JS 不放，
-        导致「明明改了界面还是老样子」。这里统一加 no-cache + 强校验，
-        代价只是多一次 304 协商，换来发版必生效。"""
+    class _HashedStatic(StaticFiles):
+        """带内容哈希的静态资源（/assets/xxx.<hash>.js）：文件名即版本号，
+        可安全长缓存（immutable）。发版全量重建后 hash 变化 → 浏览器自动拉新，
+        无需 304 协商，重复访问秒开。index.html 仍 no-cache（见下），保证入口即时更新。
+        （v1.3.12 的 no-cache 为规避「局部未重建导致旧界面」；本系统每次均全量构建，故可放心长缓存）"""
         async def get_response(self, path, scope):
             resp = await super().get_response(path, scope)
-            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            if not resp.headers.get("Cache-Control"):
+                resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
             return resp
 
-    app.mount("/assets", _NoCacheStatic(directory=os.path.join(FRONTEND_DIST, "assets")),
+    app.mount("/assets", _HashedStatic(directory=os.path.join(FRONTEND_DIST, "assets")),
               name="assets")
 
     @app.get("/{full_path:path}")
