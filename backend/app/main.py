@@ -6,17 +6,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text
 
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.datastructures import MutableHeaders
 
-from app.config import CORS_ORIGINS, DOCS_ENABLED
+from app.config import CORS_ORIGINS, DOCS_ENABLED, MOBILE_DIST
 from app.database import engine, SessionLocal, Base
 from app.seed import seed
-from app.routers import auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users, alerts, honghu
+from app.routers import auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users, alerts, honghu, mp
 
 app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.3.0",
               docs_url="/docs" if DOCS_ENABLED else None,
@@ -68,8 +68,15 @@ class SecurityHeadersMiddleware:
 app.add_middleware(SecurityHeadersMiddleware)
 
 for r in [auth.router, dashboard.router, metrics.router, h5.router, work_orders.router,
-          tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router]:
+          tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router, mp.router]:
     app.include_router(r, prefix="/api/v1")
+
+# 装维人员端 H5 专用 API 前缀 /m/api（由 8011 独立承载，与桌面端 /api/v1 隔离，避免跨实例 token 问题）
+mobile_api = APIRouter()
+mobile_api.include_router(auth.router)
+mobile_api.include_router(mp.router)
+app.include_router(mobile_api, prefix="/m/api")
+
 
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                              "frontend", "dist-prod")
@@ -238,6 +245,23 @@ if os.path.isdir(FRONTEND_DIST):
 
     app.mount("/assets", _HashedStatic(directory=os.path.join(FRONTEND_DIST, "assets")),
               name="assets")
+
+    # ---------- 移动端（装维人员端 H5）：挂在 /m，独立子工程产物 ----------
+    # 必须在 catch-all 之前注册，否则会被上面的 SPA 回退吞掉，表现为白屏 200
+    if os.path.isdir(MOBILE_DIST):
+        if os.path.isdir(os.path.join(MOBILE_DIST, "assets")):
+            app.mount("/m/assets", _HashedStatic(directory=os.path.join(MOBILE_DIST, "assets")),
+                      name="m-assets")
+
+        @app.get("/m")
+        @app.get("/m/{full_path:path}")
+        def mobile_spa(full_path: str = ""):
+            fp = os.path.join(MOBILE_DIST, full_path)
+            if full_path and os.path.isfile(fp):
+                return FileResponse(fp)
+            return FileResponse(
+                os.path.join(MOBILE_DIST, "index.html"),
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):

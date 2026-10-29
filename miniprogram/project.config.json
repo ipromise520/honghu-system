@@ -1,0 +1,17 @@
+{
+  "description": "装维人员端 · 洪湖支撑服务中心",
+  "packOptions": { "ignore": [], "include": [] },
+  "setting": {
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "urlCheck": false,
+    "newFeature": true
+  },
+  "compileType": "miniprogram",
+  "libVersion": "3.5.5",
+  "appid": "touristappid",
+  "projectname": "honghu-field-worker",
+  "condition": {}
+}

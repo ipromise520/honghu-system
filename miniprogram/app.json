@@ -1,0 +1,18 @@
+{
+  "pages": [
+    "pages/login/login",
+    "pages/index/index",
+    "pages/detail/detail",
+    "pages/notice/notice",
+    "pages/knowledge/knowledge"
+  ],
+  "window": {
+    "navigationBarTitleText": "装维人员端",
+    "navigationBarBackgroundColor": "#1e3a8a",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f2f5fa",
+    "enablePullDownRefresh": false
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

@@ -1,0 +1,28 @@
+<view class="sheet">
+  <view class="bar-top">
+    <view class="icon-btn" bindtap="goBack">‹</view>
+    <view class="bar-title">知识库</view>
+    <view style="width:68rpx"></view>
+  </view>
+  <view class="body">
+    <view class="search-box">
+      <text class="search-ico">🔍</text>
+      <input value="{{kw}}" bindinput="onInput" placeholder="搜索装维规范、流程、口径…" />
+    </view>
+
+    <view wx:if="{{loading}}" class="note">检索中…</view>
+
+    <view wx:elif="{{rows.length===0}}" class="empty">
+      <view class="t">知识库待接入</view>
+      <view class="p" wx:if="{{kw}}">未检索到「{{kw}}」相关内容。</view>
+      <view class="p" wx:else>知识条目正在整理入库，上线后即可在此检索查阅。</view>
+    </view>
+
+    <view wx:else>
+      <view wx:for="{{rows}}" wx:key="index" wx:for-item="r" class="row">
+        <view class="row-h"><text class="row-no" style="font-family:inherit;font-size:28rpx">{{r.title}}</text></view>
+        <view class="row-kv"><text style="color:#475569">{{r.summary||r.content}}</text></view>
+      </view>
+    </view>
+  </view>
+</view>

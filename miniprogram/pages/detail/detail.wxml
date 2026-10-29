@@ -1,0 +1,71 @@
+<view wx:if="{{!loading && ready}}" class="sheet">
+  <view class="bar-top">
+    <view class="icon-btn" bindtap="goBack">‹</view>
+    <view class="bar-title">{{title}}</view>
+    <view style="width:68rpx"></view>
+  </view>
+
+  <view wx:if="{{state==='none'}}" class="body">
+    <view class="empty"><view class="t">功能待接入</view><view class="p">该指标数据源尚未接入，上线后将在此展示明细。</view></view>
+  </view>
+
+  <block wx:elif="{{kind==='notice'}}">
+    <view class="body">
+      <view class="note">共 {{list.length}} 条通知，点击查看并签收。</view>
+      <view wx:for="{{list}}" wx:key="id" wx:for-item="n" class="row" bindtap="openNotice" data-n="{{n}}">
+        <view class="row-h">
+          <text class="row-no" style="font-family:inherit;font-size:28rpx">{{n.title}}</text>
+          <text wx:if="{{!n.signed}}" class="row-tag danger">未签</text>
+          <text wx:else class="row-tag ok">已签</text>
+        </view>
+        <view class="row-kv"><text><text class="k">分类</text> {{n.category}}</text><text><text class="k">时间</text> {{n.time}}</text></view>
+        <view class="row-kv"><text style="color:#94a3b8">{{n.digest}}</text></view>
+      </view>
+    </view>
+  </block>
+
+  <block wx:else>
+    <view class="tabs" wx:if="{{canToggle}}">
+      <view class="tabs-btn {{scope==='mine'?'on':''}}" bindtap="setScope" data-s="mine">我的</view>
+      <view class="tabs-btn {{scope==='grid'?'on':''}}" bindtap="setScope" data-s="grid">本网格</view>
+    </view>
+    <view class="body">
+      <view class="note" wx:if="{{source}}">{{source}}</view>
+
+      <view wx:if="{{rows.length===0}}" class="empty"><view class="t">暂无数据</view><view class="p">当前范围下没有符合条件的记录。</view></view>
+
+      <block wx:elif="{{kind==='near_timeout'}}">
+        <view wx:for="{{rows}}" wx:key="no" wx:for-item="r" class="row">
+          <view class="row-h"><text class="row-no">{{r.no}}</text><text class="row-tag {{r.left_min<=0?'danger':'warn'}}">{{r.left_text}}</text></view>
+          <view class="row-kv">
+            <text class="row-tag {{r.level==='diamond'?'danger':'warn'}}">{{r.level_name}}</text>
+            <text><text class="k">小区</text> {{r.community||'—'}}</text>
+            <text><text class="k">状态</text> {{r.status}}</text>
+          </view>
+          <view class="row-kv"><text><text class="k">预约</text> {{r.appoint}}</text><text><text class="k">网格</text> {{r.grid}}</text></view>
+        </view>
+      </block>
+
+      <block wx:elif="{{flat}}">
+        <view class="row">
+          <view wx:for="{{rows}}" wx:key="label" wx:for-item="rr" style="display:flex;justify-content:space-between;padding:14rpx 0;border-bottom:1rpx solid #e8edf5">
+            <text style="color:#475569;font-size:26rpx">{{rr.label}}</text>
+            <text style="font-weight:700">{{rr.value}}</text>
+          </view>
+        </view>
+      </block>
+
+      <block wx:else>
+        <view wx:for="{{rows}}" wx:key="__id" wx:for-item="r" class="row">
+          <view class="row-h"><text class="row-no">{{r._title}}</text><text wx:if="{{r._status}}" class="row-tag {{r._statusClass}}">{{r._status}}</text></view>
+          <view class="row-kv" wx:for="{{r._cells}}" wx:for-item="kv" wx:key="k"><text><text class="k">{{kv.k}}</text> {{kv.v}}</text></view>
+        </view>
+      </block>
+    </view>
+  </block>
+</view>
+
+<view wx:elif="{{loading}}" class="sheet">
+  <view class="bar-top"><view style="width:68rpx"></view><view class="bar-title">{{title}}</view><view style="width:68rpx"></view></view>
+  <view class="skeleton"><view class="sk" wx:for="{{6}}" wx:key="*this"></view></view>
+</view>

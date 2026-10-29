@@ -1,0 +1,24 @@
+<view wx:if="{{!loading && doc}}" class="sheet">
+  <view class="bar-top">
+    <view class="icon-btn" bindtap="goBack">‹</view>
+    <view class="bar-title">通知详情</view>
+    <view style="width:68rpx"></view>
+  </view>
+  <view class="body">
+    <view class="doc">
+      <view style="font-size:33rpx;font-weight:700;line-height:1.45;margin-bottom:16rpx">{{doc.title}}</view>
+      <view class="meta"><text>分类：{{doc.category}}</text><text>发布：{{doc.time}}</text></view>
+      <view class="content">{{doc.content}}</view>
+    </view>
+    <view class="sign-bar">
+      <view wx:if="{{doc.signed}}" class="sign-done">✓ 已于 {{doc.signed_at||'刚刚'}} 完成电子签收</view>
+      <button wx:elif="{{doc.require_sign}}" class="btn-primary" disabled="{{signing}}" bindtap="doSign">{{signing ? '签收中…' : '确认签收'}}</button>
+      <view wx:else class="sign-done">该通知无需签收</view>
+    </view>
+  </view>
+</view>
+
+<view wx:elif="{{loading}}" class="sheet">
+  <view class="bar-top"><view style="width:68rpx"></view><view class="bar-title">通知详情</view><view style="width:68rpx"></view></view>
+  <view class="skeleton"><view class="sk" wx:for="{{4}}" wx:key="*this"></view></view>
+</view>

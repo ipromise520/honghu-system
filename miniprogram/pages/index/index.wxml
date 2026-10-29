@@ -1,0 +1,57 @@
+<view class="app" wx:if="{{!loading && data}}">
+  <view class="hero">
+    <view class="hero-top">
+      <view class="avatar">{{initial}}</view>
+      <view class="who">
+        <view class="who-name">{{profile.name}}<text class="who-tag">{{profile.position}}</text></view>
+        <view class="who-meta">{{profile.district}} · {{profile.team}} · {{shortGrid}}</view>
+      </view>
+    </view>
+
+    <view class="seg">
+      <view class="seg-btn {{seg==='mine'?'on':''}}" bindtap="setSeg" data-s="mine">我的</view>
+      <view class="seg-btn {{seg==='grid'?'on':''}}" bindtap="setSeg" data-s="grid">本网格</view>
+    </view>
+
+    <view class="hero-month">
+      <text>{{data.month}} 绩效看板</text>
+      <text class="refresh" bindtap="load">↻ 刷新</text>
+    </view>
+  </view>
+
+  <block wx:for="{{data.groups}}" wx:key="key" wx:for-item="g">
+    <view class="grp">
+      <view class="grp-h"><text class="grp-t">{{g.label}}</text><view class="grp-line"></view></view>
+      <view class="grid">
+        <view wx:for="{{g.cards}}" wx:key="key" wx:for-item="c"
+              class="card {{c.state==='none'?'is-none':''}}"
+              style="--c:{{g.color}}"
+              bindtap="open" data-c="{{c}}">
+          <view class="card-h">
+            <text>{{iconLabel(c)}}</text>
+            <text>{{c.label}}</text>
+            <text wx:if="{{c.kind==='notice' && numOf(c)>0}}" class="badge-dot">{{numOf(c)}}</text>
+          </view>
+          <block wx:if="{{c.state==='none'}}">
+            <view class="v" style="font-size:34rpx;color:#cbd5e1">待接入</view>
+          </block>
+          <block wx:else>
+            <view class="card-v">
+              <text class="v">{{shown(c)}}</text>
+              <text class="u" wx:if="{{c.unit}}">{{c.unit}}</text>
+            </view>
+            <view class="card-s">
+              <text wx:if="{{c.sub && seg==='mine'}}" class="gbadge">{{c.sub}}</text>
+              <text wx:if="{{hint(c)}}" class="gbadge">{{hint(c)}}</text>
+            </view>
+          </block>
+        </view>
+      </view>
+    </view>
+  </block>
+</view>
+
+<view class="app" wx:elif="{{loading}}">
+  <view class="hero" style="height:356rpx"></view>
+  <view class="skeleton"><view class="sk" wx:for="{{8}}" wx:key="*this"></view></view>
+</view>

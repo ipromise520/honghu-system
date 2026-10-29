@@ -1,0 +1,24 @@
+<view class="login">
+  <view class="login-card">
+    <view class="login-brand">
+      <view class="dot"></view>
+      <view><view style="font-size:36rpx;font-weight:700;letter-spacing:1rpx">装维人员端</view></view>
+    </view>
+    <view class="sub">洪湖支撑服务中心 · 工单与绩效随身看</view>
+
+    <view class="field">
+      <label>手机号 / 账号</label>
+      <input value="{{username}}" bindinput="onU" placeholder="请输入账号" />
+    </view>
+    <view class="field">
+      <label>密码</label>
+      <input value="{{password}}" bindinput="onP" password placeholder="请输入密码" />
+    </view>
+    <view wx:if="{{err}}" class="err">{{err}}</view>
+
+    <button class="btn-primary" bindtap="submit" disabled="{{loading}}">{{loading ? '登录中…' : '登 录'}}</button>
+    <button class="btn-primary" style="margin-top:24rpx;background:#fff;color:#1e3a8a;border:1rpx solid #cfd9e6" bindtap="fillDemo">填入演示账号</button>
+  </view>
+
+  <view class="tip">演示账号 <code>15171201240</code> / <code>Aa123456</code></view>
+</view>

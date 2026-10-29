@@ -9,6 +9,12 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
+# 移动端（装维人员端 H5）构建产物目录：/vol2/Trae/mobile/dist，可由环境变量覆盖
+MOBILE_DIST = os.environ.get(
+    "HONGHU_MOBILE_DIST",
+    os.path.join(os.path.dirname(BASE_DIR), "mobile", "dist"),
+)
+
 DB_PATH = os.path.join(BASE_DIR, "honghu_new.db")
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
