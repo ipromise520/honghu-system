@@ -29,16 +29,29 @@
       <el-table-column prop="team" label="班组" min-width="120" />
       <el-table-column prop="grid" label="网格" min-width="100" />
       <el-table-column prop="position" label="岗位" min-width="80" />
-      <el-table-column label="状态" min-width="80">
+      <el-table-column label="状态" min-width="150">
         <template #default="{ row }">
           <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">{{ row.is_active ? '启用' : '停用' }}</el-tag>
+          <!-- 登录锁定提示（v1.6.4）：原来锁定状态只在服务端内存里，管理端完全看不见 -->
+          <el-tooltip v-if="row.is_locked"
+                      :content="`密码连续错误 ${row.failed_attempts} 次，上次 ${row.last_failed_at}`"
+                      placement="top">
+            <el-tag type="warning" size="small" effect="dark" style="margin-left:4px">
+              已锁定 {{ row.lock_left_min }}分
+            </el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="290" fixed="right">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" link type="warning" @click="resetPwd(row)">重置密码</el-button>
-          <el-button v-if="row.is_active" size="small" link type="danger" @click="deactivate(row)">停用</el-button>
+          <!-- v1.6.4：原来只有 is_active 时才渲染「停用」，一旦停用按钮消失且后端无启用接口，
+               账号永久无法恢复。改为常驻，按状态切换文案与动作。 -->
+          <el-button v-if="row.is_active" size="small" link type="danger" @click="toggleActive(row)">停用</el-button>
+          <el-button v-else size="small" link type="success" @click="toggleActive(row)">启用</el-button>
+          <!-- 解锁按钮：仅锁定时出现 -->
+          <el-button v-if="row.is_locked" size="small" link type="warning" @click="unlock(row)">解锁</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -121,10 +134,20 @@ async function resetPwd(row) {
   ElMessage.success('已重置')
 }
 
-async function deactivate(row) {
-  await ElMessageBox.confirm(`确认停用用户 ${row.real_name}？`, '提示', { type: 'warning' })
-  await api.delete(`/users/${row.id}`)
-  ElMessage.success('已停用')
+async function toggleActive(row) {
+  const next = !row.is_active
+  const word = next ? '启用' : '停用'
+  await ElMessageBox.confirm(`确认${word}用户 ${row.real_name}？`, '提示', { type: 'warning' })
+  const r = await api.put(`/users/${row.id}/status`, { is_active: next })
+  ElMessage.success(r.msg || ('已' + word))
+  load()
+}
+
+async function unlock(row) {
+  await ElMessageBox.confirm(
+    `确认解除 ${row.real_name} 的登录锁定？解除后可立即用正确密码登录。`, '解除锁定', { type: 'warning' })
+  const r = await api.post(`/users/${row.id}/unlock`)
+  ElMessage.success(r.msg || '已解除锁定')
   load()
 }
 

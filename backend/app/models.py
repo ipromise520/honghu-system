@@ -42,6 +42,12 @@ class User(Base):
     grid: Mapped[str] = mapped_column(String(64), default="")
     position: Mapped[str] = mapped_column(String(64), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ---- 登录失败锁定（v1.6.4）----
+    # 原实现把失败次数只存在进程内存 _login_failures 里，重启即清零，
+    # 管理端既看不到「谁被锁了」也没有解除入口。改为落库，管理员可查可解。
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[str] = mapped_column(String(32), default="")
+    last_failed_at: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_cn)
     role: Mapped["Role"] = relationship("Role", lazy="joined")
     district: Mapped["District"] = relationship("District", lazy="joined")

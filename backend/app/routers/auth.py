@@ -1,7 +1,7 @@
 import time
 import threading
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -15,28 +15,62 @@ from ..deps import get_current_user, get_role
 router = APIRouter(prefix="/auth", tags=["auth"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
-# ---------------- 登录暴力破解防护（内存滑动窗口，重启清零） ----------------
-_LOGIN_MAX_ATTEMPTS = 5      # 同一账号+IP 窗口内最大失败次数
-_LOGIN_WINDOW_SECONDS = 300  # 窗口期（秒）
-_login_failures: dict = defaultdict(list)
-_login_lock = threading.Lock()
+# ---------------- 登录暴力破解防护（v1.6.4：改为落库，管理端可查可解） ----------------
+# 原实现把失败记录只放在进程内存 dict 里，带来三个问题：
+#   ① uvicorn 重启即清零，锁定形同虚设；
+#   ② 管理端完全看不到「谁被锁了」，用户只会说「我登不上」；
+#   ③ 管理员没有任何解除入口，只能干等 5 分钟。
+# 现在计数与锁定时间写进 users 表（failed_attempts / locked_until / last_failed_at）。
+_LOGIN_MAX_ATTEMPTS = 5      # 连续失败达到此数即锁定
+_LOGIN_LOCK_MINUTES = 5      # 锁定时长（分钟）
 
 
-def _check_login_rate(key: str):
-    now = time.monotonic()
-    with _login_lock:
-        recent = [t for t in _login_failures[key] if now - t < _LOGIN_WINDOW_SECONDS]
-        if len(recent) >= _LOGIN_MAX_ATTEMPTS:
-            _login_failures[key] = recent
-            raise HTTPException(status_code=429,
-                               detail=f"失败次数过多，账号已临时锁定，请 {_LOGIN_WINDOW_SECONDS // 60} 分钟后再试")
-        recent.append(now)
-        _login_failures[key] = recent
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _clear_login_failures(key: str):
-    with _login_lock:
-        _login_failures.pop(key, None)
+def _lock_remaining_seconds(u: User) -> int:
+    """返回锁定剩余秒数；<=0 表示未锁定或已过期"""
+    if not u or not getattr(u, "locked_until", ""):
+        return 0
+    try:
+        until = datetime.strptime(u.locked_until, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return 0
+    return int((until - datetime.now()).total_seconds())
+
+
+def _raise_if_locked(u: User):
+    """账号处于锁定期内则直接拒绝（在验密码之前调用）"""
+    left = _lock_remaining_seconds(u)
+    if left > 0:
+        mins = (left + 59) // 60
+        raise HTTPException(
+            status_code=429,
+            detail=f"密码连续错误 {_LOGIN_MAX_ATTEMPTS} 次，账号已锁定，请 {mins} 分钟后再试"
+                   f"（可联系管理员在「用户管理」中立即解锁）")
+
+
+def _record_failure(u: User, db: Session):
+    """记录一次密码错误；达到阈值则写锁定截止时间"""
+    if u is None:
+        return
+    u.failed_attempts = (u.failed_attempts or 0) + 1
+    u.last_failed_at = _now_str()
+    if u.failed_attempts >= _LOGIN_MAX_ATTEMPTS:
+        u.locked_until = (datetime.now() + timedelta(minutes=_LOGIN_LOCK_MINUTES)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+    db.commit()
+
+
+def _clear_login_failures(u: User, db: Session):
+    """登录成功 / 管理员解锁：清空计数与锁定"""
+    if u is None:
+        return
+    if (u.failed_attempts or 0) or (u.locked_until or ""):
+        u.failed_attempts = 0
+        u.locked_until = ""
+        db.commit()
 
 
 def user_payload(u: User):
@@ -52,14 +86,29 @@ def login(form: dict, request: Request, db: Session = Depends(get_db)):
     password = form.get("password") or ""
     if not username or not password:
         raise HTTPException(status_code=400, detail="用户名或密码错误")
-    client_ip = request.client.host if request.client else "unknown"
-    _check_login_rate(f"{username}|{client_ip}")
     user = db.query(User).filter(User.username == username).first()
+
+    # ① 先判锁定（不消耗计数）：锁定期内直接告知剩余时间，不再累计失败
+    if user:
+        _raise_if_locked(user)
+
+    # ② 再验密码：错才计数（原实现在验密码前就无条件 +1，导致密码正确也被算失败）
     if not user or not verify_password(password, user.password_hash):
-        raise HTTPException(status_code=400, detail="用户名或密码错误")
+        _record_failure(user, db)
+        left = (_LOGIN_MAX_ATTEMPTS - (user.failed_attempts or 0)) if user else 0
+        if user and left <= 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"密码连续错误 {_LOGIN_MAX_ATTEMPTS} 次，账号已锁定 {_LOGIN_LOCK_MINUTES} 分钟"
+                       f"（可联系管理员在「用户管理」中立即解锁）")
+        tip = f"，还可尝试 {left} 次" if user and left > 0 else ""
+        raise HTTPException(status_code=400, detail="用户名或密码错误" + tip)
+
+    # ③ 密码正确但账号被停用
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="账号已停用")
-    _clear_login_failures(f"{username}|{client_ip}")
+        raise HTTPException(status_code=403, detail="账号已停用，请联系管理员启用")
+
+    _clear_login_failures(user, db)
     db.add(AuditLog(username=user.username, action="登录"))
     db.commit()
     return {"access_token": create_token(user.id, user.username, get_role(user)),
