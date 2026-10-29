@@ -105,8 +105,13 @@
               <span class="row-no">{{ r.no }}</span>
               <span class="row-tag" :class="r.left_min <= 0 ? 'danger' : 'warn'">{{ r.left_text }}</span>
             </div>
-            <div class="row-kv">
+            <div class="row-owner">
+              <span class="owner-label">责任人</span>
+              <span class="owner-name">{{ r.handler || '未派单' }}</span>
+              <span v-if="r.supervise" class="owner-sup">督办 {{ r.supervise }}</span>
               <span class="row-tag" :class="r.level === 'diamond' ? 'danger' : 'warn'">{{ r.level_name }}</span>
+            </div>
+            <div class="row-kv">
               <span><span class="k">小区</span> {{ r.community || '—' }}</span>
               <span><span class="k">状态</span> {{ r.status }}</span>
             </div>
@@ -279,4 +284,13 @@ onMounted(load)
 .btn-sm:active { transform: scale(.96); }
 .btn-sm[disabled] { opacity: .55; }
 .task { border-left: 3px solid var(--brand); }
+
+/* 责任人（便于网格长按人督办） */
+.row-owner { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 7px 0 3px; }
+.owner-label {
+  font-size: 10.5px; color: #92400e; background: #fef3c7;
+  padding: 2px 6px; border-radius: 5px; font-weight: 700;
+}
+.owner-name { font-size: 14px; font-weight: 800; color: var(--ink); letter-spacing: .3px; }
+.owner-sup { font-size: 10.5px; color: var(--ink-3); }
 </style>

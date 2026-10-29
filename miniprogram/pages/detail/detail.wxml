@@ -67,8 +67,13 @@
       <block wx:elif="{{kind==='near_timeout'}}">
         <view wx:for="{{rows}}" wx:key="no" wx:for-item="r" class="row">
           <view class="row-h"><text class="row-no">{{r.no}}</text><text class="row-tag {{r.left_min<=0?'danger':'warn'}}">{{r.left_text}}</text></view>
-          <view class="row-kv">
+          <view class="row-owner">
+            <text class="owner-label">责任人</text>
+            <text class="owner-name">{{r.handler||'未派单'}}</text>
+            <text wx:if="{{r.supervise}}" class="owner-sup">督办 {{r.supervise}}</text>
             <text class="row-tag {{r.level==='diamond'?'danger':'warn'}}">{{r.level_name}}</text>
+          </view>
+          <view class="row-kv">
             <text><text class="k">小区</text> {{r.community||'—'}}</text>
             <text><text class="k">状态</text> {{r.status}}</text>
           </view>

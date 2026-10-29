@@ -150,3 +150,12 @@ page {
   background: linear-gradient(135deg, #2563eb, #1d4ed8); border-color: transparent;
   color: #fff; box-shadow: 0 6rpx 18rpx rgba(37, 99, 235, .28);
 }
+
+/* 责任人（便于网格长按人督办） */
+.row-owner { display: flex; align-items: center; gap: 14rpx; flex-wrap: wrap; margin: 14rpx 0 6rpx; }
+.owner-label {
+  font-size: 21rpx; color: #92400e; background: #fef3c7;
+  padding: 4rpx 12rpx; border-radius: 10rpx; font-weight: 700;
+}
+.owner-name { font-size: 28rpx; font-weight: 800; color: #0f172a; letter-spacing: .6rpx; }
+.owner-sup { font-size: 21rpx; color: #94a3b8; }

@@ -198,10 +198,24 @@ def _near_timeout(db, sub, name, district, gkey):
             "status": r.status or "",
             "grid": r.grid or "",
             "community": r.community or "",
+            "handler": _short_name(r.handler, r.district),
+            "supervise": (r.supervise_person or "").strip(),
             "customer": _customer_level(db, r.order_no),
         })
     out["rows"].sort(key=lambda x: x["left_min"])
     return out
+
+
+def _short_name(raw: str, district: str = "") -> str:
+    """洪湖市刘中华 → 刘中华。表里 handler 多数带区县前缀，去掉便于按人督办。"""
+    v = (raw or "").strip()
+    if not v:
+        return ""
+    for p in (district, "洪湖市", "荆州区", "沙市区", "公安县", "监利市",
+              "江陵县", "石首市", "松滋市", "洪湖", "荆州开发区"):
+        if p and v.startswith(p):
+            return v[len(p):].strip()
+    return v
 
 
 def _customer_level(db, order_no: str) -> str:
@@ -379,14 +393,14 @@ def _notice_count(db, uid):
 # ---------------------------------------------------------------- 明细
 
 COLS_ORDER = {
-    "pending_install": [("no", "工单号", 1), ("theme", "主题", 0), ("appoint", "预约时间", 0),
-                        ("status", "状态", 0), ("grid", "网格", 0)],
-    "pending_repair": [("no", "工单号", 1), ("cat", "投诉类型", 0), ("appoint", "预约时间", 0),
-                       ("status", "状态", 0)],
-    "near_timeout": [("no", "工单号", 1), ("level_name", "等级", 0), ("appoint", "预约时间", 0),
-                     ("left_text", "剩余", 0), ("customer", "客户等级", 0)],
-    "completed_month": [("no", "工单号", 1), ("theme", "主题", 0), ("appoint", "预约时间", 0),
-                        ("status", "状态", 0)],
+    "pending_install": [("no", "工单号", 1), ("handler", "责任人", 0), ("theme", "主题", 0),
+                        ("appoint", "预约时间", 0), ("status", "状态", 0), ("grid", "网格", 0)],
+    "pending_repair": [("no", "工单号", 1), ("handler", "责任人", 0), ("cat", "投诉类型", 0),
+                       ("appoint", "预约时间", 0), ("status", "状态", 0)],
+    "near_timeout": [("no", "工单号", 1), ("handler", "责任人", 0), ("level_name", "等级", 0),
+                     ("appoint", "预约时间", 0), ("left_text", "剩余", 0), ("customer", "客户等级", 0)],
+    "completed_month": [("no", "工单号", 1), ("handler", "责任人", 0), ("theme", "主题", 0),
+                        ("appoint", "预约时间", 0), ("status", "状态", 0)],
 }
 
 
@@ -413,7 +427,8 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
         q = _scope(q, InstallOrder, sub, name, district, gkey).order_by(
             InstallOrder.accept_time.desc()).limit(500)
         rows = [{"no": r.order_id, "theme": r.order_theme or "", "appoint": r.appointment_time or "",
-                 "status": r.status or "", "grid": r.grid or "", "accept": r.accept_time or ""}
+                 "status": r.status or "", "grid": r.grid or "", "accept": r.accept_time or "",
+                 "handler": _short_name(r.handler, r.district)}
                 for r in q.all()]
     elif kind == "pending_repair":
         q = db.query(ComplaintOrder).filter(~ComplaintOrder.status.in_(DONE_ST))
@@ -421,13 +436,18 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
             ComplaintOrder.accept_time.desc()).limit(500)
         rows = [{"no": r.eoms_no, "cat": (r.complaint_category or "")[-24:],
                  "appoint": r.appointment_time or "", "status": r.status or "",
-                 "grid": r.grid or "", "accept": r.accept_time or ""} for r in q.all()]
+                 "grid": r.grid or "", "accept": r.accept_time or "",
+                 "handler": _short_name(r.handler, r.district)} for r in q.all()]
     else:
         raise HTTPException(400, "未知的工单类型：%s" % kind)
 
     total = len(rows)
     start = max((page - 1) * page_size, 0)
-    return {"kind": kind, "scope": sub, "total": total, "source": "ok",
+    _SRC = {"near_timeout": "省公司预警附件（按预约时间剩余分档）",
+            "pending_install": "装机宽表（在途未完工）",
+            "pending_repair": "投诉宽表（在途未完工）",
+            "completed_month": "装机宽表（本月已施工）"}
+    return {"kind": kind, "scope": sub, "total": total, "source": _SRC.get(kind, ""),
             "columns": [{"key": k, "label": lb, "mono": mono} for k, lb, mono in COLS_ORDER[kind]],
             "rows": rows[start:start + page_size]}
 
