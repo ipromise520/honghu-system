@@ -135,12 +135,14 @@
         <el-table-column prop="district" label="区县" width="90" sortable />
         <el-table-column prop="no" label="工单流水号" min-width="140" show-overflow-tooltip sortable />
         <el-table-column prop="category" label="投诉分类" min-width="150" show-overflow-tooltip sortable />
-        <el-table-column label="是否触发H5" width="105" sortable
-                         sort-by="row => row.trigger_h5 ? 1 : 0">
+        <el-table-column label="是否触发H5" width="112" sortable
+                         sort-by="row => row.trigger_h5 || ''">
           <template #default="{ row }">
-            <!-- 真实口径：后端按单号 HB-058 前缀判定，HB-KHBZ / HB-ZHZW 均不触发 -->
-            <el-tag v-if="row.trigger_h5" size="small" type="danger" effect="dark">触发H5</el-tag>
-            <el-tag v-else size="small" type="info" effect="plain">不触发</el-tag>
+            <!-- 三态口径（app/h5_rule.py）：
+                 on=已触发 / wait=暂未触发(完工后会发) / no=不触发(非HB-058) -->
+            <el-tooltip :content="row.h5_why || '按单号前缀与工单状态判定'" placement="top" :show-after="250">
+              <span class="h5-tag" :class="'h5-' + (row.trigger_h5 || 'no')">{{ row.h5_label || '-' }}</span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
@@ -231,6 +233,13 @@
               <template #default="{ row }"><el-tag size="small" :type="alertStTag(row.status)">{{ row.status || '-' }}</el-tag></template>
             </el-table-column>
             <el-table-column prop="order_type" label="工单类型" width="90" sortable />
+            <el-table-column prop="trigger_h5" label="是否触发H5" width="112" sortable>
+              <template #default="{ row }">
+                <el-tooltip :content="row.h5_why || '按单号前缀与工单状态判定'" placement="top" :show-after="250">
+                  <span class="h5-tag" :class="'h5-' + (row.trigger_h5 || 'no')">{{ row.h5_label || '-' }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
               <template #default="{ row }">
                 <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
@@ -1269,6 +1278,16 @@ onBeforeUnmount(() => {
 .card-header .title { font-weight: 600; }
 .header-tip { font-size: 12px; color: #909399; }
 .gp-red { color: #f56c6c; font-weight: 600; }
+/* v1.6.3 是否触发H5 三态标签（与 AlertCenter.vue 保持一致）
+   绿=已触发 / 橙=暂未触发(完工后会发) / 灰=不触发 */
+.h5-tag {
+  display: inline-block; padding: 0 7px; height: 20px; line-height: 20px;
+  border-radius: 10px; font-size: 12px; font-weight: 600;
+  border: 1px solid transparent; cursor: default; white-space: nowrap;
+}
+.h5-on   { color: #15803d; background: #dcfce7; border-color: #86efac; }
+.h5-unknown { color: #b45309; background: #fef3c7; border-color: #fcd34d; }
+.h5-no   { color: #909399; background: #f2f3f5; border-color: #dcdfe6; }
 .rate-block { margin-bottom: 4px; }
 .rate-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; font-size: 14px; margin-bottom: 8px; }
 .chart-tall { height: 420px; }

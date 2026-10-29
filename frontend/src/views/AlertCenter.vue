@@ -133,6 +133,19 @@
                   <span v-else class="cat-empty">-</span>
                 </template>
               </el-table-column>
+              <!-- v1.6.3：是否触发H5测评短信（三态）
+                   口径来源 app/h5_rule.py：HB-058 前缀 + 状态∈{已施工,待综调处理,待回访}
+                   ⚠️ 这是「应发判定」，不是短信实际发送流水（两套单号编码无映射，见 h5_rule.py 注释） -->
+              <el-table-column prop="trigger_h5" label="是否触发H5" width="112" sortable
+                               :sort-method="(a, b) => (a.trigger_h5 || '').localeCompare(b.trigger_h5 || '')">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.h5_why || '按单号前缀与工单状态判定'" placement="top" :show-after="250">
+                    <span class="h5-tag" :class="'h5-' + (row.trigger_h5 || 'no')">
+                      {{ row.h5_label || '-' }}
+                    </span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
               <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
               <el-table-column prop="appoint_time" label="预约时间" width="150" sortable />
               <el-table-column prop="handler" label="处理人" min-width="80" sortable />
@@ -351,6 +364,15 @@ onMounted(() => { loadH5(); load() })
 .cat-empty { color: #c0c4cc; }
 .cat-text { cursor: default; border-bottom: 1px dashed #d9d9d9; }
 .cat-fallback { color: #a8abb2; font-style: italic; cursor: default; border-bottom: 1px dashed #dcdfe6; }
+/* v1.6.3 是否触发H5 三态标签：绿=已触发 / 橙=暂未触发(完工后会发) / 灰=不触发 */
+.h5-tag {
+  display: inline-block; padding: 0 7px; height: 20px; line-height: 20px;
+  border-radius: 10px; font-size: 12px; font-weight: 600;
+  border: 1px solid transparent; cursor: default; white-space: nowrap;
+}
+.h5-on   { color: #15803d; background: #dcfce7; border-color: #86efac; }
+.h5-unknown { color: #b45309; background: #fef3c7; border-color: #fcd34d; }
+.h5-no   { color: #909399; background: #f2f3f5; border-color: #dcdfe6; }
 /* v1.3.9：本页共 7 张卡（原 5 张 + 全球通 2 张），Dashboard.vue 全局定义的是 6 列，
    导致第 7 张掉到第二行。这里覆盖为 7 等分，窄屏按 4/2 列自适应。 */
 .stat-cards { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; }

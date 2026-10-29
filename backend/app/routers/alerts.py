@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..config import MAIL_USER, MAIL_AUTH
 from ..database import get_db
 from ..deps import get_current_user, require_admin
+from ..h5_rule import judge_complaint_h5 as _h5j
 from ..models import (AlertMeta, AlertOrder, ReportMeta, ReportDistrict, ReportTimeout,
                       ReportWideOrder, ReportComplaintOrder, ReportH5Record, ReportDupOrder,
                       InstallOrder, ComplaintOrder, SyncJob)
@@ -968,5 +969,10 @@ def alert_orders(type: str = Query("install", pattern="^(install|complaint|book|
                 # 兜底：用工单类型占位，并标记来源，前端灰显区分
                 d["category"] = r.order_type or ""
                 d["category_src"] = "兜底"
+            # 是否触发H5测评短信（口径见 app/h5_rule.py：HB-058 + 分类=家庭市场）
+            # ⚠️ 必须传「真实分类」cat_map 的值，不能传 d["category"]
+            #    —— 关联不上时 d["category"] 被兜底成了 order_type（"家庭宽带"），
+            #    那是工单类型不是投诉分类，传进去会被误判成「不触发」。
+            d.update(_h5j(r.order_no, cat_map.get(r.order_no, "")))
         out.append(d)
     return {"rows": out}

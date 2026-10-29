@@ -11,6 +11,7 @@ from ..models import (WorkOrder, District, ExtensionOrder, ExtensionMember, H5Co
                       MetricDefinition, User, Setting, AuditLog, CompletionRecord, SyncJob,
                       InstallOrder, ComplaintOrder)
 from ..deps import get_current_user, scope_district_ids, require_admin, get_role
+from ..h5_rule import judge_complaint_h5 as _h5j
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -585,9 +586,8 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             "is_solved": r.is_solved, "duration": r.order_duration,
             "appointment_time": r.appointment_time, "grid": r.grid,
             "is_high_quality": r.is_high_quality, "global_pass": r.global_pass,
-            # 是否触发H5：真实口径见 h5.py COMPLAINT_PREFIX="HB-058"
-            # 即单号以 HB-058 开头才触发；HB-KHBZ / HB-ZHZW 均不触发
-            "trigger_h5": (r.eoms_no or "").startswith("HB-058")} for r in rows],
+            # 是否触发H5：口径见 h5_rule.py（HB-058 前缀 + 分类首级=家庭市场）
+            **_h5j(r.eoms_no, r.complaint_category)} for r in rows],
             "total": total, "page": page, "page_size": page_size}
 
     q = db.query(InstallOrder).filter(InstallOrder.month == month)
