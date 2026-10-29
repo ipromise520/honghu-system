@@ -77,7 +77,7 @@
           v-for="(c, ci) in g.cards"
           :key="c.key"
           class="card"
-          :class="{ 'is-none': c.state === 'none' }"
+          :class="{ 'is-none': c.state === 'none', 'is-na': naOf(c) }"
           :style="{ '--c': GROUP_COLOR[g.key], '--i': (gi * 2 + ci) }"
           @click="open(c)"
         >
@@ -153,9 +153,22 @@ function iconOf(c) {
 }
 
 // 当前展示的数值（我的=个人值，本网格=团队值）
+// v1.6.6：网格视图下该指标本身没有网格口径（后端返回 grid=null，如 AI回访/安装质检
+// 这类表没有 grid 列）时，**不能回退成个人值** —— 否则卡片显示个人的 2，
+// 点进去 scope=grid 查出 0 条，就是「卡片有数、明细为空」。
+// 跟人走、不参与网格口径的卡片（后端只按本人算，网格视图下同样正常显示）
+const PERSONAL_ONLY = ['my_task', 'notice', 'knowledge']
 function rawOf(c) {
   if (seg.value === 'mine') return c.value
-  return c.grid == null ? c.value : c.grid
+  if (PERSONAL_ONLY.includes(c.kind)) return c.value   // 跟人走，没有网格值
+  return c.grid == null ? null : c.grid
+}
+// 该卡片在当前视图下是否「口径不可算」→ 显示「—」并禁用点击
+// 只对「我的 vs 本网格」会分出两个数的统计类指标生效
+function naOf(c) {
+  if (c.state === 'none') return false
+  if (PERSONAL_ONLY.includes(c.kind)) return false
+  return seg.value === 'grid' && c.grid == null
 }
 function numOf(c) {
   const v = rawOf(c)
@@ -165,12 +178,14 @@ function hasBadge(c) { return (c.kind === 'notice' || c.kind === 'my_task') && n
 
 function shown(c) {
   if (c.state === 'none') return '待接入'
+  if (naOf(c)) return '—'
   const v = display[c.key]
   if (v == null) return rawOf(c)
   const isPct = c.unit === '%'
   return isPct ? v.toFixed(1) : Math.round(v)
 }
 function hint(c) {
+  if (naOf(c)) return '仅个人口径'
   if (seg.value === 'mine' && c.grid != null && c.grid !== c.value) return '本网格 ' + c.grid
   if (seg.value === 'grid' && c.grid != null && c.grid !== c.value) return '个人 ' + c.value
   return ''
@@ -195,6 +210,7 @@ function animateAll() {
 }
 
 function open(c) {
+  if (naOf(c)) return       // 网格视图下无网格口径，点进去必然是空列表
   if (c.kind === 'knowledge') { router.push('/knowledge'); return }
   router.push({
     path: '/detail',
@@ -241,6 +257,10 @@ watch(seg, () => animateAll())
 onMounted(load)
 </script>
 <style scoped>
+/* v1.6.6：网格视图下「仅个人口径」的卡片 —— 显示 —，弱化且不可点 */
+.card.is-na { cursor: default; }
+.card.is-na .v { color: #cbd5e1; }
+
 /* ============ 四类提醒铃铛 ============ */
 .bell {
   position: relative; z-index: 3; flex: 0 0 auto;

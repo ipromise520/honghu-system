@@ -203,6 +203,49 @@ def _adjudicate(db, rows, status_of, src_status_of=None, dispatch_of=None):
     return rows
 
 
+def _install_scope(db, sub, name, district, gkey, done: bool):
+    """装机工单「筛选 + 裁决 + 裁决后过滤」的**唯一入口**。卡片计数与明细列表都走它。
+
+    为什么必须抽出来（v1.6.6）
+    ------------------------
+    v1.6.5 的事故：卡片用 `status NOT IN NOT_PENDING` 数出 2 单，
+    明细却因为「裁决后发现是已撤单」把这 2 单滤掉了 → 用户看到
+    「卡片 2 单，点进去空」。根因**不是某个条件写错，而是两处各写了一遍**：
+    卡片只做 SQL 过滤，明细还要过裁决。只要逻辑分两处，迟早再分叉。
+
+    现在两处调用同一个函数，物理上不可能再不一致。
+
+    参数
+    ----
+    ``done``  True = 本月已施工；False = 在途待办
+    返回 ORM 行列表，每行已带 ``_st_status/_st_src/_st_note/_st_conflict``
+    """
+    q = db.query(InstallOrder)
+    q = q.filter(InstallOrder.status.in_(DONE_ST)) if done else q.filter(
+        ~InstallOrder.status.in_(list(NOT_PENDING)))
+    if not done:
+        # 延伸服务/更换光猫是加装类挂靠单，不算「在途装机」（与 metrics.py 对齐）
+        for kw in ("延伸服务", "更换光猫"):
+            q = q.filter(~InstallOrder.order_theme.contains(kw))
+    else:
+        q = q.filter(InstallOrder.month == _dt.date.today().strftime("%Y-%m"))
+    q = _scope(q, InstallOrder, sub, name, district, gkey)
+    if q is None:
+        return []
+    objs = q.order_by(InstallOrder.accept_time.desc()).limit(2000).all()
+
+    # 空壳行：状态/区县/网格/责任人都空，是导出文件尾部或异常行
+    objs = [r for r in objs
+            if (r.status or "").strip() or (r.district or "").strip()
+            or (r.handler or "").strip() or (r.current_step or "").strip()]
+    _adjudicate(db, objs, lambda r: r.status)
+    # SQL 层只能按「宽表状态」筛，裁决可能把某单判成已撤单 → 必须按裁决结果再过一遍。
+    # 这一步就是 v1.6.5「卡片 2 / 明细 0」的根源，现在放在唯一入口里，两边都吃到。
+    if done:
+        return [r for r in objs if (r._st_status or "") in DONE_ST]
+    return [r for r in objs if is_pending(r._st_status)]
+
+
 def _has_grid(model) -> bool:
     return hasattr(model, "grid")
 
@@ -232,17 +275,19 @@ def _open_orders(db, sub, name, district, gkey, month=None):
     否则卡片数字会小于明细条数（曾出现卡片 72 / 明细 81 的口径冲突）。
     """
     def cnt(model, pk, done: bool, by_month: bool):
+        """投诉类（ComplaintOrder）仍走简单计数；装机类一律走 _install_scope，
+        保证与明细列表**同一个函数**返回，结构上不可能再对不上。"""
+        if model is InstallOrder:
+            objs = _install_scope(db, sub, name, district, gkey, done)
+            if not done:
+                return len(objs)
+            # 当月已施工：_install_scope 已按当月筛，这里无需再筛
+            return len(objs)
         q = db.query(func.count(pk))
         if by_month and month:
             q = q.filter(model.month == month)
-        # ⚠️ pending 计数必须与明细同口径（都排掉 撤/退/退单中），
-        # 否则卡片 72 / 明细 81 的老问题会以另一种形式复现（v1.6.5）。
         q = q.filter(model.status.in_(DONE_ST)) if done else q.filter(
             ~model.status.in_(list(NOT_PENDING)))
-        # 卡片计数必须与明细同口径（v1.6.5 补：延伸服务/更换光猫不算在途装机）
-        if not done and model is InstallOrder:
-            for kw in ("延伸服务", "更换光猫"):
-                q = q.filter(~InstallOrder.order_theme.contains(kw))
         q = _scope(q, model, sub, name, district, gkey)
         return 0 if q is None else (q.scalar() or 0)
 
@@ -511,36 +556,10 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
         if level:
             rows = [r for r in rows if r["level"] == level]
     elif kind in ("pending_install", "completed_month"):
-        q = db.query(InstallOrder)
         done = kind == "completed_month"
-        # 在途 = 既非完工，也非撤/退/退单中（v1.6.5）。
-        # 旧写法只排 DONE_ST，于是「已撤单」的单被当成待办常年挂着——
-        # 这正是用户反馈「宽表说处理中、实际已撤单」会被误当在途的根子。
-        q = q.filter(InstallOrder.status.in_(DONE_ST)) if done else q.filter(
-            ~InstallOrder.status.in_(list(NOT_PENDING)))
-        if not done:
-            # 延伸服务/更换光猫不算「在途装机」：它们是加装类挂靠单，
-            # metrics.py 的 pending 口径同样排除（见 _build_wide_summary），
-            # 两端口径必须一致，否则卡片说 19 单、看板说 3 单。
-            for kw in ("延伸服务", "更换光猫"):
-                q = q.filter(~InstallOrder.order_theme.contains(kw))
-        if done:
-            q = q.filter(InstallOrder.month == _dt.date.today().strftime("%Y-%m"))
-        objs = _scope(q, InstallOrder, sub, name, district, gkey).order_by(
-            InstallOrder.accept_time.desc()).limit(500).all()
-        # 空壳行：status/区县/网格/责任人/环节全空，是导出文件尾部或异常行，
-        # 裁决后状态为空仍会以「各源均无状态」混进待办（实测 5 条，全库级），直接剔除
-        objs = [r for r in objs
-                if (r.status or "").strip() or (r.district or "").strip()
-                or (r.handler or "").strip() or (r.current_step or "").strip()]
-        _adjudicate(db, objs, lambda r: r.status)
-        # 裁决后再过滤一次：SQL 层只能按「宽表状态」筛，而裁决结果可能把某单
-        # 判成 已撤单/已退单（综合查询说撤了，宽表还写处理中）。
-        # 少了这一步，「在途待办」里仍会混进已作废的单——实测 2 条（v1.6.5）。
-        if not done:
-            objs = [r for r in objs if is_pending(r._st_status)]
-        else:
-            objs = [r for r in objs if (r._st_status or "") in DONE_ST]
+        # 与卡片同一个函数（v1.6.6）：筛选/裁决/裁决后过滤全在里面，
+        # 卡片数字与明细条数从此同源，不会再现「卡片 2 单、点进去空」。
+        objs = _install_scope(db, sub, name, district, gkey, done)
         rows = [{"no": r.order_id, "theme": r.order_theme or "", "appoint": r.appointment_time or "",
                  "status": r._st_status or r.status or "", "status_src": r._st_src,
                  "status_note": r._st_note, "status_conflict": r._st_conflict,
