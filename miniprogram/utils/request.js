@@ -8,7 +8,7 @@ function setToken(t) { if (t) wx.setStorageSync(TOKEN_KEY, t); else wx.removeSto
 function request(path, method, body) {
   return new Promise((resolve, reject) => {
     wx.request({
-      url: BACKEND + '/api/v1' + path,
+      url: BACKEND + '/m/api' + path,
       method: method,
       header: {
         'Content-Type': 'application/json',
