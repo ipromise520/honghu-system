@@ -206,25 +206,37 @@ def completion_report(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
 # ---------------- 宽表数据聚合（装机宽表 + 投诉宽表） ----------------
 
 # ---- 洪湖市 7 标准网格映射（子网格 → 标准网格） ----
+# v1.7.0：标准名统一用用户表格口径「洪湖新堤网格」（原写作「洪湖城区网格」，
+# 与《工单多维分析_标准7网格版》的 7 网格名不一致，页面与表格对不上）。
+# 映射依据：表格「洪湖标准7网格」sheet 第 26~34 行的归属映射表。
 _HONGHU_GRID_MAP = {
-    "洪湖城区网格": "洪湖城区网格",
-    "洪湖荷花网格": "洪湖城区网格",
+    # 新堤网格 = 荷花 + 城区 + 新堤（表格第 30 行）
+    "洪湖城区网格": "洪湖新堤网格",
+    "洪湖荷花网格": "洪湖新堤网格",
+    "洪湖新堤网格": "洪湖新堤网格",
+    # 柏枝网格 = 聚金 + 文泉 + 柏枝（表格第 34 行）
     "洪湖柏枝网格": "洪湖柏枝网格",
     "洪湖文泉网格": "洪湖柏枝网格",
+    "洪湖聚金网格": "洪湖柏枝网格",
+    # 峰口网格 = 万全 + 峰口 + 瞿家湾 + 沙口（表格第 28 行）
     "洪湖峰口网格": "洪湖峰口网格",
     "洪湖沙口网格": "洪湖峰口网格",
     "洪湖万全网格": "洪湖峰口网格",
     "洪湖瞿家湾网格": "洪湖峰口网格",
+    # 大同网格 = 大同 + 老湾 + 新滩 + 乌林（表格第 33 行）
     "洪湖大同网格": "洪湖大同网格",
     "洪湖乌林网格": "洪湖大同网格",
     "洪湖老湾网格": "洪湖大同网格",
     "洪湖新滩网格": "洪湖大同网格",
+    # 曹市网格 = 府场 + 戴家场 + 曹市（表格第 31 行）
     "洪湖曹市网格": "洪湖曹市网格",
     "洪湖府场网格": "洪湖曹市网格",
     "洪湖戴家场网格": "洪湖曹市网格",
+    # 大沙网格 = 燕窝 + 龙口 + 大沙（表格第 32 行）
     "洪湖大沙网格": "洪湖大沙网格",
     "洪湖龙口网格": "洪湖大沙网格",
     "洪湖燕窝网格": "洪湖大沙网格",
+    # 滨湖网格 = 汊河 + 黄家口 + 螺山 + 小港 + 滨湖（表格第 29 行）
     "洪湖滨湖网格": "洪湖滨湖网格",
     "洪湖汊河网格": "洪湖滨湖网格",
     "洪湖螺山网格": "洪湖滨湖网格",
@@ -644,6 +656,281 @@ def wide_summary_post(req: _WideSummaryReq,
 
 
 # ---------------- 宽表明细（首页工单明细展示） ----------------
+
+# ================================================================
+# v1.7.0 竣工率多维分析（按标准7网格，对齐《工单多维分析》表格）
+# ================================================================
+
+# 21 个维度的定义表。前端卡片墙、明细表列、图例全部由这里驱动，
+# 新增维度只改这张表，不用动前端。
+#   kind: count = 计数型（分子=该维度命中数，分母另有说明）
+#         rate  = 比率型（分子分母都在 num/den 里给）
+#   bucket: 该维度在明细里怎么筛（对应 _pick 的 metric 参数）
+_MULTIDIM_COLS = [
+    # key         标题        类型    说明（悬浮提示用）
+    ("come",      "来单",      "count", "受理时间非空的工单记录"),
+    ("done",      "已施工",    "count", "定单状态=已施工（裁决后）"),
+    ("cancel",    "已撤单",    "count", "定单状态=已撤单"),
+    ("refund",    "已退单",    "count", "定单状态=已退单"),
+    ("pending",   "处理中",    "count", "待地址确认/待施工/待预约/待PBOSS审核等"),
+    ("nostate",   "无状态",    "count", "定单状态、当前环节、业务主题均为空"),
+    ("h8",        "8h及时",    "count", "已施工单内，8小时及时=是"),
+    ("h24",       "24h及时",   "count", "已施工单内，24小时及时=是"),
+    ("perform",   "履约新",    "count", "已施工单内，是否履约(新)=是"),
+    ("valid",     "有效可施工", "count", "来单 - 撤单 - 无状态"),
+    ("rate_nom",  "名义竣工率", "rate",  "已施工 / 来单总量"),
+    ("rate_eff",  "有效竣工率", "rate",  "已施工 / 有效可施工（剔除撤单与无状态）"),
+    ("rate_pend", "压单率",    "rate",  "处理中 / 有效可施工"),
+    ("rate_re",   "退撤单率",  "rate",  "(退单+撤单) / 来单总量"),
+    ("rate_can",  "撤单率",    "rate",  "撤单 / 来单总量"),
+    ("rate_clear","消单率",    "rate",  "(已施工+撤单+退单) / 来单总量"),
+    ("rate_8h",   "8h及时率",  "rate",  "8h及时 / 已施工"),
+    ("rate_24h",  "24h及时率", "rate",  "24h及时 / 已施工"),
+    ("rate_perf", "履约率",    "rate",  "履约(新) / 已施工"),
+]
+
+
+def _pct(a, b):
+    """安全百分比：分母为 0 返回 0.0，保留 1 位（与表格一致 67.9 而非 67.91）"""
+    if not b:
+        return 0.0
+    return round(a / b * 100, 1)
+
+
+def _is_nostate(r):
+    """无状态：状态、当前环节、业务主题三者皆空（与表格「说明」第 19 条一致）"""
+    return (not (r.status or "").strip()
+            and not (r.current_step or "").strip()
+            and not (r.order_theme or "").strip())
+
+
+def _status_of(r):
+    return getattr(r, "_st_status", None) or (r.status or "")
+
+
+def _pick(rows, metric):
+    """**唯一**筛选入口：卡片计数与明细列表都调它。
+
+    metric 取值见 _MULTIDIM_COLS 的 key；也接受 "all"（全部来单）。
+    """
+    if metric in (None, "", "all", "come"):
+        return list(rows)
+    if metric == "done":
+        return [r for r in rows if _status_of(r) == "已施工"]
+    if metric == "cancel":
+        return [r for r in rows if "撤" in _status_of(r)]
+    if metric == "refund":
+        return [r for r in rows if "退" in _status_of(r) and "撤" not in _status_of(r)]
+    if metric == "pending":
+        return [r for r in rows if is_pending(_status_of(r))]
+    if metric == "nostate":
+        return [r for r in rows if _is_nostate(r)]
+    if metric == "h8":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_8h or "") == "是"]
+    if metric == "h24":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_24h or "") == "是"]
+    if metric == "perform":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_perform or "") == "是"]
+    if metric == "valid":
+        # 有效可施工：排除撤单与无状态。
+        # v1.7.0：已施工单一律保留 —— 与 _agg() 里 valid=max(n-cancel-nostate, done)
+        # 兜底保持**同一判定**。否则「未知」组会出现卡片 3 / 明细 2（v1.6.6 的老坑）。
+        return [r for r in rows
+                if _status_of(r) == "已施工"
+                or ("撤" not in _status_of(r) and not _is_nostate(r))]
+    # 比率型指标没有独立明细，给分子那一侧（前端点率类卡片时跳到分子单）
+    if metric in ("rate_nom", "rate_eff"):
+        return [r for r in rows if _status_of(r) == "已施工"]
+    if metric == "rate_pend":
+        return [r for r in rows if is_pending(_status_of(r))]
+    if metric == "rate_re":
+        return [r for r in rows if ("退" in _status_of(r) or "撤" in _status_of(r))]
+    if metric == "rate_can":
+        return [r for r in rows if "撤" in _status_of(r)]
+    if metric == "rate_clear":
+        return [r for r in rows if ("已施工" == _status_of(r) or "退" in _status_of(r) or "撤" in _status_of(r))]
+    if metric == "rate_8h":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_8h or "") == "是"]
+    if metric == "rate_24h":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_24h or "") == "是"]
+    if metric == "rate_perf":
+        return [r for r in rows if _status_of(r) == "已施工" and (r.is_perform or "") == "是"]
+    return list(rows)
+
+
+def _grid_rows(db, month, district):
+    """取某月某区县的装机单（裁决后），只在内存里做一次。带 TTL 缓存。"""
+    key = ("multidim", month, district)
+    now = _time.time()
+    ver = _wide_data_version(db)
+    with _WIDE_CACHE_LOCK:
+        hit = _WIDE_CACHE.get(key)
+        if hit and hit[0] == ver and hit[1] > now:
+            return hit[2]
+    q = db.query(InstallOrder).filter(InstallOrder.month == month)
+    if district:
+        q = q.filter(InstallOrder.district == district)
+    rows = q.all()
+    _adh_install(db, rows)      # 跨源裁决，与装维端同口径
+    with _WIDE_CACHE_LOCK:
+        _WIDE_CACHE[key] = (ver, _time.time() + _WIDE_CACHE_TTL, rows)
+        if len(_WIDE_CACHE) > 64:
+            for k in [k for k, v in _WIDE_CACHE.items() if v[1] <= _time.time()]:
+                _WIDE_CACHE.pop(k, None)
+    return rows
+
+
+def _agg(rows):
+    """把一个分组的行聚合成 21 个维度值（统计与明细共用 _pick）"""
+    n = len(rows)
+    done = len(_pick(rows, "done"))
+    cancel = len(_pick(rows, "cancel"))
+    refund = len(_pick(rows, "refund"))
+    pending = len(_pick(rows, "pending"))
+    nostate = len(_pick(rows, "nostate"))
+    h8 = len(_pick(rows, "h8"))
+    h24 = len(_pick(rows, "h24"))
+    perform = len(_pick(rows, "perform"))
+    # 有效可施工 = 来单 - 撤单 - 无状态。
+    # v1.7.0 兜底：至少要 >= 已施工数。个别单 status/step/theme 全空被判「无状态」，
+    # 但它本身是已施工（加装类挂靠单常见），否则会出现 done > valid、有效竣工率 >100%。
+    valid = max(n - cancel - nostate, done)
+    clear = done + cancel + refund        # 消单
+    return {
+        "come": n, "done": done, "cancel": cancel, "refund": refund,
+        "pending": pending, "nostate": nostate, "h8": h8, "h24": h24,
+        "perform": perform, "valid": valid,
+        "rate_nom": _pct(done, n),
+        "rate_eff": _pct(done, valid),
+        "rate_pend": _pct(pending, valid),
+        "rate_re": _pct(cancel + refund, n),
+        "rate_can": _pct(cancel, n),
+        "rate_clear": _pct(clear, n),
+        "rate_8h": _pct(h8, done),
+        "rate_24h": _pct(h24, done),
+        "rate_perf": _pct(perform, done),
+    }
+
+
+class _MultiDimReq(BaseModel):
+    month: str
+    district: str = ""
+
+
+@router.post("/completion/multidim")
+def completion_multidim(req: _MultiDimReq,
+                        user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """竣工率多维分析：按标准7网格输出 21 个维度（POST 规避中文 query 被 h11 拒绝）"""
+    rows = _grid_rows(db, req.month, req.district)
+    if not rows:
+        return {"has_data": False, "month": req.month, "district": req.district,
+                "cols": [], "grids": [], "total": {}}
+
+    # 按标准网格分组。「未知」= 网格为空，单独列示（与表格一致）
+    groups = {}
+    unmapped_raw = {}
+    for r in rows:
+        g = (r.grid or "").strip()
+        if not g:
+            unmapped_raw["(空)"] = unmapped_raw.get("(空)", 0) + 1
+            groups.setdefault("未知(未映射)", []).append(r)
+            continue
+        if r.district == "洪湖市" and g not in _HONGHU_GRID_MAP:
+            # 映射表里没有的网格名 → 归「未知」，并记下来方便补映射
+            unmapped_raw[g] = unmapped_raw.get(g, 0) + 1
+            groups.setdefault("未知(未映射)", []).append(r)
+        else:
+            groups.setdefault(_std_grid(g, r.district), []).append(r)
+
+    grids = []
+    for g, rs in groups.items():
+        item = {"grid": g, "is_unknown": g.startswith("未知")}
+        item.update(_agg(rs))
+        grids.append(item)
+    # 7 标准网格按来单降序，未知固定排最后
+    grids.sort(key=lambda x: (x["is_unknown"], -x["come"]))
+
+    total = _agg(rows)
+    # 网格 avg 参考值：用于卡片上「vs 全区」的比较
+    total["grid_count"] = len([g for g in grids if not g["is_unknown"]])
+
+    return {
+        "has_data": True,
+        "month": req.month,
+        "district": req.district or "全部区县",
+        "cols": [{"key": k, "label": lb, "type": t, "hint": h} for k, lb, t, h in _MULTIDIM_COLS],
+        "grids": grids,
+        "total": total,
+        "unmapped": dict(sorted(unmapped_raw.items(), key=lambda x: -x[1])),
+        "note": "口径：来单=受理非空；竣工=已施工；有效可施工=来单-撤单-无状态。状态取跨源裁决结果。",
+    }
+
+
+class _DrillReq(BaseModel):
+    month: str
+    district: str = ""
+    grid: str = ""          # 标准网格名；"未知(未映射)" 表示未映射
+    metric: str = "come"
+    keyword: str = ""
+    page: int = 1
+    page_size: int = 50
+
+
+@router.post("/completion/drill")
+def completion_drill(req: _DrillReq,
+                     user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """多维分析钻取明细。**与卡片数字共用 _pick**，不存在「卡片 N 单、明细 0 条」。"""
+    rows = _grid_rows(db, req.month, req.district)
+
+    # 先按网格圈定范围（与 multidim 完全相同的分组逻辑）
+    if req.grid:
+        if req.grid.startswith("未知"):
+            rows = [r for r in rows
+                    if not (r.grid or "").strip()
+                    or (r.district == "洪湖市" and (r.grid or "").strip() not in _HONGHU_GRID_MAP)]
+        else:
+            rows = [r for r in rows if _std_grid((r.grid or "").strip(), r.district) == req.grid]
+
+    rows = _pick(rows, req.metric)
+
+    kw = (req.keyword or "").strip()
+    if kw:
+        rows = [r for r in rows
+                if kw in (r.order_id or "") or kw in (r.handler or "")
+                or kw in (r.community_name or "") or kw in (r.service_number or "")]
+
+    rows.sort(key=lambda r: (r.accept_time or ""), reverse=True)
+    total = len(rows)
+    ps = max(1, min(req.page_size, 200))
+    st = max(0, (req.page - 1) * ps)
+    page_rows = rows[st:st + ps]
+
+    return {
+        "total": total, "page": req.page, "page_size": ps,
+        "rows": [{
+            "no": r.order_id,
+            "grid": _std_grid((r.grid or "").strip(), r.district) or "未知(未映射)",
+            "grid_raw": r.grid or "",
+            "district": r.district,
+            "accept_time": (r.accept_time or "")[:16],
+            "theme": r.order_theme or "",
+            "status": _status_of(r),
+            "status_raw": r.status or "",
+            "status_src": getattr(r, "_st_src", "") or "",
+            "status_note": getattr(r, "_st_note", "") or "",
+            "status_conflict": bool(getattr(r, "_st_conflict", False)),
+            "handler": r.handler or "",
+            "community": r.community_name or "",
+            "number": r.service_number or "",
+            "completion_time": (r.completion_time or "")[:16],
+            "is_8h": r.is_8h or "",
+            "is_24h": r.is_24h or "",
+            "is_perform": r.is_perform or "",
+            "broadband_type": r.broadband_type or "",
+            "current_step": r.current_step or "",
+        } for r in page_rows],
+    }
+
 
 @router.get("/wide/orders")
 def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
