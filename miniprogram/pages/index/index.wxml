@@ -30,7 +30,7 @@
           <view class="card-h">
             <text>{{iconLabel(c)}}</text>
             <text>{{c.label}}</text>
-            <text wx:if="{{c.kind==='notice' && numOf(c)>0}}" class="badge-dot">{{numOf(c)}}</text>
+            <text wx:if="{{(c.kind==='notice' || c.kind==='my_task') && numOf(c)>0}}" class="badge-dot">{{numOf(c)}}</text>
           </view>
           <block wx:if="{{c.state==='none'}}">
             <view class="v" style="font-size:34rpx;color:#cbd5e1">待接入</view>
@@ -41,7 +41,7 @@
               <text class="u" wx:if="{{c.unit}}">{{c.unit}}</text>
             </view>
             <view class="card-s">
-              <text wx:if="{{c.sub && seg==='mine'}}" class="gbadge">{{c.sub}}</text>
+              <text wx:if="{{c.sub && seg==='mine' && !hasBadge(c)}}" class="gbadge">{{c.sub}}</text>
               <text wx:if="{{hint(c)}}" class="gbadge">{{hint(c)}}</text>
             </view>
           </block>

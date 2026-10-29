@@ -28,7 +28,7 @@ from ..deps import get_current_user
 from ..models import (
     AiVisitIssue, AlertOrder, ComplaintOrder, District, ExtensionMember,
     H5SurveyStaff, InstallOrder, Notice, NoticeSignature, ReportDupOrder,
-    ReportTimeout, User,
+    ReportTimeout, Task, TaskLog, User,
 )
 
 router = APIRouter(prefix="/mp", tags=["mp"])
@@ -329,7 +329,15 @@ def overview(month: str = Query(""), scope: str = Query("mine"),
     ]
 
     total_n, unsign = _notice_count(db, user.id)
+    task_open, task_rows = _my_task(db, user.id)
+    if task_open:
+        _task_sub = "待办 %d 项" % task_open
+    elif task_rows:
+        _task_sub = "共 %d 项·均已完成" % len(task_rows)
+    else:
+        _task_sub = "暂无任务"
     notices = [
+        _card("my_task", "我的任务", task_open, kind="my_task", sub=_task_sub),
         _card("notice", "待签通知", unsign, kind="notice",
               sub=("共 %d 条" % total_n) if total_n else "暂无通知"),
         _card("knowledge", "知识库", None, unit="", kind="knowledge", state="none"),
@@ -349,10 +357,23 @@ def overview(month: str = Query(""), scope: str = Query("mine"),
 
 
 def _notice_count(db, uid):
-    total = db.query(func.count(Notice.id)).filter(Notice.status == "published").scalar() or 0
+    """返回 (已发布通知数, 本人待签数)。
+
+    待签只统计「必签」通知（require_sign=True）——非必签通知签了也白签，
+    算进待签会让数字永远清不掉。签收数用 join 限定在当前已发布集合内，
+    避免历史撤回/草稿通知的签收记录把待签数冲成 0（曾出过这种错）。
+    """
+    pub_ids = [r[0] for r in db.query(Notice.id).filter(Notice.status == "published").all()]
+    total = len(pub_ids)
+    need = db.query(func.count(Notice.id)).filter(
+        Notice.status == "published", Notice.require_sign == True).scalar() or 0  # noqa: E712
+    if not pub_ids:
+        return 0, 0
     signed = db.query(func.count(NoticeSignature.id)).filter(
-        NoticeSignature.user_id == uid).scalar() or 0
-    return total, max(total - signed, 0)
+        NoticeSignature.user_id == uid,
+        NoticeSignature.notice_id.in_(pub_ids),
+    ).scalar() or 0
+    return total, max(need - signed, 0)
 
 
 # ---------------------------------------------------------------- 明细
@@ -534,3 +555,71 @@ def knowledge(keyword: str = Query(""), db: Session = Depends(get_db),
               user: User = Depends(get_current_user)):
     """知识库：库里暂无文档表，返回 source=None（前端显示「待接入」）"""
     return {"total": 0, "source": None, "keyword": keyword, "rows": []}
+
+
+# ---------------------------------------------------------------- 我的任务（服务端任务分派 → 装维端）
+
+TASK_STATUS_NAME = {"created": "待派单", "assigned": "待接单", "accepted": "进行中",
+                    "submitted": "待验收", "completed": "已验收", "rejected": "已驳回"}
+TASK_PRIORITY_NAME = {"urgent": "紧急", "high": "高", "normal": "普通", "low": "低"}
+TASK_OPEN = ("assigned", "accepted", "rejected")   # 需要本人动作的未完成态
+
+
+def _task_dto(t, db):
+    creator = db.query(User).filter(User.id == t.creator_id).first()
+    dist = db.get(District, t.district_id) if t.district_id else None
+    return {
+        "id": t.id, "title": t.title or "", "content": t.content or "",
+        "status": t.status,
+        "status_name": TASK_STATUS_NAME.get(t.status, t.status),
+        "priority": t.priority or "normal",
+        "priority_name": TASK_PRIORITY_NAME.get(t.priority, t.priority or "普通"),
+        "deadline": t.deadline or "",
+        "created_at": t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
+        "creator": creator.real_name if creator else "",
+        "district": dist.name if dist else "",
+        "open": t.status in TASK_OPEN,
+    }
+
+
+def _my_task(db: Session, uid: int):
+    """返回 (待办数, 任务列表)。只取指派给本人的任务。"""
+    rows = [_task_dto(t, db) for t in
+            db.query(Task).filter(Task.assignee_id == uid).order_by(Task.id.desc()).limit(100).all()]
+    open_cnt = sum(1 for r in rows if r["open"])
+    return open_cnt, rows
+
+
+@router.get("/my-tasks")
+def my_tasks(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    open_cnt, rows = _my_task(db, user.id)
+    return {"total": len(rows), "open": open_cnt, "rows": rows}
+
+
+@router.post("/my-tasks/{tid}/accept")
+def my_task_accept(tid: int, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    t = db.query(Task).filter(Task.id == tid, Task.assignee_id == user.id).first()
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    if t.status != "assigned":
+        raise HTTPException(400, "任务当前不可接单")
+    t.status = "accepted"
+    db.add(TaskLog(task_id=t.id, user_id=user.id, action="接单"))
+    db.commit()
+    return {"msg": "接单成功，开始执行", "status": "accepted"}
+
+
+@router.post("/my-tasks/{tid}/submit")
+def my_task_submit(tid: int, body: dict = None, db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    t = db.query(Task).filter(Task.id == tid, Task.assignee_id == user.id).first()
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    if t.status not in TASK_OPEN:
+        raise HTTPException(400, "任务当前不可提交")
+    t.status = "submitted"
+    db.add(TaskLog(task_id=t.id, user_id=user.id, action="提交验收",
+                   comment=(body or {}).get("comment", "")))
+    db.commit()
+    return {"msg": "已提交验收", "status": "submitted"}

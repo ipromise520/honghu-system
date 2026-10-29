@@ -24,6 +24,36 @@
     </view>
   </block>
 
+  <block wx:elif="{{kind==='my_task'}}">
+    <view class="body">
+      <view class="note">{{tasks.length ? '共 ' + tasks.length + ' 个任务，待办 ' + openCount + ' 个。' : '暂无指派给您的任务。'}}</view>
+      <view wx:if="{{tasks.length===0}}" class="empty">
+        <view class="t">暂无任务</view>
+        <view class="p">服务端「任务分派」指派给您后，会出现在这里。</view>
+      </view>
+      <view wx:for="{{tasks}}" wx:key="id" wx:for-item="t" class="row task">
+        <view class="row-h">
+          <text class="row-no" style="font-family:inherit;font-size:28rpx">{{t.title}}</text>
+          <text class="row-tag {{t.cls}}">{{t.status_name}}</text>
+        </view>
+        <view class="row-kv">
+          <text class="row-tag {{t.priority==='urgent'?'danger':'warn'}}">{{t.priority_name}}</text>
+          <text><text class="k">截止</text> {{t.deadline||'—'}}</text>
+          <text><text class="k">区县</text> {{t.district||'—'}}</text>
+        </view>
+        <view class="row-kv">
+          <text><text class="k">派单人</text> {{t.creator||'—'}}</text>
+          <text><text class="k">时间</text> {{t.created_at}}</text>
+        </view>
+        <view wx:if="{{t.content}}" class="row-kv"><text style="color:#475569">{{t.content}}</text></view>
+        <view class="task-ops" wx:if="{{t.status==='assigned' || t.status==='accepted' || t.status==='rejected'}}">
+          <view wx:if="{{t.status!=='accepted'}}" class="btn-sm" bindtap="acceptTask" data-t="{{t}}">接单</view>
+          <view class="btn-sm primary" bindtap="submitTask" data-t="{{t}}">提交验收</view>
+        </view>
+      </view>
+    </view>
+  </block>
+
   <block wx:else>
     <view class="tabs" wx:if="{{canToggle}}">
       <view class="tabs-btn {{scope==='mine'?'on':''}}" bindtap="setScope" data-s="mine">我的</view>

@@ -41,6 +41,40 @@
       </div>
     </template>
 
+    <!-- 我的任务（kind=my_task） -->
+    <template v-else-if="kind === 'my_task'">
+      <div class="body">
+        <p class="note">{{ tasks.length ? ('共 ' + tasks.length + ' 个任务，待办 ' + openCount + ' 个。') : '暂无指派给您的任务。' }}</p>
+
+        <div v-if="tasks.length === 0" class="empty">
+          <div class="ico"><Icon name="inbox" :size="54" /></div>
+          <h3>暂无任务</h3>
+          <p>服务端「任务分派」指派给您后，会出现在这里。</p>
+        </div>
+
+        <div v-for="(t, i) in tasks" :key="t.id" class="row task" :style="{ '--i': i }">
+          <div class="row-h">
+            <span class="row-no" style="font-family:inherit;font-size:14px">{{ t.title }}</span>
+            <span class="row-tag" :class="taskClass(t)">{{ t.status_name }}</span>
+          </div>
+          <div class="row-kv">
+            <span class="row-tag" :class="t.priority === 'urgent' ? 'danger' : 'warn'">{{ t.priority_name }}</span>
+            <span><span class="k">截止</span> {{ t.deadline || '—' }}</span>
+            <span><span class="k">区县</span> {{ t.district || '—' }}</span>
+          </div>
+          <div class="row-kv">
+            <span><span class="k">派单人</span> {{ t.creator || '—' }}</span>
+            <span><span class="k">时间</span> {{ t.created_at }}</span>
+          </div>
+          <div v-if="t.content" class="row-kv"><span style="color:var(--ink-2)">{{ t.content }}</span></div>
+          <div class="task-ops" v-if="t.status === 'assigned' || t.status === 'accepted' || t.status === 'rejected'">
+            <button v-if="t.status !== 'accepted'" class="btn-sm" :disabled="busy === t.id" @click="acceptTask(t)">接单</button>
+            <button class="btn-sm primary" :disabled="busy === t.id" @click="submitTask(t)">提交验收</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
     <!-- 普通明细 -->
     <template v-else>
       <div class="tabs" v-if="canToggle">
@@ -121,7 +155,7 @@ const state = computed(() => route.query.state || '')
 const scope = ref(route.query.scope || 'mine')
 
 const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month']
-const canToggle = computed(() => kind.value !== 'notice' && kind.value !== '')
+const canToggle = computed(() => kind.value !== 'notice' && kind.value !== 'my_task' && kind.value !== '')
 
 const loading = ref(true)
 const ready = ref(false)
@@ -130,6 +164,9 @@ const flat = ref(false)
 const titleKey = ref('no')
 const rows = ref([])
 const list = ref([]) // 通知列表
+const tasks = ref([]) // 我的任务
+const openCount = ref(0)
+const busy = ref(0)
 
 function statusOf(r) {
   return r.status || (r.signed === false ? '未签' : r.signed === true ? '已签' : '')
@@ -157,6 +194,11 @@ async function load() {
       const d = await mp.notices()
       list.value = d.rows || []
       source.value = ''
+    } else if (kind.value === 'my_task') {
+      const d = await mp.myTasks()
+      tasks.value = d.rows || []
+      openCount.value = d.open || 0
+      source.value = ''
     } else if (ORDERS.includes(kind.value)) {
       const d = await mp.orders(kind.value, scope.value, level.value)
       rows.value = (d.rows || []).map((r) => ({ ...r, __cols: d.columns }))
@@ -178,9 +220,63 @@ async function load() {
   }
 }
 
+function taskClass(t) {
+  if (t.status === 'completed') return 'ok'
+  if (t.status === 'submitted') return 'warn'
+  if (t.status === 'rejected') return 'danger'
+  return 'warn'
+}
+async function acceptTask(t) {
+  busy.value = t.id
+  try {
+    await mp.acceptTask(t.id)
+    t.status = 'accepted'
+    t.status_name = '进行中'
+    t.open = true
+    openCount.value = tasks.value.filter((x) => x.open).length
+  } catch (e) {
+    if (e.message !== '登录已过期') alert(e.message || '接单失败')
+  } finally {
+    busy.value = 0
+  }
+}
+async function submitTask(t) {
+  busy.value = t.id
+  try {
+    await mp.submitTask(t.id)
+    t.status = 'submitted'
+    t.status_name = '待验收'
+    t.open = false
+    openCount.value = tasks.value.filter((x) => x.open).length
+  } catch (e) {
+    if (e.message !== '登录已过期') alert(e.message || '提交失败')
+  } finally {
+    busy.value = 0
+  }
+}
 function openNotice(n) { router.push('/notice/' + n.id) }
 function goBack() { router.back() }
 
 watch(scope, () => { if (canToggle.value) load() })
 onMounted(load)
 </script>
+
+<style scoped>
+/* 我的任务：操作按钮行 */
+.task-ops {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--line);
+}
+.btn-sm {
+  height: 30px; padding: 0 15px; border-radius: 9px; border: 1px solid var(--line);
+  background: #fff; color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+  transition: transform .12s ease, background .15s ease;
+}
+.btn-sm.primary {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8); border-color: transparent;
+  color: #fff; box-shadow: 0 3px 10px rgba(37, 99, 235, .28);
+}
+.btn-sm:active { transform: scale(.96); }
+.btn-sm[disabled] { opacity: .55; }
+.task { border-left: 3px solid var(--brand); }
+</style>

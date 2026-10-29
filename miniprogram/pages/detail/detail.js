@@ -5,7 +5,7 @@ Page({
   data: {
     kind: '', level: '', title: '明细', state: '', scope: 'mine',
     loading: true, ready: false, source: '', flat: false, titleKey: 'no',
-    rows: [], list: [], canToggle: false,
+    rows: [], list: [], tasks: [], openCount: 0, busy: 0, canToggle: false,
   },
 
   onLoad(o) {
@@ -16,7 +16,7 @@ Page({
     const scope = o.scope || 'mine'
     this.setData({
       kind, level, title, state, scope,
-      canToggle: kind !== 'notice' && kind !== '',
+      canToggle: kind !== 'notice' && kind !== 'my_task' && kind !== '',
     })
     this.load()
   },
@@ -28,6 +28,12 @@ Page({
       if (kind === 'notice') {
         const d = await mp.notices()
         this.setData({ list: d.rows || [], ready: true })
+      } else if (kind === 'my_task') {
+        const d = await mp.myTasks()
+        this.setData({
+          tasks: (d.rows || []).map((t) => ({ ...t, cls: this.taskClass(t) })),
+          openCount: d.open || 0, ready: true, source: '',
+        })
       } else if (ORDERS.includes(kind)) {
         const d = await mp.orders(kind, scope, level)
         this.setData({
@@ -70,6 +76,42 @@ Page({
   setScope(e) {
     const s = e.currentTarget.dataset.s
     if (s !== this.data.scope) { this.setData({ scope: s }); this.load() }
+  },
+  taskClass(t) {
+    if (t.status === 'completed') return 'ok'
+    if (t.status === 'submitted') return 'warn'
+    if (t.status === 'rejected') return 'danger'
+    return 'warn'
+  },
+  async acceptTask(e) {
+    const t = e.currentTarget.dataset.t
+    this.setData({ busy: t.id })
+    try {
+      await mp.acceptTask(t.id)
+      const tasks = this.data.tasks.map((x) =>
+        x.id === t.id ? { ...x, status: 'accepted', status_name: '进行中', open: true, cls: 'warn' } : x)
+      this.setData({ tasks, openCount: tasks.filter((x) => x.open).length })
+      wx.showToast({ title: '已接单', icon: 'success' })
+    } catch (err) {
+      if (err.message !== '登录已过期') wx.showToast({ title: err.message || '接单失败', icon: 'none' })
+    } finally {
+      this.setData({ busy: 0 })
+    }
+  },
+  async submitTask(e) {
+    const t = e.currentTarget.dataset.t
+    this.setData({ busy: t.id })
+    try {
+      await mp.submitTask(t.id)
+      const tasks = this.data.tasks.map((x) =>
+        x.id === t.id ? { ...x, status: 'submitted', status_name: '待验收', open: false, cls: 'warn' } : x)
+      this.setData({ tasks, openCount: tasks.filter((x) => x.open).length })
+      wx.showToast({ title: '已提交验收', icon: 'success' })
+    } catch (err) {
+      if (err.message !== '登录已过期') wx.showToast({ title: err.message || '提交失败', icon: 'none' })
+    } finally {
+      this.setData({ busy: 0 })
+    }
   },
   openNotice(e) { wx.navigateTo({ url: '/pages/notice/notice?id=' + e.currentTarget.dataset.n.id }) },
   goBack() { wx.navigateBack() },

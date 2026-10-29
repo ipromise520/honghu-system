@@ -41,6 +41,9 @@ const mp = {
   orders: (kind, scope = 'mine', level = '') =>
     request(`/mp/orders?kind=${kind}&scope=${scope}${level ? '&level=' + level : ''}`, 'GET'),
   rewards: (kind, scope = 'mine') => request(`/mp/rewards?kind=${kind}&scope=${scope}`, 'GET'),
+  myTasks: () => request('/mp/my-tasks', 'GET'),
+  acceptTask: (id) => request('/mp/my-tasks/' + id + '/accept', 'POST', {}),
+  submitTask: (id, comment = '') => request('/mp/my-tasks/' + id + '/submit', 'POST', { comment }),
   notices: () => request('/mp/notices', 'GET'),
   notice: (id) => request('/mp/notices/' + id, 'GET'),
   sign: (id) => request(`/mp/notices/${id}/sign`, 'POST'),

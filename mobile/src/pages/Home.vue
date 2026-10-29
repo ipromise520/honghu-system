@@ -45,7 +45,7 @@
           <div class="card-h">
             <Icon :name="iconOf(c)" />
             <span>{{ c.label }}</span>
-            <span v-if="c.kind === 'notice' && numOf(c) > 0" class="badge-dot">{{ numOf(c) }}</span>
+            <span v-if="(c.kind === 'notice' || c.kind === 'my_task') && numOf(c) > 0" class="badge-dot">{{ numOf(c) }}</span>
           </div>
 
           <template v-if="c.state === 'none'">
@@ -57,7 +57,7 @@
               <span class="u" v-if="c.unit">{{ c.unit }}</span>
             </div>
             <div class="card-s">
-              <span v-if="c.sub && seg === 'mine'" class="gbadge">{{ c.sub }}</span>
+              <span v-if="c.sub && seg === 'mine' && !hasBadge(c)" class="gbadge">{{ c.sub }}</span>
               <span v-if="hint(c)" class="gbadge">{{ hint(c) }}</span>
             </div>
           </template>
@@ -92,7 +92,7 @@ const KIND_ICON = {
   pending_install: 'box', pending_repair: 'wrench', near_timeout: 'diamond',
   completed_month: 'check', timeout: 'alert', broad: 'repeat', ai_issue: 'alert',
   install_qc: 'tool', h5: 'star', qc: 'check', trace: 'repeat', port_clear: 'plug',
-  inspection: 'building', care: 'heart', xf: 'wrench', notice: 'bell', knowledge: 'book',
+  inspection: 'building', care: 'heart', xf: 'wrench', my_task: 'check', notice: 'bell', knowledge: 'book',
 }
 
 const profile = computed(() => data.value?.profile || {})
@@ -113,6 +113,8 @@ function numOf(c) {
   const v = rawOf(c)
   return typeof v === 'number' ? v : 0
 }
+function hasBadge(c) { return (c.kind === 'notice' || c.kind === 'my_task') && numOf(c) > 0 }
+
 function shown(c) {
   if (c.state === 'none') return '待接入'
   const v = display[c.key]

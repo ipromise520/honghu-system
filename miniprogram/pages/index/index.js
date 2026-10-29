@@ -5,7 +5,7 @@ const KIND_EMOJI = {
   pending_install: '📦', pending_repair: '🔧', near_timeout: '⏰', completed_month: '✅',
   timeout: '⚠️', broad: '🔁', ai_issue: '📞', install_qc: '🛠️', h5: '⭐', qc: '✔️',
   trace: '🔄', port_clear: '🔌', inspection: '🏢', care: '❤️', xf: '🔧',
-  notice: '🔔', knowledge: '📚',
+  my_task: '📌', notice: '🔔', knowledge: '📚',
 }
 
 Page({
@@ -55,6 +55,7 @@ Page({
     if (this.data.seg === 'grid' && c.grid != null && c.grid !== c.value) return '个人 ' + c.value
     return ''
   },
+  hasBadge(c) { return (c.kind === 'notice' || c.kind === 'my_task') && this.numOf(c) > 0 },
   iconLabel(c) { return KIND_EMOJI[c.kind] || '📋' },
   open(e) {
     const c = e.currentTarget.dataset.c
