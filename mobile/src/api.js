@@ -63,6 +63,8 @@ export const mp = {
     request(`/mp/orders?kind=${kind}&scope=${scope}${level ? '&level=' + level : ''}`),
   rewards: (kind, scope = 'mine') => request(`/mp/rewards?kind=${kind}&scope=${scope}`),
   tasks: (kind) => request(`/mp/tasks?kind=${kind}`),
+  alerts: () => request('/mp/alerts'),
+  warnOrders: () => request('/mp/alerts/warn'),
   myTasks: () => request('/mp/my-tasks'),
   acceptTask: (id) => request('/mp/my-tasks/' + id + '/accept', { method: 'POST' }),
   submitTask: (id, comment = '') => request('/mp/my-tasks/' + id + '/submit', { method: 'POST', body: { comment } }),

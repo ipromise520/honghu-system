@@ -40,6 +40,8 @@ DONE_ST = ("已施工", "已归档", "已完工", "已回单", "已竣工")
 LEVEL_DIAMOND = 60
 LEVEL_PLATINUM = 240
 LEVEL_NORMAL = 1440
+# 「工单提前 2 小时预警」窗口（用户口径）：剩余 ≤120 分钟且在途，含已逾期
+LEVEL_ALERT = 120
 # 超过该窗口的过期单不再纳入（多为历史遗留的僵尸单）
 WINDOW_PAST = 48 * 60
 
@@ -643,3 +645,103 @@ def my_task_submit(tid: int, body: dict = None, db: Session = Depends(get_db),
                    comment=(body or {}).get("comment", "")))
     db.commit()
     return {"msg": "已提交验收", "status": "submitted"}
+
+
+# ---------------------------------------------------------------- 四类提醒（铃铛）
+
+ALERT_META = {
+    "task":   {"label": "任务",     "detail": "my_task",      "hint": "待接单/进行中/已驳回"},
+    "notice": {"label": "通知",     "detail": "notice",       "hint": "必签且未签收"},
+    "kb":     {"label": "知识库",   "detail": "knowledge",    "hint": "新上架文档"},
+    "warn":   {"label": "工单预警", "detail": "alert_order",  "hint": "预约剩余 ≤2 小时"},
+}
+
+
+def _kb_new_count(db: Session, uid: int):
+    """知识库上新数。库里暂无知识库表 → 返回 (0, "none")。
+
+    建表后在此实现「本人未读且近 N 天上架」即可，前端无需改动。
+    """
+    return 0, "none"
+
+
+def _warn_rows(db: Session, name, district, gkey):
+    """工单预警：在途 + 预约剩余 ≤ LEVEL_ALERT 分钟（含已逾期，逾期窗口 WINDOW_PAST 内）"""
+    q = db.query(AlertOrder).filter(AlertOrder.district == district)
+    if gkey:
+        q = q.filter(AlertOrder.grid.like("%" + gkey + "%"))
+    now = _now()
+    rows = []
+    for r in q.all():
+        if (r.status or "").strip() in DONE_ST:
+            continue
+        ts = _parse_dt(r.appoint_time)
+        if not ts:
+            continue
+        left = int((ts - now).total_seconds() // 60)
+        if left > LEVEL_ALERT or left < -WINDOW_PAST:
+            continue
+        rows.append({
+            "no": r.order_no or "",
+            "handler": _short_name(r.handler, r.district),
+            "appoint": _hm(ts),
+            "left_min": left,
+            "left_text": ("已逾期 %d 分钟" % -left) if left < 0 else ("剩 %d 分钟" % left),
+            "overdue": left < 0,
+            "status": r.status or "",
+            "grid": r.grid or "",
+            "community": r.community or "",
+        })
+    rows.sort(key=lambda x: x["left_min"])
+    return rows
+
+
+@router.get("/alerts")
+def alerts_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """四类提醒统一入口。数值全部按「本网格」口径（网格长视角）。"""
+    p = _resolve(db, user)
+    name, district, gkey = p["name"], p["district"], p["grid_key"]
+
+    task_cnt, _ = _my_task(db, user.id)
+    _, notice_unsigned = _notice_count(db, user.id)
+    kb_cnt, kb_state = _kb_new_count(db, user.id)
+    warn_rows = _warn_rows(db, name, district, gkey)
+
+    counts = {"task": task_cnt, "notice": notice_unsigned, "kb": kb_cnt, "warn": len(warn_rows)}
+    total = sum(counts.values())
+
+    items = []
+    for key in ("task", "notice", "kb", "warn"):
+        m = ALERT_META[key]
+        items.append({
+            "key": key, "label": m["label"], "hint": m["hint"],
+            "detail": m["detail"], "count": counts[key],
+            "state": kb_state if key == "kb" else "ok",
+        })
+
+    # 最紧急的一条优先提示（逾期 > 钻石 > 白金 > 普通），无预警则取任务
+    top = ""
+    if warn_rows:
+        w = warn_rows[0]
+        top = ("%s %s" % (w["handler"] or "未派单", w["left_text"]))
+    elif task_cnt:
+        top = "有 %d 项任务待处理" % task_cnt
+
+    return {
+        "total": total, "counts": counts, "items": items,
+        "urgent": sum(1 for w in warn_rows if w["overdue"]),
+        "top": top, "month": _month(""),
+    }
+
+
+@router.get("/alerts/warn")
+def alerts_warn(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """工单预警明细（≤2 小时）"""
+    p = _resolve(db, user)
+    rows = _warn_rows(db, p["name"], p["district"], p["grid_key"])
+    cols = [("no", "工单号", 1), ("handler", "责任人", 0), ("appoint", "预约时间", 0),
+            ("left_text", "剩余", 0), ("status", "状态", 0), ("community", "小区", 0)]
+    return {"kind": "warn", "total": len(rows),
+            "source": "省公司预警附件（预约剩余 ≤2 小时的未完工单，含已逾期）",
+            "columns": [{"key": k, "label": lb, "mono": mono} for k, lb, mono in cols],
+            "rows": rows}

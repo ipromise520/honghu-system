@@ -1,6 +1,7 @@
 const { mp, getToken } = require('../../utils/request.js')
 
 const GROUP_COLOR = { orders: '#2563eb', rewards: '#b45309', tasks: '#6d28d9', msg: '#1e3a8a' }
+const ALERT_EMOJI = { task: '✅', notice: '🔔', kb: '📚', warn: '⚠️' }
 const KIND_EMOJI = {
   pending_install: '📦', pending_repair: '🔧', near_timeout: '⏰', completed_month: '✅',
   timeout: '⚠️', broad: '🔁', ai_issue: '📞', install_qc: '🛠️', h5: '⭐', qc: '✔️',
@@ -9,7 +10,8 @@ const KIND_EMOJI = {
 }
 
 Page({
-  data: { loading: true, data: null, seg: 'mine', initial: '', profile: {}, shortGrid: '' },
+  data: { loading: true, data: null, seg: 'mine', initial: '', profile: {}, shortGrid: '',
+          panelOpen: false, alerts: { total: 0, items: [], top: '' }, ALERT_EMOJI },
 
   onLoad() { this.load() },
   onShow() {
@@ -24,6 +26,7 @@ Page({
       const d = await mp.overview('mine')
       const p = d.profile || {}
       d.groups.forEach((g) => { g.color = GROUP_COLOR[g.key] || '#2563eb' })
+      this.loadAlerts()
       this.setData({
         data: d, loading: false,
         initial: (p.name || '装')[0],
@@ -38,6 +41,21 @@ Page({
     }
   },
 
+  async loadAlerts() {
+    try { this.setData({ alerts: await mp.alerts() }) } catch (e) { /* 忽略 */ }
+  },
+  togglePanel() { this.setData({ panelOpen: !this.data.panelOpen }) },
+  closePanel() { this.setData({ panelOpen: false }) },
+  goAlert(e) {
+    const it = e.currentTarget.dataset.it
+    this.setData({ panelOpen: false })
+    if (!it.count && it.state === 'none') return
+    if (it.detail === 'knowledge') { wx.navigateTo({ url: '/pages/knowledge/knowledge' }); return }
+    if (it.detail === 'alert_order') {
+      wx.navigateTo({ url: '/pages/detail/detail?kind=warn&label=工单预警&scope=grid&state=ok' }); return
+    }
+    wx.navigateTo({ url: '/pages/detail/detail?kind=' + it.detail + '&label=' + it.label + '&scope=mine&state=ok' })
+  },
   setSeg(e) { this.setData({ seg: e.currentTarget.dataset.s }) },
   rawOf(c) {
     const v = this.data.seg === 'mine' ? c.value : (c.grid == null ? c.value : c.grid)

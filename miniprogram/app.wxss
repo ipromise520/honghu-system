@@ -159,3 +159,63 @@ page {
 }
 .owner-name { font-size: 28rpx; font-weight: 800; color: #0f172a; letter-spacing: .6rpx; }
 .owner-sup { font-size: 21rpx; color: #94a3b8; }
+
+/* ===== 四类提醒铃铛 ===== */
+.bell {
+  position: relative; width: 72rpx; height: 72rpx; border-radius: 24rpx;
+  background: rgba(255,255,255,.16); border: 1rpx solid rgba(255,255,255,.28);
+  display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+}
+.bell-ico { font-size: 34rpx; line-height: 1; }
+.bell.ringing { animation: bellRing 2.4s ease-in-out infinite; }
+@keyframes bellRing {
+  0%,62%,100% { transform: rotate(0); }
+  68% { transform: rotate(-13deg); } 74% { transform: rotate(11deg); }
+  80% { transform: rotate(-8deg); }  86% { transform: rotate(5deg); }
+  92% { transform: rotate(0); }
+}
+.bell-num {
+  position: absolute; top: -8rpx; right: -10rpx;
+  min-width: 34rpx; height: 34rpx; padding: 0 8rpx; border-radius: 18rpx;
+  background: #ef4444; color: #fff; font-size: 20rpx; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+  border: 3rpx solid #1e3a8a; line-height: 1;
+}
+.ap-mask { position: fixed; inset: 0; z-index: 20; background: rgba(15,23,42,.22); }
+.alert-panel {
+  position: fixed; z-index: 21; right: 28rpx; top: 116rpx; width: 536rpx;
+  background: #fff; border-radius: 32rpx; padding: 24rpx 20rpx 20rpx;
+  box-shadow: 0 36rpx 88rpx rgba(15,23,42,.3);
+}
+.ap-h { display: flex; align-items: baseline; justify-content: space-between; padding: 2rpx 12rpx 18rpx; }
+.ap-title { font-size: 27rpx; font-weight: 800; color: #0f172a; }
+.ap-sub { font-size: 21rpx; color: #94a3b8; }
+.ap-item {
+  display: flex; align-items: center; gap: 18rpx;
+  padding: 18rpx 16rpx; border-radius: 22rpx; background: #f8fafc; margin-bottom: 10rpx;
+}
+.ap-item.dim { opacity: .58; }
+.ap-ico {
+  flex: 0 0 52rpx; width: 52rpx; height: 52rpx; border-radius: 16rpx;
+  display: flex; align-items: center; justify-content: center; font-size: 26rpx;
+}
+.ap-task { background: #eff6ff; }
+.ap-notice { background: #fef2f2; }
+.ap-kb { background: #ecfeff; }
+.ap-warn { background: #fff7ed; }
+.ap-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2rpx; }
+.ap-label { font-size: 26rpx; font-weight: 700; color: #0f172a; }
+.ap-hint { font-size: 20rpx; color: #94a3b8; }
+.ap-cnt {
+  flex: 0 0 auto; min-width: 44rpx; height: 40rpx; padding: 0 12rpx; border-radius: 14rpx;
+  color: #fff; font-size: 23rpx; font-weight: 800; text-align: center; line-height: 40rpx;
+}
+.ap-cnt.ap-task { background: #2563eb; }
+.ap-cnt.ap-notice { background: #dc2626; }
+.ap-cnt.ap-kb { background: #0891b2; }
+.ap-cnt.ap-warn { background: #ea580c; }
+.ap-cnt.zero { background: #e2e8f0; color: #94a3b8; }
+.ap-top {
+  margin-top: 16rpx; padding: 14rpx 18rpx; border-radius: 18rpx;
+  background: #fff7ed; color: #c2410c; font-size: 21rpx; font-weight: 600;
+}

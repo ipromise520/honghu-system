@@ -16,7 +16,7 @@ Page({
     const scope = o.scope || 'mine'
     this.setData({
       kind, level, title, state, scope,
-      canToggle: kind !== 'notice' && kind !== 'my_task' && kind !== '',
+      canToggle: kind !== 'notice' && kind !== 'my_task' && kind !== 'warn' && kind !== '',
     })
     this.load()
   },
@@ -28,6 +28,13 @@ Page({
       if (kind === 'notice') {
         const d = await mp.notices()
         this.setData({ list: d.rows || [], ready: true })
+      } else if (kind === 'warn') {
+        const d = await mp.warnOrders()
+        this.setData({
+          rows: this.buildRows(d.rows || [], d.columns),
+          titleKey: d.columns ? d.columns[0].key : 'no',
+          source: d.source || '', flat: false, ready: true,
+        })
       } else if (kind === 'my_task') {
         const d = await mp.myTasks()
         this.setData({

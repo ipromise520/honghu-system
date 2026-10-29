@@ -6,6 +6,10 @@
         <view class="who-name">{{profile.name}}<text class="who-tag">{{profile.position}}</text></view>
         <view class="who-meta">{{profile.district}} · {{profile.team}} · {{shortGrid}}</view>
       </view>
+      <view class="bell {{alerts.total>0?'ringing':''}}" bindtap="togglePanel">
+        <text class="bell-ico">🔔</text>
+        <text wx:if="{{alerts.total>0}}" class="bell-num">{{alerts.total>99?'99+':alerts.total}}</text>
+      </view>
     </view>
 
     <view class="seg">
@@ -17,6 +21,24 @@
       <text>{{data.month}} 绩效看板</text>
       <text class="refresh" bindtap="load">↻ 刷新</text>
     </view>
+  </view>
+
+  <view wx:if="{{panelOpen}}" class="ap-mask" bindtap="closePanel"></view>
+  <view wx:if="{{panelOpen}}" class="alert-panel">
+    <view class="ap-h">
+      <text class="ap-title">提醒中心</text>
+      <text class="ap-sub">{{alerts.total>0?'共 '+alerts.total+' 条待处理':'暂无待处理'}}</text>
+    </view>
+    <view wx:for="{{alerts.items}}" wx:key="key" wx:for-item="it"
+          class="ap-item {{it.state==='none'?'dim':''}}" bindtap="goAlert" data-it="{{it}}">
+      <text class="ap-ico ap-{{it.key}}">{{ALERT_EMOJI[it.key]}}</text>
+      <view class="ap-txt">
+        <text class="ap-label">{{it.label}}</text>
+        <text class="ap-hint">{{it.state==='none'?'待接入':it.hint}}</text>
+      </view>
+      <text class="ap-cnt ap-{{it.key}} {{it.count?'':'zero'}}">{{it.count}}</text>
+    </view>
+    <view wx:if="{{alerts.top}}" class="ap-top">⚠️ 最紧急：{{alerts.top}}</view>
   </view>
 
   <block wx:for="{{data.groups}}" wx:key="key" wx:for-item="g">

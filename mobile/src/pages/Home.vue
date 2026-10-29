@@ -11,7 +11,14 @@
           </div>
           <div class="who-meta">{{ profile.district }} · {{ profile.team }} · {{ shortGrid }}</div>
         </div>
+
+        <!-- 四类提醒铃铛 -->
+        <button class="bell" :class="{ ringing: alertTotal > 0, open: panelOpen }" @click.stop="togglePanel">
+          <Icon name="bell" :size="19" />
+          <span v-if="alertTotal > 0" class="bell-num">{{ alertTotal > 99 ? '99+' : alertTotal }}</span>
+        </button>
       </div>
+
 
       <div class="seg">
         <button :class="{ on: seg === 'mine' }" @click="seg = 'mine'">我的</button>
@@ -20,11 +27,44 @@
 
       <div class="hero-month">
         <span>{{ data.month }} 绩效看板</span>
-        <span @click="reload" style="display:flex;align-items:center;gap:4px;opacity:.9">
+        <span @click="reload" style="display:flex;align-items:center;gap:4px;opacity:.9;white-space:nowrap;flex:0 0 auto">
           <Icon name="refresh" :size="13" /> 刷新
         </span>
       </div>
     </header>
+
+      <!-- 提醒面板 -->
+      <transition name="drop">
+        <div v-if="panelOpen" class="alert-panel" @click.stop>
+          <div class="ap-h">
+            <span>提醒中心</span>
+            <span class="ap-sub">{{ alertTotal > 0 ? ('共 ' + alertTotal + ' 条待处理') : '暂无待处理' }}</span>
+          </div>
+          <div class="ap-list">
+            <button
+              v-for="(it, i) in alertItems"
+              :key="it.key"
+              class="ap-item"
+              :class="{ dim: it.state === 'none' }"
+              :style="{ '--ac': ALERT_COLOR[it.key], '--i': i }"
+              @click="goAlert(it)"
+            >
+              <span class="ap-ico"><Icon :name="ALERT_ICON[it.key]" :size="15" /></span>
+              <span class="ap-txt">
+                <span class="ap-label">{{ it.label }}</span>
+                <span class="ap-hint">{{ it.state === 'none' ? '待接入' : it.hint }}</span>
+              </span>
+              <span class="ap-cnt" :class="{ zero: !it.count }">{{ it.count }}</span>
+              <span class="arrow"><Icon name="right" :size="12" /></span>
+            </button>
+          </div>
+          <div v-if="alertTop" class="ap-top">
+            <Icon name="alert" :size="12" /> 最紧急：{{ alertTop }}
+          </div>
+        </div>
+      </transition>
+      <div v-if="panelOpen" class="ap-mask" @click="panelOpen = false"></div>
+
 
     <!-- 分组 -->
     <section v-for="(g, gi) in data.groups" :key="g.key" class="grp">
@@ -86,8 +126,16 @@ const data = ref(null)
 const loading = ref(true)
 const seg = ref('mine')
 const display = reactive({}) // 卡片动画数值
+const panelOpen = ref(false)
+const alerts = ref({ total: 0, items: [], top: '', urgent: 0 })
+const alertTotal = computed(() => alerts.value.total || 0)
+const alertItems = computed(() => alerts.value.items || [])
+const alertTop = computed(() => alerts.value.top || '')
 
 const GROUP_COLOR = { orders: '#2563eb', rewards: '#b45309', tasks: '#6d28d9', msg: '#1e3a8a' }
+// 四类提醒的统一配色与图标（新类型在此加一行即可）
+const ALERT_COLOR = { task: '#2563eb', notice: '#dc2626', kb: '#0891b2', warn: '#ea580c' }
+const ALERT_ICON = { task: 'check', notice: 'bell', kb: 'book', warn: 'alert' }
 const KIND_ICON = {
   pending_install: 'box', pending_repair: 'wrench', near_timeout: 'diamond',
   completed_month: 'check', timeout: 'alert', broad: 'repeat', ai_issue: 'alert',
@@ -157,12 +205,30 @@ function open(c) {
   })
 }
 
+function togglePanel() { panelOpen.value = !panelOpen.value }
+
+function goAlert(it) {
+  panelOpen.value = false
+  if (!it.count && it.state === 'none') return
+  if (it.detail === 'knowledge') { router.push('/knowledge'); return }
+  if (it.detail === 'alert_order') {
+    router.push({ path: '/detail', query: { kind: 'warn', label: '工单预警', scope: 'grid', state: 'ok' } })
+    return
+  }
+  router.push({ path: '/detail', query: { kind: it.detail, label: it.label, scope: 'mine', state: 'ok' } })
+}
+
+async function loadAlerts() {
+  try { alerts.value = await mp.alerts() } catch (e) { /* 提醒失败不影响主看板 */ }
+}
+
 async function load() {
   loading.value = true
   try {
     const d = await mp.overview('mine')
     data.value = d
     animateAll()
+    loadAlerts()
   } catch (e) {
     if (e.message !== '登录已过期') alert(e.message || '加载失败')
   } finally {
@@ -174,3 +240,99 @@ function reload() { load() }
 watch(seg, () => animateAll())
 onMounted(load)
 </script>
+<style scoped>
+/* ============ 四类提醒铃铛 ============ */
+.bell {
+  position: relative; z-index: 3; flex: 0 0 auto;
+  width: 36px; height: 36px; border-radius: 12px;
+  background: rgba(255, 255, 255, .16);
+  border: 1px solid rgba(255, 255, 255, .28);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  transition: background .18s ease, transform .18s ease;
+}
+.bell:active { transform: scale(.94); }
+.bell.open { background: rgba(255, 255, 255, .3); }
+.bell.ringing { animation: bellRing 2.4s ease-in-out infinite; }
+@keyframes bellRing {
+  0%, 62%, 100% { transform: rotate(0); }
+  68% { transform: rotate(-13deg); }
+  74% { transform: rotate(11deg); }
+  80% { transform: rotate(-8deg); }
+  86% { transform: rotate(5deg); }
+  92% { transform: rotate(0); }
+}
+.bell-num {
+  position: absolute; top: -5px; right: -6px;
+  min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px;
+  background: #ef4444; color: #fff; font-size: 10px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1.5px solid #1e3a8a; line-height: 1;
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, .7);
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .65); }
+  70% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* 面板 */
+.ap-mask { position: fixed; inset: 0; z-index: 20; background: rgba(15, 23, 42, .22); }
+.alert-panel {
+  position: fixed; z-index: 21; right: 14px; top: 58px; width: 268px;
+  background: #fff; border-radius: 16px; padding: 12px 10px 10px;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, .3);
+}
+.alert-panel::before {
+  content: ""; position: absolute; top: -6px; right: 20px;
+  width: 12px; height: 12px; background: #fff; transform: rotate(45deg);
+  border-radius: 2px;
+}
+.ap-h {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 1px 6px 9px; font-size: 13.5px; font-weight: 800; color: var(--ink);
+}
+.ap-sub { font-size: 10.5px; font-weight: 500; color: var(--ink-3); }
+.ap-list { display: flex; flex-direction: column; gap: 5px; }
+.ap-item {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 9px 8px; border-radius: 11px; background: #f8fafc;
+  border: 1px solid transparent; text-align: left;
+  animation: apIn .28s ease both; animation-delay: calc(var(--i) * 45ms);
+}
+.ap-item:active { background: #eef2f7; }
+.ap-item.dim { opacity: .58; }
+@keyframes apIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ap-ico {
+  flex: 0 0 26px; width: 26px; height: 26px; border-radius: 8px;
+  background: color-mix(in srgb, var(--ac) 13%, #fff);
+  color: var(--ac); display: flex; align-items: center; justify-content: center;
+}
+.ap-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ap-label { font-size: 13px; font-weight: 700; color: var(--ink); }
+.ap-hint { font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-cnt {
+  flex: 0 0 auto; min-width: 22px; height: 20px; padding: 0 6px; border-radius: 7px;
+  background: var(--ac); color: #fff; font-size: 11.5px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ap-cnt.zero { background: #e2e8f0; color: #94a3b8; }
+.ap-top {
+  margin-top: 9px; padding: 7px 9px; border-radius: 9px;
+  background: #fff7ed; color: #c2410c; font-size: 10.5px; font-weight: 600;
+  display: flex; align-items: center; gap: 5px; line-height: 1.4;
+}
+/* 图标必须锁死尺寸，否则 flex 内 SVG 会被撑满 */
+.ap-top svg, .ap-ico svg, .bell svg, .ap-item .arrow svg { flex: 0 0 auto; width: 1em; height: 1em; }
+.ap-top svg { width: 12px; height: 12px; }
+.bell svg { width: 19px; height: 19px; }
+.ap-ico svg { width: 15px; height: 15px; }
+.ap-item .arrow svg { width: 12px; height: 12px; }
+.ap-top span { flex: 1; min-width: 0; }
+/* 展开动画 */
+.drop-enter-active, .drop-leave-active { transition: opacity .2s ease, transform .2s cubic-bezier(.34, 1.56, .64, 1); }
+.drop-enter-from, .drop-leave-to { opacity: 0; transform: translateY(-10px) scale(.96); }
+</style>

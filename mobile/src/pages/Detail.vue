@@ -160,7 +160,7 @@ const state = computed(() => route.query.state || '')
 const scope = ref(route.query.scope || 'mine')
 
 const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month']
-const canToggle = computed(() => kind.value !== 'notice' && kind.value !== 'my_task' && kind.value !== '')
+const canToggle = computed(() => kind.value !== 'notice' && kind.value !== 'my_task' && kind.value !== 'warn' && kind.value !== '')
 
 const loading = ref(true)
 const ready = ref(false)
@@ -199,6 +199,12 @@ async function load() {
       const d = await mp.notices()
       list.value = d.rows || []
       source.value = ''
+    } else if (kind.value === 'warn') {
+      const d = await mp.warnOrders()
+      rows.value = (d.rows || []).map((r) => ({ ...r, __cols: d.columns }))
+      titleKey.value = d.columns?.[0]?.key || 'no'
+      source.value = d.source || ''
+      flat.value = false
     } else if (kind.value === 'my_task') {
       const d = await mp.myTasks()
       tasks.value = d.rows || []
