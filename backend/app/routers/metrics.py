@@ -12,6 +12,8 @@ from ..models import (WorkOrder, District, ExtensionOrder, ExtensionMember, H5Co
                       InstallOrder, ComplaintOrder)
 from ..deps import get_current_user, scope_district_ids, require_admin, get_role
 from ..h5_rule import judge_complaint_h5 as _h5j
+from ..status_resolver import (NOT_PENDING, classify, is_pending, realtime_cand,
+                               report_cand, resolve, wide_cand, complaint_realtime_cand)
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -238,6 +240,87 @@ def _std_grid(grid: str, district: str = "") -> str:
     return _HONGHU_GRID_MAP.get(grid, grid)
 
 
+# 明细「裁决后过滤」单次最多扫描的行数。2026-10 装机 2.2 万、投诉 3.3 千，均在上限内。
+# 超出时只取前 MAX_SCAN 行（按受理时间倒序），返回 truncated=True 让前端提示。
+MAX_SCAN = 30000
+DONE_ST_ALL = ("已施工", "已归档", "已完工", "已回单", "已竣工")
+
+# ---------------------------------------------------------------- 跨源状态裁决
+# 与装维端 mp.py 同一套规则（status_resolver 唯一真源），保证桌面端与手机端
+# 看到的是**同一个状态**。批量 in_() 查询，禁止逐行查。
+
+def _adh_install(db, rows):
+    """给一批 InstallOrder 做裁决，原地挂 _st_status / _st_src / _st_note / _st_conflict"""
+    if not rows:
+        return rows
+    nos = [r.order_id for r in rows]
+    rep, rt = {}, {}
+    try:
+        from ..models import ReportWideOrder
+        rep = {x[0]: (x[1] or "") for x in db.query(ReportWideOrder.order_no, ReportWideOrder.status)
+               .filter(ReportWideOrder.order_no.in_(nos)).all()}
+    except Exception:
+        pass
+    try:
+        from ..models import InstallRealtimeStatus as _IRT
+        rt = {x[0]: (x[1] or "", x[2] or "") for x in
+              db.query(_IRT.order_id, _IRT.status, _IRT.dispatch_time)
+              .filter(_IRT.order_id.in_(nos)).all()}
+    except Exception:
+        pass
+    for r in rows:
+        cands = [wide_cand(r.status, r.is_refund, r.refund_reason)]
+        if rep.get(r.order_id):
+            cands.append(report_cand(rep[r.order_id]))
+        if rt.get(r.order_id):
+            cands.append(realtime_cand(rt[r.order_id][0], rt[r.order_id][1]))
+        st = resolve(cands)
+        r._st_status = st["status"]
+        r._st_src = st.get("src_name", "")
+        r._st_conflict = bool(st.get("conflict"))
+        note = st.get("reason", "")
+        if st.get("extra"):
+            note = (note + "；" if note else "") + st["extra"]
+        r._st_note = note
+    return rows
+
+
+def _adh_complaint(db, rows):
+    """给一批 ComplaintOrder 做裁决（投诉域，来源名是「投诉综合查询」）"""
+    if not rows:
+        return rows
+    nos = [r.eoms_no for r in rows]
+    rep, rt = {}, {}
+    try:
+        from ..models import ReportWideOrder
+        rep = {x[0]: (x[1] or "") for x in db.query(ReportWideOrder.order_no, ReportWideOrder.status)
+               .filter(ReportWideOrder.order_no.in_(nos)).all()}
+    except Exception:
+        pass
+    try:
+        from ..models import ComplaintRealtimeStatus as _CRT
+        rt = {x[0]: (x[1] or "", x[2] or "") for x in
+              db.query(_CRT.eoms_no, _CRT.status, _CRT.dispatch_time)
+              .filter(_CRT.eoms_no.in_(nos)).all()}
+    except Exception:
+        pass
+    for r in rows:
+        cands = [wide_cand(r.status)]
+        if rep.get(r.eoms_no):
+            cands.append(report_cand(rep[r.eoms_no]))
+        if rt.get(r.eoms_no):
+            cands.append(complaint_realtime_cand(rt[r.eoms_no][0], rt[r.eoms_no][1]))
+        st = resolve(cands, domain="complaint")
+        r._st_status = st["status"]
+        r._st_src = st.get("src_name", "")
+        r._st_conflict = bool(st.get("conflict"))
+        note = st.get("reason", "")
+        if st.get("extra"):
+            note = (note + "；" if note else "") + st["extra"]
+        r._st_note = note
+    return rows
+
+
 def _build_wide_summary(month: str, district: str, db: Session):
     """宽表汇总核心逻辑"""
     iq = db.query(InstallOrder).filter(InstallOrder.month == month)
@@ -251,8 +334,11 @@ def _build_wide_summary(month: str, district: str, db: Session):
         return {"has_data": False, "month": month}
 
     # ---- 装机 ----
+    # v1.6.7：先做跨源裁决，下面所有口径都用裁决后的状态 —— 与装维端同一口径。
+    # 只改明细不改汇总会制造新的「卡片/明细不一致」，那是 v1.6.6 踩过的坑。
+    _adh_install(db, installs)
     total = len(installs)
-    status_of = lambda r: r.status or ""
+    status_of = lambda r: getattr(r, "_st_status", None) or (r.status or "")
     done = sum(1 for r in installs if status_of(r) == "已施工")
     # 撤单/退单拆分（按 status 关键字，is_refund="是" 兜底）
     cancel = sum(1 for r in installs if "撤" in status_of(r))
@@ -261,10 +347,14 @@ def _build_wide_summary(month: str, district: str, db: Session):
         refund_total = sum(1 for r in installs if r.is_refund == "是")
         cancel = refund_total  # 兜底：若 status 没细分，全部算撤单
     refund = cancel + refund_only  # 退撤单合计
-    # 处理中：非已施工、非撤、非退、非延伸/换光猫
+    # 处理中（v1.6.7）：改用 is_pending() 统一判定，与装维端完全同口径。
+    #
+    # 旧写法 `status != 已施工` 会把**状态为空**的行算成处理中。实测 2412 条
+    # 空状态单：有区县但无处理人、无当前环节，受理都是 10-01，月底仍未完工——
+    # 这是宽表导出的残缺行，不是真实在途单。旧口径让 pending 虚高 2412。
+    # 现在空串不计待办，延伸/光猫仍排除（加装类挂靠单）。
     pending = sum(1 for r in installs
-                  if status_of(r) != "已施工"
-                  and "撤" not in status_of(r) and "退" not in status_of(r)
+                  if is_pending(status_of(r))
                   and "延伸服务" not in (r.order_theme or "")
                   and "更换光猫" not in (r.order_theme or ""))
     rate = round(done / total * 100, 1) if total else 0
@@ -419,8 +509,18 @@ def _build_wide_summary(month: str, district: str, db: Session):
     refund_reason_cat = [{"category": k, "count": v} for k, v in sorted(reason_category.items(), key=lambda x: -x[1])]
 
     # ---- 投诉 ----
+    _adh_complaint(db, complaints)
     c_total = len(complaints)
-    solved = sum(1 for r in complaints if r.is_solved == "已维修")
+    # v1.6.7：「是否维修完成/故障是否解决」列在本库全表为空（3380 行无一非空），
+    # 原写法恒为 0 → 解决率常年 0.0、待办等于全部。改为「列优先、状态兜底」：
+    # 状态族属 done（已施工/已归档/已完工/已回单）即视为已解决。
+    def _solved(r) -> bool:
+        v = (getattr(r, "is_solved", "") or "").strip()
+        if v:
+            return v in ("已解决", "已维修", "已处理", "是")
+        return classify(getattr(r, "_st_status", "") or r.status or "") == "done"
+
+    solved = sum(1 for r in complaints if _solved(r))
     c_pending = c_total - solved
     c_rate = round(solved / c_total * 100, 1) if c_total else 0
     c_timeout_24h = sum(1 for r in complaints if r.is_24h == "否")
@@ -446,8 +546,18 @@ def _build_wide_summary(month: str, district: str, db: Session):
             c_daily_agg[day] += 1
     c_daily = [{"day": d, "count": c} for d, c in sorted(c_daily_agg.items())]
 
+    # 裁决后状态与宽表原始状态差异有多大，让用的人心里有数
+    # 对照用：如果**不做裁决**、只看宽表原始状态，pending 会是多少（同一 is_pending 判定）
+    _raw_pending = sum(1 for r in installs
+                       if is_pending(r.status)
+                       and "延伸服务" not in (r.order_theme or "")
+                       and "更换光猫" not in (r.order_theme or ""))
+    _adj_diff = abs(pending - _raw_pending)
+
     return {
         "has_data": True, "month": month,
+        "status_source": "跨源裁决（装维端与桌面端同口径）",
+        "status_adj": {"pending_raw": _raw_pending, "pending": pending, "changed": _adj_diff},
         "install": {
             # 指标总览 8 卡
             "total": total, "done": done, "cancel": cancel, "refund_only": refund_only,
@@ -547,6 +657,7 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
                 hide_modem: bool = Query(False),
                 hide_hkbz: bool = Query(False),
                 hide_zhzw: bool = Query(False),
+                pending_only: bool = Query(False, description="只列进行中（与看板 pending 卡同口径）"),
                 limit: int = Query(20000, le=20000),
                 user=Depends(get_current_user), db: Session = Depends(get_db)):
     """宽表工单明细：装机/投诉按受理(投诉)时间倒序
@@ -561,12 +672,7 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             q = q.filter(ComplaintOrder.district == district)
         # ---- 过滤下推到 SQL，与明细页签复选框一一对应 ----
         # 2026-10-26 修复：此前投诉分支完全没有 hide_* 过滤，5 个复选框在投诉页签全部失效
-        if hide_done:      # 不显示已完成（投诉表用「已施工」表示完成，实测 1348/1655 行）
-            q = q.filter(func.coalesce(ComplaintOrder.status, "").notin_(
-                ("已施工", "已归档", "已完工", "已回单")))
-        if hide_refund:    # 不显示已退/撤单
-            q = q.filter(~func.coalesce(ComplaintOrder.status, "").like("%撤%"),
-                         ~func.coalesce(ComplaintOrder.status, "").like("%退%"))
+        # ---- 与状态无关的条件照旧下推 SQL（性能需要）----
         if hide_ext:       # 不显示延伸服务
             q = q.filter(~func.coalesce(ComplaintOrder.complaint_category, "").like("%延伸服务%"))
         if hide_modem:     # 不显示更换光猫
@@ -575,52 +681,75 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             q = q.filter(~func.coalesce(ComplaintOrder.eoms_no, "").like("%KHBZ%"))
         if hide_zhzw:      # 不显示 HB-ZHZW 单（政企支撑类，前缀匹配）
             q = q.filter(~func.coalesce(ComplaintOrder.eoms_no, "").like("HB-ZHZW%"))
-        total = q.count()
-        # 同时间点多条时 SQLite 排序不稳定，补主键(eoms_no)保证翻页不跳行
-        rows = q.order_by(ComplaintOrder.accept_time.desc(),
-                          ComplaintOrder.eoms_no.desc()).offset(
-            (page - 1) * page_size).limit(page_size).all()
+
+        # ---- 状态相关条件必须等裁决后再判（v1.6.7）----
+        # 原因见上方 docstring：SQL 按原始状态筛、显示按裁决状态，两者不同步就会漏。
+        objs = q.order_by(ComplaintOrder.accept_time.desc(),
+                          ComplaintOrder.eoms_no.desc()).limit(MAX_SCAN).all()
+        _adh_complaint(db, objs)
+        if hide_done:      # 不显示已完成（按**裁决后**状态）
+            objs = [r for r in objs if (r._st_status or "") not in DONE_ST_ALL]
+        if hide_refund:    # 不显示已退/撤单（按**裁决后**状态）
+            objs = [r for r in objs
+                    if "撤" not in (r._st_status or "") and "退" not in (r._st_status or "")]
+        if pending_only:   # 只列进行中：与 summary.pending 同一个判定
+            objs = [r for r in objs if is_pending(r._st_status)]
+        total = len(objs)
+        rows = objs[(page - 1) * page_size:(page - 1) * page_size + page_size]
         return {"rows": [{
             "no": r.eoms_no, "district": r.district, "accept_time": r.accept_time,
-            "status": r.status, "handler": r.handler, "category": r.complaint_category,
+            "status": r._st_status or r.status, "status_raw": r.status,
+            "status_src": r._st_src, "status_note": r._st_note,
+            "status_conflict": r._st_conflict,
+            "handler": r.handler, "category": r.complaint_category,
             "is_solved": r.is_solved, "duration": r.order_duration,
             "appointment_time": r.appointment_time, "grid": r.grid,
             "is_high_quality": r.is_high_quality, "global_pass": r.global_pass,
             # 是否触发H5：口径见 h5_rule.py（HB-058 前缀 + 分类首级=家庭市场）
             **_h5j(r.eoms_no, r.complaint_category)} for r in rows],
-            "total": total, "page": page, "page_size": page_size}
+            "total": total, "page": page, "page_size": page_size,
+            "truncated": total >= MAX_SCAN}
 
     q = db.query(InstallOrder).filter(InstallOrder.month == month)
     if district:
         q = q.filter(InstallOrder.district == district)
-    # ---- 过滤下推到 SQL，与明细页签复选框一一对应 ----
-    if hide_done:      # 不显示「已施工」
-        q = q.filter(func.coalesce(InstallOrder.status, "") != "已施工")
-    if hide_refund:    # 不显示已退/撤单
-        q = q.filter(~func.coalesce(InstallOrder.status, "").like("%撤%"),
-                     ~func.coalesce(InstallOrder.status, "").like("%退%"),
-                     func.coalesce(InstallOrder.is_refund, "") != "是")
+    # ---- 与状态无关的条件照旧下推 SQL（性能需要）----
     if hide_ext:       # 不显示延伸服务
         q = q.filter(~func.coalesce(InstallOrder.order_theme, "").like("%延伸服务%"))
     if hide_modem:     # 不显示更换光猫
         q = q.filter(~func.coalesce(InstallOrder.order_theme, "").like("%更换光猫%"))
     if hide_hkbz:      # 不显示 HB-KHBZ 单（定单编码含 KHBZ）
         q = q.filter(~func.coalesce(InstallOrder.order_id, "").like("%KHBZ%"))
-    total = q.count()
-    # 同时间点多条时 SQLite 排序不稳定，补主键(order_id)保证翻页不跳行
-    rows = q.order_by(InstallOrder.accept_time.desc(),
-                      InstallOrder.order_id.desc()).offset(
-        (page - 1) * page_size).limit(page_size).all()
+
+    # ---- 状态相关条件必须等裁决后再判（v1.6.7）----
+    # 实测：SQL 按宽表原始状态筛「未完工」，而实时表已判成撤单/已施工的单会漏出来，
+    # 待办口径明细 3938 vs 卡片 1150。详见函数 docstring。
+    objs = q.order_by(InstallOrder.accept_time.desc(),
+                      InstallOrder.order_id.desc()).limit(MAX_SCAN).all()
+    _adh_install(db, objs)
+    if hide_done:      # 不显示「已施工」（按**裁决后**状态）
+        objs = [r for r in objs if (r._st_status or "") not in DONE_ST_ALL]
+    if hide_refund:    # 不显示已退/撤单（按**裁决后**状态）
+        objs = [r for r in objs
+                if "撤" not in (r._st_status or "") and "退" not in (r._st_status or "")]
+    if pending_only:   # 只列进行中：与 summary.pending 同一个判定
+        objs = [r for r in objs if is_pending(r._st_status)]
+    total = len(objs)
+    rows = objs[(page - 1) * page_size:(page - 1) * page_size + page_size]
     return {"rows": [{
         "no": r.order_id, "district": r.district, "grid": r.grid,
-        "accept_time": r.accept_time, "theme": r.order_theme, "status": r.status,
+        "accept_time": r.accept_time, "theme": r.order_theme,
+        "status": r._st_status or r.status, "status_raw": r.status,
+        "status_src": r._st_src, "status_note": r._st_note,
+        "status_conflict": r._st_conflict,
         "handler": r.handler, "completion_time": r.completion_time,
         "is_refund": r.is_refund, "broadband_type": r.broadband_type,
         "appointment_time": r.appointment_time,
         "is_high_quality": "是" if r.is_high_quality else "否",
         "is_fttr": r.is_fttr or "否",
         "current_step": r.current_step or r.status} for r in rows],
-        "total": total, "page": page, "page_size": page_size}
+        "total": total, "page": page, "page_size": page_size,
+        "truncated": total >= MAX_SCAN}
 
 
 # ---------------- 延伸服务（手册 7.6 / 8.2） ----------------

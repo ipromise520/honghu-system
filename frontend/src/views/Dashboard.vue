@@ -79,6 +79,9 @@
             <!-- 勾选项随页签切换：装机页签管「已施工/延伸服务/已退撤/更换光猫」，
                  投诉页签只留「HB-KHBZ / HB-ZHZW」两个单号类开关 -->
             <template v-if="detailType === 'install'">
+              <!-- v1.6.7：默认「仅进行中」，与看板 pending 卡同口径；
+                   取消勾选才看得到「各源均无状态」的宽表导出残缺行 -->
+              <el-checkbox v-model="pendingOnly" size="small" @change="onDetailFilterChange">仅进行中</el-checkbox>
               <el-checkbox v-model="showDone" size="small" @change="onDetailFilterChange">显示已施工</el-checkbox>
               <el-checkbox v-model="showExt" size="small" @change="onDetailFilterChange">显示延伸服务</el-checkbox>
               <el-checkbox v-model="showRefund" size="small" @change="onDetailFilterChange">显示 已退/撤单</el-checkbox>
@@ -118,12 +121,23 @@
             <el-tag size="small" :type="row.is_fttr === '是' ? 'success' : 'info'">{{ row.is_fttr || '否' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="current_step" label="当前环节" width="110" sortable>
+        <el-table-column prop="current_step" label="当前环节" width="132" sortable>
           <template #default="{ row }">
-            <el-tag size="small" :type="(row.status || '').includes('施工') ? 'success'
-              : (row.status || '').includes('退') || (row.status || '').includes('撤') ? 'danger' : 'warning'">
-              {{ row.current_step || '处理中' }}
-            </el-tag>
+            <!-- v1.6.7：环节按**裁决后**状态上色（原来按宽表原始 status，裁决后会对不上）；
+                 hover 显示依据说明，冲突挂角标 -->
+            <el-tooltip :content="row.status_note || '跨源裁决'" placement="top" :show-after="220">
+              <span class="stat-cell">
+                <el-tag size="small" :type="adjStTag(row.status)">
+                  {{ row.current_step || row.status || '待确认' }}
+                </el-tag>
+                <span v-if="row.status_conflict" class="cf-badge">冲突</span>
+              </span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status_src" label="状态依据" width="120" sortable>
+          <template #default="{ row }">
+            <span class="src-cell">{{ row.status_src || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
@@ -159,7 +173,17 @@
         </el-table-column>
         <el-table-column prop="accept_time" label="投诉时间" width="150" sortable />
         <el-table-column prop="appointment_time" label="预约截止时间" width="150" sortable />
-        <el-table-column prop="status" label="状态" width="95" sortable show-overflow-tooltip />
+        <el-table-column prop="status" label="状态" width="128" sortable>
+          <template #default="{ row }">
+            <!-- v1.6.7：状态列显示跨源裁决结果，hover 看依据；多源冲突挂角标 -->
+            <el-tooltip :content="row.status_note || '跨源裁决'" placement="top" :show-after="220">
+              <span class="stat-cell">
+                <span :class="adjStClass(row.status)">{{ row.status || '待确认' }}</span>
+                <span v-if="row.status_conflict" class="cf-badge">冲突</span>
+              </span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column prop="handler" label="处理人" min-width="85" sortable />
         <el-table-column prop="grid" label="网格" min-width="100" show-overflow-tooltip sortable />
         <el-table-column prop="duration" label="时长(h)" width="85" align="right" sortable />
@@ -695,6 +719,7 @@ const detailRows = ref([])
 const detailTotal = ref(0)
 const detailPage = ref(1)
 const pageSize = ref(50)
+const pendingOnly = ref(true)   // v1.6.7 装机页签：只列进行中（与看板 pending 卡同源）
 const showDone = ref(false)
 const showExt = ref(false)
 const showRefund = ref(false)
@@ -820,6 +845,8 @@ async function loadDetail() {
       p.hide_modem = !showModem.value
       p.hide_hkbz = false
       p.hide_zhzw = false
+      // v1.6.7：只列进行中 → 与 /wide/summary 的 pending 完全同一判定
+      p.pending_only = pendingOnly.value
     } else {
       // 投诉：只留 HB-KHBZ / HB-ZHZW 两个开关；
       // 已施工固定隐藏（与历史 299 条口径一致，用户 2026-10-27 确认），
@@ -837,8 +864,25 @@ async function loadDetail() {
   } catch (e) { detailRows.value = []; detailTotal.value = 0 }
 }
 
+// v1.6.7 状态着色：按裁决后状态分族（与后端 status_resolver 一致）
+function adjStTag(st) {
+  const v = st || ''
+  if (/已施工|已归档|已完工|已回单|已竣工/.test(v)) return 'success'
+  if (/撤|退/.test(v)) return 'danger'
+  if (/退单中/.test(v)) return 'warning'
+  return 'warning'
+}
+function adjStClass(st) {
+  const v = st || ''
+  if (/已施工|已归档|已完工|已回单|已竣工/.test(v)) return 'st-done'
+  if (/撤|退/.test(v)) return 'st-dead'
+  if (!v) return 'st-none'
+  return 'st-open'
+}
+
 function onDetailTypeChange() {
   // 切页签时两侧开关全部复位为默认不勾选，避免隐藏着的开关仍在过滤数据
+  pendingOnly.value = true      // v1.6.7：切回装机页签默认只看进行中
   showDone.value = false
   showExt.value = false
   showRefund.value = false
@@ -1240,6 +1284,18 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* v1.6.7 状态列：裁决依据 + 多源冲突角标 */
+.stat-cell { display: inline-flex; align-items: center; gap: 4px; }
+.cf-badge {
+  font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 3px;
+  background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; white-space: nowrap;
+}
+.src-cell { font-size: 11px; color: #64748b; }
+.st-done { color: #16a34a; font-weight: 600; }
+.st-dead { color: #dc2626; }
+.st-open { color: #b45309; }
+.st-none { color: #cbd5e1; }
+
 /* v1.3.8 明细卡片头部：左控件 + 右同步信息/按钮，窄屏自动换行 */
 .detail-header {
   display: flex;

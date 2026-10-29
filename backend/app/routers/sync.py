@@ -46,9 +46,11 @@ SYNC_MODULES = {
                       "note": "实时数据（比宽表早约2小时）；白名单解析「导出信息」sheet；"
                               "入库到独立的 install_realtime_status 表，**不覆盖**装机宽表，"
                               "仅供工单状态裁决使用（v1.6.5）"},
-    "complaint_query": {"name": "投诉综合查询", "target": "complaint_orders",
+    "complaint_query": {"name": "投诉综合查询", "target": "complaint_realtime_status",
                         "columns": ["家宽投诉综合工单列表：EOMS工单号/区域/工单状态/当前处理人/施工部门/人/受理时间/投诉时间/投诉分类"],
-                        "note": "实时数据（比宽表早约2小时）；白名单解析「家宽投诉综合工单列表」sheet；month 从投诉时间推导；按月替换"},
+                        "note": "实时数据（比宽表早约2小时）；白名单解析「家宽投诉综合工单列表」sheet；"
+                                "month 从投诉时间推导；入库到独立的 complaint_realtime_status 表，**不覆盖**投诉宽表，"
+                                "仅供工单状态裁决使用（v1.6.7）"},
     "h5_survey": {"name": "H5满意度通报", "target": "h5_survey_districts + h5_survey_staff + h5_survey_records + h5_low_scores",
                   "columns": ["新版导出：装机/投诉参与率（人员）+ 装机/投诉回单 + 装机/投诉H5回复详单",
                               "混合导出（无参与率sheet）：装机/投诉回单 + 装机/投诉H5回复详单 + H5数据统计 + 累计低分核实",
@@ -957,6 +959,22 @@ def _count_status_diff(db: Session, payload: list) -> int:
         return 0
 
 
+def _count_complaint_status_diff(db: Session, payload: list) -> int:
+    """投诉实时快照与投诉宽表状态不一致的单数（含宽表侧缺失）。
+
+    和装机那边一样，只做「报个数」让操作者知道这次校对的价值，
+    不影响入库结果——裁决在读取时做（mp.py / metrics.py 各调 status_resolver）。
+    """
+    try:
+        nos = [p["eoms_no"] for p in payload]
+        cur = {r.eoms_no: (r.status or "") for r in
+               db.query(ComplaintOrder.eoms_no, ComplaintOrder.status)
+               .filter(ComplaintOrder.eoms_no.in_(nos)).all()}
+        return sum(1 for p in payload if cur.get(p["eoms_no"], None) != p["status"])
+    except Exception:
+        return 0
+
+
 def _normalize_install_query(sheets: dict) -> list[dict]:
     """装机综合查询「导出信息」→ InstallOrder（实时数据）"""
     out: list[dict] = []
@@ -1012,6 +1030,12 @@ def _normalize_complaint_query(sheets: dict) -> list[dict]:
             "order_duration": 0.0, "is_solved": "", "satisfaction": "",
             "appointment_time": _norm_time(r.get("预约时间") or r.get("客户预约时间")),
             "grid": str(r.get("网格") or "").strip(), "is_high_quality": "", "global_pass": "",
+            # v1.6.7 裁决所需：实时状态要配一个「生效时间下界」。
+            # 投诉综合查询没有独立的「状态更新时间」，只有派单/受理接收时间可作下界，
+            # 与装机那边用「施工调度接收时间」同理。
+            "dispatch_time": _norm_time(r.get("派单时间") or r.get("施工调度接收时间")
+                                        or r.get("当前环节进入时间")),
+            "remark": str(r.get("备注") or r.get("处理备注") or "").strip()[:255],
         })
     return out
 
@@ -1308,7 +1332,40 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                + (f"；跳过较早快照：{('；'.join(res['skipped']))}" if res["skipped"] else "")
                + (f"；⚠ 已阻止缩水覆盖：{('；'.join(res['guarded']))}" if res.get("guarded") else "")
                + "，指标已实时生效")
-    elif job.metric in ("complaint_wide", "complaint_query"):
+    elif job.metric == "complaint_query":
+        # v1.6.7：与装机综合查询同因同解 —— 写独立表，**整表替换**
+        # 不再和 complaint_wide 抢 complaint_orders。后者被抢的后果更严重：
+        # 综合查询导出没有「24小时是否及时/是否履约/归档满意度/是否高品质/全球通标识」，
+        # 一旦它覆盖过去，超时统计恒 0、看板红标无数据、全球通卡片归零。
+        rows = [r for r in rows if r.get("eoms_no")]
+        best_rt: dict = {}
+        for r in rows:
+            k = r["eoms_no"]
+            if k not in best_rt or str(r.get("dispatch_time") or "") >= str(best_rt[k].get("dispatch_time") or ""):
+                best_rt[k] = r
+        rows = list(best_rt.values())
+        from ..models import ComplaintRealtimeStatus as _CRT
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.query(_CRT).delete(synchronize_session=False)
+        payload = [{"eoms_no": r["eoms_no"], "month": r.get("month", ""),
+                    "district": r.get("district", ""), "status": r.get("status", ""),
+                    "dispatch_time": r.get("dispatch_time", ""),
+                    "accept_time": r.get("accept_time", ""),
+                    "handler": r.get("handler", ""),
+                    "category": (r.get("complaint_category") or "")[:255],
+                    "remark": r.get("remark", ""), "batch_id": job.batch_id,
+                    "fetched_at": now_s} for r in rows]
+        CHUNK = 500
+        for i in range(0, len(payload), CHUNK):
+            db.bulk_insert_mappings(_CRT, payload[i:i + CHUNK])
+        n = len(payload)
+        months = sorted({r.get("month") for r in payload if r.get("month")})
+        diff = _count_complaint_status_diff(db, payload)
+        msg = (f"入库成功：投诉实时状态 {n} 行（月份 {'、'.join(months) or '无'}），已整表替换；"
+               f"与投诉宽表状态不一致 {diff} 单——这些单在装维端将按「取最接近当前时间」裁决显示"
+               f"（综合查询为实时源，通常以它为准），指标统计不受影响")
+    elif job.metric == "complaint_wide":
+        # 投诉宽表为当月累计快照：批次比较入库（旧快照不覆盖新数据）
         rows = [r for r in rows if r.get("eoms_no") and r.get("month")]
         res = sync_wide_batch(db, ComplaintOrder, "eoms_no", rows)
         n = sum(_rep_count(s) for s in res["replaced"])

@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..status_resolver import (NOT_PENDING, is_pending, realtime_cand, report_cand,
-                               resolve, wide_cand)
+                              resolve, wide_cand, complaint_realtime_cand)
 from ..models import (
     AiVisitIssue, AlertOrder, ComplaintOrder, District, ExtensionMember,
     H5SurveyStaff, InstallOrder, Notice, NoticeSignature, ReportDupOrder,
@@ -159,6 +159,65 @@ def _realtime_maps(db, order_nos):
     return {r[0]: (r[1] or "", r[2] or "") for r in rs}
 
 
+def _complaint_realtime_maps(db, eoms_nos):
+    """批量取「投诉综合查询」实时状态（v1.6.7 起独立表）。
+
+    返回 ``{eoms_no: (status, dispatch_time)}``；表不存在或还没传过就返回空 dict，
+    调用方按「只有投诉宽表一个源」处理，不会报错。
+    """
+    nos = [n for n in {str(x or "").strip() for x in eoms_nos} if n]
+    if not nos:
+        return {}
+    try:
+        from ..models import ComplaintRealtimeStatus as _CRT
+        rs = db.query(_CRT.eoms_no, _CRT.status, _CRT.dispatch_time
+                      ).filter(_CRT.eoms_no.in_(nos)).all()
+    except Exception:
+        return {}
+    return {r[0]: (r[1] or "", r[2] or "") for r in rs}
+
+
+def _complaint_report_maps(db, eoms_nos):
+    """批量取「重要通报」里同单的投诉状态，供投诉裁决使用。"""
+    nos = [n for n in {str(x or "").strip() for x in eoms_nos} if n]
+    if not nos or not REPORT_TABLE_OK:
+        return {}
+    try:
+        rows = db.query(ReportWideOrder.order_no, ReportWideOrder.status
+                        ).filter(ReportWideOrder.order_no.in_(nos)).all()
+    except Exception:
+        return {}
+    return {r[0]: (r[1] or "") for r in rows}
+
+
+def _adjudicate_complaint(db, rows, status_of=None):
+    """对一批投诉宽表行做跨源裁决，原地写 _st_status / _st_src / _st_note / _st_conflict。
+
+    规则与装机完全相同（时间优先、其次 投诉综合查询 > 投诉宽表 > 通报），
+    只是来源名走 `domain="complaint"`。
+    """
+    status_of = status_of or (lambda r: r.status)
+    nos = [getattr(r, "eoms_no", "") for r in rows]
+    rep = _complaint_report_maps(db, nos)
+    rt = _complaint_realtime_maps(db, nos)
+    for r in rows:
+        no = getattr(r, "eoms_no", "")
+        cands = [wide_cand(status_of(r))]
+        if rep.get(no):
+            cands.append(report_cand(rep[no]))
+        if rt.get(no):
+            cands.append(complaint_realtime_cand(rt[no][0], rt[no][1]))
+        st = resolve(cands, domain="complaint")
+        r._st_status = st["status"]
+        r._st_src = st.get("src_name", "")
+        r._st_conflict = bool(st.get("conflict"))
+        note = st.get("reason", "")
+        if st.get("extra"):
+            note = (note + "；" if note else "") + st["extra"]
+        r._st_note = note
+    return rows
+
+
 def _adjudicate(db, rows, status_of, src_status_of=None, dispatch_of=None):
     """对一批装机宽表行做跨源裁决，原地写入 status / status_src / status_note / status_conflict。
 
@@ -246,6 +305,33 @@ def _install_scope(db, sub, name, district, gkey, done: bool):
     return [r for r in objs if is_pending(r._st_status)]
 
 
+def _repair_scope(db, sub, name, district, gkey, done: bool = False):
+    """投诉工单「筛选 + 裁决 + 裁决后过滤」的**唯一入口**。卡片与明细都走它。
+
+    为什么要有这个函数：投诉这条路原来和 v1.6.6 修掉的装机那条一模一样——
+    卡片用 SQL 计数、明细另写一个查询。装机那边就是因此出了「卡片 2 单、点进去空」。
+    v1.6.7 投诉综合查询落独立表后，实时状态和宽表不一致的单会更多，
+    不合并这里必然重演，故一并处理。
+    """
+    q = db.query(ComplaintOrder)
+    if done:
+        q = q.filter(ComplaintOrder.status.in_(DONE_ST))
+    else:
+        q = q.filter(~ComplaintOrder.status.in_(list(NOT_PENDING)))
+    q = _scope(q, ComplaintOrder, sub, name, district, gkey)
+    if q is None:
+        return []
+    objs = q.order_by(ComplaintOrder.accept_time.desc()).limit(2000).all()
+    # 空壳行（状态/区县/处理人全空）不占待办
+    objs = [r for r in objs
+            if (r.status or "").strip() or (r.district or "").strip()
+            or (r.handler or "").strip()]
+    _adjudicate_complaint(db, objs)
+    if done:
+        return [r for r in objs if (r._st_status or "") in DONE_ST]
+    return [r for r in objs if is_pending(r._st_status)]
+
+
 def _has_grid(model) -> bool:
     return hasattr(model, "grid")
 
@@ -274,27 +360,12 @@ def _open_orders(db, sub, name, district, gkey, month=None):
     注意：在途类**不按月过滤**（跨月未完成的单仍是待办），只有「当月完工」才限月，
     否则卡片数字会小于明细条数（曾出现卡片 72 / 明细 81 的口径冲突）。
     """
-    def cnt(model, pk, done: bool, by_month: bool):
-        """投诉类（ComplaintOrder）仍走简单计数；装机类一律走 _install_scope，
-        保证与明细列表**同一个函数**返回，结构上不可能再对不上。"""
-        if model is InstallOrder:
-            objs = _install_scope(db, sub, name, district, gkey, done)
-            if not done:
-                return len(objs)
-            # 当月已施工：_install_scope 已按当月筛，这里无需再筛
-            return len(objs)
-        q = db.query(func.count(pk))
-        if by_month and month:
-            q = q.filter(model.month == month)
-        q = q.filter(model.status.in_(DONE_ST)) if done else q.filter(
-            ~model.status.in_(list(NOT_PENDING)))
-        q = _scope(q, model, sub, name, district, gkey)
-        return 0 if q is None else (q.scalar() or 0)
-
+    # v1.6.6/1.6.7：卡片一律 `len(唯一入口)`，不再自己写 SQL 计数。
+    # 两端口径必须物理同源 —— 「卡片有数、点进去空」已经踩过两次。
     return {
-        "pending_install": cnt(InstallOrder, InstallOrder.order_id, False, False),
-        "pending_repair": cnt(ComplaintOrder, ComplaintOrder.eoms_no, False, False),
-        "completed_month": cnt(InstallOrder, InstallOrder.order_id, True, True),
+        "pending_install": len(_install_scope(db, sub, name, district, gkey, False)),
+        "pending_repair": len(_repair_scope(db, sub, name, district, gkey, False)),
+        "completed_month": len(_install_scope(db, sub, name, district, gkey, True)),
     }
 
 
@@ -567,13 +638,15 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
                  "handler": _short_name(r.handler, r.district)}
                 for r in objs]
     elif kind == "pending_repair":
-        q = db.query(ComplaintOrder).filter(~ComplaintOrder.status.in_(DONE_ST))
-        q = _scope(q, ComplaintOrder, sub, name, district, gkey).order_by(
-            ComplaintOrder.accept_time.desc()).limit(500)
+        # 与卡片同一个函数（v1.6.7）
+        objs = _repair_scope(db, sub, name, district, gkey, False)
         rows = [{"no": r.eoms_no, "cat": (r.complaint_category or "")[-24:],
-                 "appoint": r.appointment_time or "", "status": r.status or "",
+                 "appoint": r.appointment_time or "",
+                 "status": r._st_status or r.status or "",
+                 "status_src": r._st_src, "status_note": r._st_note,
+                 "status_conflict": r._st_conflict,
                  "grid": r.grid or "", "accept": r.accept_time or "",
-                 "handler": _short_name(r.handler, r.district)} for r in q.all()]
+                 "handler": _short_name(r.handler, r.district)} for r in objs]
     else:
         raise HTTPException(400, "未知的工单类型：%s" % kind)
 
@@ -581,7 +654,7 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
     start = max((page - 1) * page_size, 0)
     _SRC = {"near_timeout": "省公司预警附件（按预约时间剩余分档）",
             "pending_install": "装机宽表（在途未完工）",
-            "pending_repair": "投诉宽表（在途未完工）",
+            "pending_repair": "投诉宽表 + 投诉综合查询（在途未完工，跨源裁决）",
             "completed_month": "装机宽表（本月已施工）"}
     return {"kind": kind, "scope": sub, "total": total, "source": _SRC.get(kind, ""),
             "columns": [{"key": k, "label": lb, "mono": mono} for k, lb, mono in COLS_ORDER[kind]],

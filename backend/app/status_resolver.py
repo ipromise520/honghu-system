@@ -62,7 +62,18 @@ NOT_PENDING = DONE + CANCELLED + REFUNDED + (REFUNDING,)
 # 实测这类单 188 条，若让通报胜出会全部被降级回「在途」。
 # 而「宽表说处理中、综合查询说已撤单」那种冲突，综合查询靠着时间（接收时间）仍然赢。
 TRUST = {"realtime": 0, "wide": 1, "report": 2}
-SRC_NAME = {"realtime": "装机综合查询", "report": "重要通报", "wide": "宽表查询"}
+# 来源显示名按业务域区分。裁决规则（时间优先、其次可信度）两域完全相同，
+# 只有名字不同——用户看到的是「投诉综合查询」，不能给他显示装机的名字。
+SRC_NAME = {
+    "install": {"realtime": "装机综合查询", "report": "重要通报", "wide": "宽表查询"},
+    "complaint": {"realtime": "投诉综合查询", "report": "重要通报", "wide": "投诉宽表"},
+}
+# 窄表来源名（不参与裁决，只用于「这张单来自哪张实时表」的标注）
+_TBL_SRC = {"install": "装机综合查询", "complaint": "投诉综合查询"}
+
+
+def src_names(domain: str = "install") -> dict:
+    return SRC_NAME.get(domain, SRC_NAME["install"])
 
 _TFMT = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 
@@ -117,7 +128,7 @@ def _cand(src: str, status: str, ts, extra: str = "") -> dict:
     return {"src": src, "status": (status or "").strip(), "ts": ts, "extra": extra}
 
 
-def resolve(cands):
+def resolve(cands, domain: str = "install"):
     """多源状态裁决，返回
 
     ``{"status", "src", "src_name", "ts", "conflict", "reason"}``
@@ -125,6 +136,7 @@ def resolve(cands):
     ``conflict`` 为 True 表示各源结论确实不一致——这种情况值得暴露给前端，
     让人员知道「这条单存在口径冲突」，而不是让系统默默替他选一个。
     """
+    names = src_names(domain)
     cands = [c for c in cands if c and c["status"]]
     if not cands:
         return {"status": "", "src": "", "src_name": "", "ts": None,
@@ -140,10 +152,10 @@ def resolve(cands):
         timed.sort(key=lambda c: (c["ts"], -TRUST.get(c["src"], 9)), reverse=True)
         if timed[0]["ts"] > timed[1]["ts"]:
             win = timed[0]
-            return {**win, "src_name": SRC_NAME.get(win["src"], win["src"]),
+            return {**win, "src_name": names.get(win["src"], win["src"]),
                     "conflict": conflict,
                     "reason": "取工时最新的「%s」（%s）" % (
-                        SRC_NAME.get(win["src"], win["src"]),
+                        names.get(win["src"], win["src"]),
                         win["ts"].strftime("%m-%d %H:%M"))}
 
     # ② 时间分不出（都缺 / 相同）→ 按可信度
@@ -152,12 +164,12 @@ def resolve(cands):
     #    宽表与通报角力时，退单旁证才让它胜出。
     cands.sort(key=lambda c: TRUST.get(c["src"], 9))
     win = cands[0]
-    name = SRC_NAME.get(win["src"], win["src"])
+    name = names.get(win["src"], win["src"])
     # 文案要能指导人：说清「为什么听它的」，而不是「按可信度」这种开发黑话
     if win["src"] == "realtime":
         why = "以实时查询为准（宽表约晚2小时、通报每小时刷新）"
     elif win["src"] == "wide":
-        why = "实时查询未覆盖此单，沿用宽表状态"
+        why = "实时查询未覆盖此单，沿用%s状态" % ("投诉宽表" if domain == "complaint" else "宽表")
     else:
         why = "按通报状态显示（宽表与实时查询均无此单）"
     return {**win, "src_name": name, "conflict": conflict, "reason": why}
@@ -197,6 +209,30 @@ def wide_cand(status, is_refund="", refund_reason="") -> dict:
     if is_pending(s) and (str(is_refund or "").strip() == "是" or str(refund_reason or "").strip()):
         return _cand("wide", REFUNDING, None, "宽表已进入退单流程")
     return _cand("wide", s, None)
+
+
+def complaint_realtime_cand(status, dispatch_time=None) -> dict:
+    """「家宽投诉综合工单列表 / 投诉综合查询」候选。
+
+    与装机同构：投诉综合查询导出也没有「状态更新时间」，只有派单/受理接收时间，
+    作状态生效下界用。
+    """
+    return _cand("realtime", status, parse_ts(dispatch_time))
+
+
+def complaint_report_cand(status, accept_time=None) -> dict:
+    """「重要通报」里的投诉行。受理时间不是状态时间，理由同 ``report_cand``。"""
+    return _cand("report", status, None)
+
+
+def complaint_wide_cand(status, is_solved="", satisfaction="") -> dict:
+    """「投诉宽表」候选。``ts`` 恒为 None——表里没有状态更新时间。
+
+    投诉宽表没有「是否退单」列，但 ``是否解决`` 与 ``归档满意度`` 是终态旁证：
+    已解决/已归档的单不会是「在途」。这里不合成新的伪状态（投诉口径没有「退单中」），
+    只保留原状态，让 TRUST 说话。
+    """
+    return _cand("wide", status, None)
 
 
 def decorate(row: dict, st: dict) -> dict:

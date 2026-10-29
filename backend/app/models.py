@@ -667,3 +667,33 @@ class InstallRealtimeStatus(Base):
     remark: Mapped[str] = mapped_column(String(255), default="")          # 退单备注信息
     batch_id: Mapped[int] = mapped_column(Integer, default=0)
     fetched_at: Mapped[str] = mapped_column(String(32), default="")       # 这份导出何时入库
+
+
+class ComplaintRealtimeStatus(Base):
+    """「家宽投诉综合工单列表 / 投诉综合查询」实时状态快照（v1.6.7，裁决用，不参与指标）
+
+    与 ``InstallRealtimeStatus`` 同因同解：原来「投诉宽表」与「投诉综合查询」的 target
+    都是 ``complaint_orders``，共用 ``sync_wide_batch`` 按月替换 → 谁后传谁赢。
+
+    | 上传口 | 有的列 | 后果 |
+    |---|---|---|
+    | 投诉宽表 | 24小时/8小时是否及时、是否履约、工单时长、是否解决、归档满意度、是否高品质、全球通 | 被综合查询冲成空 |
+    | 投诉综合查询 | 实时工单状态、当前处理人、投诉分类 | 被宽表冲掉实时状态 |
+
+    `是否高品质` 被冲成空会让看板红标没数据；`global_pass` 被冲成空会让全球通卡片归零。
+    故本表只存裁决需要的窄字段，整表替换，**不进任何指标**。
+    """
+    __tablename__ = "complaint_realtime_status"
+    __table_args__ = (Index("ix_crt_month", "month"),)
+
+    eoms_no: Mapped[str] = mapped_column(String(64), primary_key=True)     # EOMS工单号
+    month: Mapped[str] = mapped_column(String(7), default="")
+    district: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(32), default="")           # 工单状态（实时）
+    dispatch_time: Mapped[str] = mapped_column(String(32), default="")    # 受理/派单接收时间
+    accept_time: Mapped[str] = mapped_column(String(32), default="")
+    handler: Mapped[str] = mapped_column(String(64), default="")
+    category: Mapped[str] = mapped_column(String(255), default="")        # 投诉分类
+    remark: Mapped[str] = mapped_column(String(255), default="")
+    batch_id: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[str] = mapped_column(String(32), default="")
