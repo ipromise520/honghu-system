@@ -245,6 +245,8 @@ body {
 .row-tag.danger { background: #fef2f2; color: #b91c1c; }
 .row-tag.warn { background: #fff7ed; color: #b45309; }
 .row-tag.ok { background: #f0fdf4; color: #15803d; }
+.row-tag.dead { background: #f1f5f9; color: #94a3b8; text-decoration: line-through; }
+.row-tag.refunding { background: #fdf4ff; color: #a21caf; }
 .row-kv { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; color: var(--ink-2); }
 .row-kv b { font-weight: 600; color: var(--ink); }
 .row-kv .k { color: var(--ink-3); }

@@ -25,16 +25,22 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..deps import get_current_user
+from ..status_resolver import (NOT_PENDING, is_pending, realtime_cand, report_cand,
+                               resolve, wide_cand)
 from ..models import (
     AiVisitIssue, AlertOrder, ComplaintOrder, District, ExtensionMember,
     H5SurveyStaff, InstallOrder, Notice, NoticeSignature, ReportDupOrder,
-    ReportTimeout, Task, TaskLog, User,
+    ReportTimeout, ReportWideOrder, Task, TaskLog, User,
 )
 
 router = APIRouter(prefix="/mp", tags=["mp"])
 
 # 三张订单表统一用「已施工」表示完成（详见项目记忆第十四节）
 DONE_ST = ("已施工", "已归档", "已完工", "已回单", "已竣工")
+# 「在途待办」判定统一走 status_resolver.NOT_PENDING：
+# 除 DONE_ST 外还排除 已撤单/已取消/已作废/已退单/退单中（v1.6.5）。
+# 之前只排 DONE_ST，「已撤单」的单被当成在途一直挂在待办里。
+REPORT_TABLE_OK = True   # 通报宽表存在时才做跨源裁决（首次部署自动检测）
 
 # 快超时分级阈值（分钟）——用户口径为「按预约时间区分」，集中在此便于调整
 LEVEL_DIAMOND = 60
@@ -120,6 +126,83 @@ def _resolve(db: Session, user: User) -> dict:
     }
 
 
+# ---------------------------------------------------------------- 跨源状态裁决
+
+def _status_maps(db, order_nos):
+    """批量取「重要通报」里同单的 status，供裁决使用。
+
+    一次 ``in_()`` 查完，**不要逐单查**——明细列表动辄上百条，逐条查会变成上百次往返。
+    报表不存在或没有该单时返回空 dict，调用方按「只有宽表一个源」处理。
+    """
+    nos = [n for n in {str(x or "").strip() for x in order_nos} if n]
+    if not nos or not REPORT_TABLE_OK:
+        return {}
+    try:
+        rows = db.query(ReportWideOrder.order_no, ReportWideOrder.status
+                        ).filter(ReportWideOrder.order_no.in_(nos)).all()
+    except Exception:
+        return {}
+    return {r[0]: (r[1] or "") for r in rows}
+
+
+def _realtime_maps(db, order_nos):
+    """批量取「装机综合查询」实时状态。表不存在/未上传过时返回空 dict。"""
+    nos = [n for n in {str(x or "").strip() for x in order_nos} if n]
+    if not nos:
+        return {}
+    try:
+        from ..models import InstallRealtimeStatus as _IRT
+        rs = db.query(_IRT.order_id, _IRT.status, _IRT.dispatch_time
+                      ).filter(_IRT.order_id.in_(nos)).all()
+    except Exception:
+        return {}
+    return {r[0]: (r[1] or "", r[2] or "") for r in rs}
+
+
+def _adjudicate(db, rows, status_of, src_status_of=None, dispatch_of=None):
+    """对一批装机宽表行做跨源裁决，原地写入 status / status_src / status_note / status_conflict。
+
+    ``rows``           ORM 行列表
+    ``status_of(r)``   宽表状态
+    ``src_status_of``  实时源状态（可选，取自运维贴进来的「导出信息」，落库后才有）
+    ``dispatch_of``    施工调度接收时间（实时源状态的生效下界）
+
+    三源参与裁决（v1.6.5）：
+
+    | 源 | 表 | 优先级 |
+    |---|---|---|
+    | 装机综合查询（实时） | ``install_realtime_status`` | 最高——状态最接近当前时刻 |
+    | 装机宽表 | ``install_orders`` | 次之——列最全，带退单旁证 |
+    | 重要通报 | ``report_wide_orders`` | 末位——每小时刷新的粗粒度快照 |
+
+    ``src_status_of`` / ``dispatch_of`` 保留为可选覆盖（测试或临时比对用），
+    正常情况留空，实时源一律从库里的 ``install_realtime_status`` 取。
+    """
+    nos = [getattr(r, "order_id", "") for r in rows]
+    rep = _status_maps(db, nos)
+    rt = {} if src_status_of else _realtime_maps(db, nos)
+    for r in rows:
+        oid = getattr(r, "order_id", "")
+        cands = [wide_cand(status_of(r),
+                           getattr(r, "is_refund", ""),
+                           getattr(r, "refund_reason", ""))]
+        if rep.get(oid):
+            cands.append(report_cand(rep[oid]))
+        if src_status_of:
+            cands.append(realtime_cand(src_status_of(r), dispatch_of(r) if dispatch_of else None))
+        elif rt.get(oid):
+            cands.append(realtime_cand(rt[oid][0], rt[oid][1]))
+        st = resolve(cands)
+        r._st_status = st["status"]
+        r._st_src = st.get("src_name", "")
+        r._st_conflict = bool(st.get("conflict"))
+        note = st.get("reason", "")
+        if st.get("extra"):
+            note = (note + "；" if note else "") + st["extra"]
+        r._st_note = note
+    return rows
+
+
 def _has_grid(model) -> bool:
     return hasattr(model, "grid")
 
@@ -152,7 +235,14 @@ def _open_orders(db, sub, name, district, gkey, month=None):
         q = db.query(func.count(pk))
         if by_month and month:
             q = q.filter(model.month == month)
-        q = q.filter(model.status.in_(DONE_ST)) if done else q.filter(~model.status.in_(DONE_ST))
+        # ⚠️ pending 计数必须与明细同口径（都排掉 撤/退/退单中），
+        # 否则卡片 72 / 明细 81 的老问题会以另一种形式复现（v1.6.5）。
+        q = q.filter(model.status.in_(DONE_ST)) if done else q.filter(
+            ~model.status.in_(list(NOT_PENDING)))
+        # 卡片计数必须与明细同口径（v1.6.5 补：延伸服务/更换光猫不算在途装机）
+        if not done and model is InstallOrder:
+            for kw in ("延伸服务", "更换光猫"):
+                q = q.filter(~InstallOrder.order_theme.contains(kw))
         q = _scope(q, model, sub, name, district, gkey)
         return 0 if q is None else (q.scalar() or 0)
 
@@ -423,15 +513,40 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
     elif kind in ("pending_install", "completed_month"):
         q = db.query(InstallOrder)
         done = kind == "completed_month"
-        q = q.filter(InstallOrder.status.in_(DONE_ST)) if done else q.filter(~InstallOrder.status.in_(DONE_ST))
+        # 在途 = 既非完工，也非撤/退/退单中（v1.6.5）。
+        # 旧写法只排 DONE_ST，于是「已撤单」的单被当成待办常年挂着——
+        # 这正是用户反馈「宽表说处理中、实际已撤单」会被误当在途的根子。
+        q = q.filter(InstallOrder.status.in_(DONE_ST)) if done else q.filter(
+            ~InstallOrder.status.in_(list(NOT_PENDING)))
+        if not done:
+            # 延伸服务/更换光猫不算「在途装机」：它们是加装类挂靠单，
+            # metrics.py 的 pending 口径同样排除（见 _build_wide_summary），
+            # 两端口径必须一致，否则卡片说 19 单、看板说 3 单。
+            for kw in ("延伸服务", "更换光猫"):
+                q = q.filter(~InstallOrder.order_theme.contains(kw))
         if done:
             q = q.filter(InstallOrder.month == _dt.date.today().strftime("%Y-%m"))
-        q = _scope(q, InstallOrder, sub, name, district, gkey).order_by(
-            InstallOrder.accept_time.desc()).limit(500)
+        objs = _scope(q, InstallOrder, sub, name, district, gkey).order_by(
+            InstallOrder.accept_time.desc()).limit(500).all()
+        # 空壳行：status/区县/网格/责任人/环节全空，是导出文件尾部或异常行，
+        # 裁决后状态为空仍会以「各源均无状态」混进待办（实测 5 条，全库级），直接剔除
+        objs = [r for r in objs
+                if (r.status or "").strip() or (r.district or "").strip()
+                or (r.handler or "").strip() or (r.current_step or "").strip()]
+        _adjudicate(db, objs, lambda r: r.status)
+        # 裁决后再过滤一次：SQL 层只能按「宽表状态」筛，而裁决结果可能把某单
+        # 判成 已撤单/已退单（综合查询说撤了，宽表还写处理中）。
+        # 少了这一步，「在途待办」里仍会混进已作废的单——实测 2 条（v1.6.5）。
+        if not done:
+            objs = [r for r in objs if is_pending(r._st_status)]
+        else:
+            objs = [r for r in objs if (r._st_status or "") in DONE_ST]
         rows = [{"no": r.order_id, "theme": r.order_theme or "", "appoint": r.appointment_time or "",
-                 "status": r.status or "", "grid": r.grid or "", "accept": r.accept_time or "",
+                 "status": r._st_status or r.status or "", "status_src": r._st_src,
+                 "status_note": r._st_note, "status_conflict": r._st_conflict,
+                 "grid": r.grid or "", "accept": r.accept_time or "",
                  "handler": _short_name(r.handler, r.district)}
-                for r in q.all()]
+                for r in objs]
     elif kind == "pending_repair":
         q = db.query(ComplaintOrder).filter(~ComplaintOrder.status.in_(DONE_ST))
         q = _scope(q, ComplaintOrder, sub, name, district, gkey).order_by(

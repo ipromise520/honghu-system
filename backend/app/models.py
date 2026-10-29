@@ -645,3 +645,25 @@ class AiVisitStat(Base):
     problem_rate: Mapped[float] = mapped_column(Float, default=0.0)        # 问题工单占比 %
     rate: Mapped[float] = mapped_column(Float, default=0.0)                # 规范率 %
     metrics: Mapped[str] = mapped_column(Text, default="[]")               # JSON: [{name, cover, wrong, rate}]
+
+class InstallRealtimeStatus(Base):
+    """「导出信息 / 装机综合查询」实时工单状态快照（v1.6.5，裁决用，不参与指标）
+
+    为什么单独建表：原来「装机宽表」与「装机综合查询」的 target 都是 install_orders，
+    共用 sync_wide_batch 按月替换 → 谁后传谁赢，实时状态和完整列互相冲掉。
+    用户口径要的是「两源都留着按时间裁决」，故另存一张窄表（约 2000 行/次，整表替换）。
+    """
+    __tablename__ = "install_realtime_status"
+    __table_args__ = (Index("ix_irt_month", "month"),)
+
+    order_id: Mapped[str] = mapped_column(String(64), primary_key=True)   # 定单编码
+    month: Mapped[str] = mapped_column(String(7), default="")
+    district: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(32), default="")           # 工单状态（实时）
+    dispatch_time: Mapped[str] = mapped_column(String(32), default="")    # 施工调度接收时间
+    accept_time: Mapped[str] = mapped_column(String(32), default="")
+    handler: Mapped[str] = mapped_column(String(64), default="")
+    refund_reason: Mapped[str] = mapped_column(String(255), default="")
+    remark: Mapped[str] = mapped_column(String(255), default="")          # 退单备注信息
+    batch_id: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[str] = mapped_column(String(32), default="")       # 这份导出何时入库

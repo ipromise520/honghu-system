@@ -127,9 +127,14 @@
               <div class="row-h">
                 <span class="row-no">{{ r[titleKey] }}</span>
                 <span v-if="statusOf(r)" class="row-tag" :class="statusClass(r)">{{ statusOf(r) }}</span>
+                <span v-if="r.status_conflict" class="row-tag warn" title="多源状态不一致">多源冲突</span>
               </div>
               <div class="row-kv" v-for="(kv, j) in kvOf(r)" :key="j">
                 <span><span class="k">{{ kv.k }}</span> {{ kv.v }}</span>
+              </div>
+              <!-- 状态依据：告诉人员这条状态是「按谁说的」定下来的 -->
+              <div v-if="r.status_note" class="status-note">
+                <span class="sn-src">{{ r.status_src || '多源' }}</span>{{ r.status_note }}
               </div>
             </div>
           </template>
@@ -176,18 +181,26 @@ const busy = ref(0)
 function statusOf(r) {
   return r.status || (r.signed === false ? '未签' : r.signed === true ? '已签' : '')
 }
+// 「退单中」是后端合成的伪终态：单还活着但正在退单审批，用中性色区别于撤单
+const RE_DONE = ['已施工', '已完工', '已归档', '已回单', '已竣工']
+const RE_DEAD = ['已撤单', '已退单', '已取消', '已作废']
 function statusClass(r) {
   if (r.signed === true) return 'ok'
   if (r.signed === false) return 'danger'
-  if (r.status === '已施工' || r.status === '已完工') return 'ok'
+  if (RE_DONE.includes(r.status)) return 'ok'
+  if (RE_DEAD.includes(r.status)) return 'dead'
+  if (r.status === '退单中') return 'refunding'
   return 'warn'
 }
 function kvOf(r) {
   const cols = (r.__cols || []).slice(1)
   const out = cols.map((c) => ({ k: c.label, v: r[c.key] })).filter((x) => x.v !== undefined && x.v !== '')
-  if (r.district) out.push({ k: '区县', v: r.district })
-  if (r.grid) out.push({ k: '网格', v: r.grid })
-  if (r.accept) out.push({ k: '受理', v: r.accept })
+  // 区县/网格 已经由 cols 渲染过就别再补：待装工单的 cols 里就有「网格」，
+  // 原先无条件 push 会出现两行一模一样的「网格 洪湖峰口网格」（v1.6.5 修）。
+  const has = (k) => out.some((x) => x.k === k)
+  if (r.district && !has('区县')) out.push({ k: '区县', v: r.district })
+  if (r.grid && !has('网格')) out.push({ k: '网格', v: r.grid })
+  if (r.accept && !has('受理')) out.push({ k: '受理', v: r.accept })
   return out
 }
 
@@ -290,6 +303,14 @@ onMounted(load)
 .btn-sm:active { transform: scale(.96); }
 .btn-sm[disabled] { opacity: .55; }
 .task { border-left: 3px solid var(--brand); }
+
+/* 状态依据小字：浅灰，不抢主信息但可追溯 */
+.status-note {
+  margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--ink-3);
+  background: #f8fafc; border-left: 2px solid #cbd5e1;
+  padding: 4px 7px; border-radius: 0 5px 5px 0;
+}
+.sn-src { color: #475569; font-weight: 700; margin-right: 4px; }
 
 /* 责任人（便于网格长按人督办） */
 .row-owner { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 7px 0 3px; }

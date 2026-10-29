@@ -41,9 +41,11 @@ SYNC_MODULES = {
     "complaint_wide": {"name": "投诉宽表", "target": "complaint_orders",
                        "columns": ["数据1：工单流水号/区县/投诉时间/智慧装维工单状态/当前处理人/投诉分类/24小时是否及时/8小时是否及时/是否履约/工单时长/故障是否解决/归档满意度"],
                        "note": "白名单解析「数据1」sheet（投诉宽表月累计）；month 从投诉时间推导；按月替换"},
-    "install_query": {"name": "装机综合查询", "target": "install_orders",
+    "install_query": {"name": "装机综合查询", "target": "install_realtime_status",
                       "columns": ["导出信息：定单编码/区域/受理时间/定单主题/工单状态/施工人/施工时间/网格名称/是否FTTR/一级退单原因"],
-                      "note": "实时数据（比宽表早约2小时）；白名单解析「导出信息」sheet；month 从受理时间推导；按月替换"},
+                      "note": "实时数据（比宽表早约2小时）；白名单解析「导出信息」sheet；"
+                              "入库到独立的 install_realtime_status 表，**不覆盖**装机宽表，"
+                              "仅供工单状态裁决使用（v1.6.5）"},
     "complaint_query": {"name": "投诉综合查询", "target": "complaint_orders",
                         "columns": ["家宽投诉综合工单列表：EOMS工单号/区域/工单状态/当前处理人/施工部门/人/受理时间/投诉时间/投诉分类"],
                         "note": "实时数据（比宽表早约2小时）；白名单解析「家宽投诉综合工单列表」sheet；month 从投诉时间推导；按月替换"},
@@ -942,6 +944,19 @@ def _calc_timely(accept: str, done: str, hours: int) -> str:
     return "是" if delta <= hours * 3600 else "否"
 
 
+def _count_status_diff(db: Session, payload: list) -> int:
+    """实时快照与装机宽表状态不一致的单数（含宽表侧缺失）"""
+    try:
+        from ..models import InstallRealtimeStatus as _IRT
+        ids = [p["order_id"] for p in payload]
+        cur = {r.order_id: (r.status or "") for r in
+               db.query(InstallOrder.order_id, InstallOrder.status)
+               .filter(InstallOrder.order_id.in_(ids)).all()}
+        return sum(1 for p in payload if cur.get(p["order_id"], None) != p["status"])
+    except Exception:
+        return 0
+
+
 def _normalize_install_query(sheets: dict) -> list[dict]:
     """装机综合查询「导出信息」→ InstallOrder（实时数据）"""
     out: list[dict] = []
@@ -971,6 +986,9 @@ def _normalize_install_query(sheets: dict) -> list[dict]:
             "refund_reason": refund_reason,
             "install_duration": 0.0, "completion_duration": 0.0, "h5_satisfaction": "",
             "appointment_time": _norm_time(r.get("前台预约时间")), "is_high_quality": "",
+            # v1.6.5 裁决所需：实时状态要配一个「生效时间下界」，否则按时间比不过别源
+            "dispatch_time": _norm_time(r.get("施工调度接收时间")),
+            "remark": str(r.get("退单备注信息") or "").strip()[:255],
         })
     return out
 
@@ -1246,7 +1264,42 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                                    construction_dept_person=str(r.get("施工人") or ""),
                                    accept_time=str(r.get("受理时间") or "")))
                 n += 1
-    elif job.metric in ("install_wide", "install_query"):
+    elif job.metric == "install_query":
+        # v1.6.5：综合查询是「实时状态快照」，写独立表，**整表替换**
+        # 不再走 sync_wide_batch 覆盖 install_orders——那会把宽表 97 列冲成 20 列，
+        # 且反过来被宽表把实时状态冲掉，两个源永远只有一个在。
+        rows = [r for r in rows if r.get("order_id")]
+        # 同批次同键去重：导出文件里同一工单可能有多段记录（宽表侧也有同样的坑），
+        # 不去重直接 bulk_insert 会撞主键 → IntegrityError 500。
+        # 保留「施工调度接收时间」最新的一条，它最接近当前状态。
+        best_rt: dict = {}
+        for r in rows:
+            k = r["order_id"]
+            if k not in best_rt or str(r.get("dispatch_time") or "") >= str(best_rt[k].get("dispatch_time") or ""):
+                best_rt[k] = r
+        rows = list(best_rt.values())
+        from ..models import InstallRealtimeStatus as _IRT
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.query(_IRT).delete(synchronize_session=False)
+        payload = [{"order_id": r["order_id"], "month": r.get("month", ""),
+                    "district": r.get("district", ""), "status": r.get("status", ""),
+                    "dispatch_time": r.get("dispatch_time", ""),
+                    "accept_time": r.get("accept_time", ""),
+                    "handler": r.get("handler", ""),
+                    "refund_reason": r.get("refund_reason", "")[:255],
+                    "remark": r.get("remark", ""), "batch_id": job.batch_id,
+                    "fetched_at": now_s} for r in rows]
+        CHUNK = 500
+        for i in range(0, len(payload), CHUNK):
+            db.bulk_insert_mappings(_IRT, payload[i:i + CHUNK])
+        n = len(payload)
+        months = sorted({r.get("month") for r in payload if r.get("month")})
+        # 顺手报一下「和宽表状态打架」的单数，让操作者当场知道这次校对有多大价值
+        diff = _count_status_diff(db, payload)
+        msg = (f"入库成功：实时状态 {n} 行（月份 {'、'.join(months) or '无'}），已整表替换；"
+               f"与装机宽表状态不一致 {diff} 单——这些单在装维端将按「取最接近当前时间」裁决显示"
+               f"（综合查询为实时源，通常以它为准），指标统计不受影响")
+    elif job.metric == "install_wide":
         # 装机宽表为当月累计快照：批次比较入库（与邮件明细同机制，旧快照不覆盖新数据）
         rows = [r for r in rows if r.get("order_id") and r.get("month")]
         res = sync_wide_batch(db, InstallOrder, "order_id", rows)
