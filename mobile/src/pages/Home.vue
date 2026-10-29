@@ -134,13 +134,14 @@ const alertTop = computed(() => alerts.value.top || '')
 
 const GROUP_COLOR = { orders: '#2563eb', rewards: '#b45309', tasks: '#6d28d9', msg: '#1e3a8a' }
 // 四类提醒的统一配色与图标（新类型在此加一行即可）
-const ALERT_COLOR = { task: '#2563eb', notice: '#dc2626', kb: '#0891b2', warn: '#ea580c' }
-const ALERT_ICON = { task: 'check', notice: 'bell', kb: 'book', warn: 'alert' }
+const ALERT_COLOR = { task: '#2563eb', notice: '#dc2626', kb: '#0891b2', warn: '#ea580c', h5: '#7c3aed' }
+const ALERT_ICON = { task: 'check', notice: 'bell', kb: 'book', warn: 'alert', h5: 'star' }
 const KIND_ICON = {
   pending_install: 'box', pending_repair: 'wrench', near_timeout: 'diamond',
   completed_month: 'check', timeout: 'alert', broad: 'repeat', ai_issue: 'alert',
   install_qc: 'tool', h5: 'star', qc: 'check', trace: 'repeat', port_clear: 'plug',
   inspection: 'building', care: 'heart', xf: 'wrench', my_task: 'check', notice: 'bell', knowledge: 'book',
+  h5_recover: 'star',
 }
 
 const profile = computed(() => data.value?.profile || {})
@@ -157,7 +158,8 @@ function iconOf(c) {
 // 这类表没有 grid 列）时，**不能回退成个人值** —— 否则卡片显示个人的 2，
 // 点进去 scope=grid 查出 0 条，就是「卡片有数、明细为空」。
 // 跟人走、不参与网格口径的卡片（后端只按本人算，网格视图下同样正常显示）
-const PERSONAL_ONLY = ['my_task', 'notice', 'knowledge']
+// 跟人走、没有网格口径的卡片：我的任务/待签通知/知识库，以及 H5回收（本人名下客户未参评的单）
+const PERSONAL_ONLY = ['my_task', 'notice', 'knowledge', 'h5_recover']
 function rawOf(c) {
   if (seg.value === 'mine') return c.value
   if (PERSONAL_ONLY.includes(c.kind)) return c.value   // 跟人走，没有网格值

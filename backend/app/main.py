@@ -88,7 +88,8 @@ _ADD_COLUMNS = {
     # 登录失败锁定（v1.6.4）：原来只存进程内存，管理端看不到也解不了，改为落库
     "users": [("failed_attempts", "INTEGER DEFAULT 0"),
               ("locked_until", "VARCHAR(32) DEFAULT ''"),
-              ("last_failed_at", "VARCHAR(32) DEFAULT ''")],
+              ("last_failed_at", "VARCHAR(32) DEFAULT ''"),
+              ("staff_no", "VARCHAR(32) DEFAULT ''")],
     "work_orders": [("community_name", "VARCHAR(255)"), ("grid", "VARCHAR(128)"),
                     ("service_number", "VARCHAR(64)")],
     "h5_complaint": [("community_name", "VARCHAR(255)"), ("contact_person", "VARCHAR(64)"),

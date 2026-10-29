@@ -12,12 +12,20 @@
       <el-input v-model="q.keyword" placeholder="用户名/姓名" clearable style="width:180px" @keyup.enter="load" />
       <el-button type="primary" @click="load">查询</el-button>
       <el-button type="success" @click="openCreate">新增用户</el-button>
+      <!-- 一键从各业务表聚合装维人员建号（v1.6.9）：姓名/工号/网格散在六张表里，
+           原来只能一个个手建，65 个人要建半小时 -->
+      <el-button type="primary" plain @click="openSync">同步装维人员</el-button>
     </div>
 
     <el-table :data="rows" size="small" max-height="580">
       <el-table-column prop="id" label="#" width="60" />
       <el-table-column prop="username" label="用户名" min-width="100" />
       <el-table-column prop="real_name" label="姓名" min-width="90" />
+      <el-table-column prop="staff_no" label="工号" width="90">
+        <template #default="{ row }">
+          <span :class="{ 'muted': !row.staff_no }">{{ row.staff_no || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="role_name" label="角色" min-width="110">
         <template #default="{ row }">
           <el-tag :type="{ super_admin: 'danger', district_admin: 'warning', field_worker: 'info' }[row.role]" size="small">
@@ -75,6 +83,7 @@
             <el-option v-for="d in districts" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="工号"><el-input v-model="form.staff_no" placeholder="装维人员工号，可留空" /></el-form-item>
         <el-form-item label="班组"><el-input v-model="form.team" /></el-form-item>
         <el-form-item label="网格"><el-input v-model="form.grid" /></el-form-item>
         <el-form-item label="岗位"><el-input v-model="form.position" /></el-form-item>
@@ -82,6 +91,41 @@
       <template #footer>
         <el-button @click="dlg = false">取消</el-button>
         <el-button type="primary" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 同步装维人员：先 dry-run 出预览，确认后才落库 -->
+    <el-dialog v-model="syncDlg" title="同步装维人员账号" width="720px">
+      <div v-if="syncInfo" class="sync-hint">
+        从 <b>H5满意度回复详单 / 省公司通报 / 延伸服务花名册 / 满意度人员表 / 工单处理人</b>
+        五处合并，{{ syncInfo.district }} 共识别 <b>{{ syncInfo.summary.total }}</b> 人：
+        将新建 <b class="c-new">{{ syncInfo.summary.create }}</b> 个，
+        更新 <b class="c-upd">{{ syncInfo.summary.update }}</b> 个，
+        跳过 <b class="c-skip">{{ syncInfo.summary.skip }}</b> 个。
+        <div class="sync-note">
+          账号名优先用<b>工号</b>，无工号的用<b>姓名</b>；默认密码
+          <b>{{ syncInfo.default_password || 'Aa123456' }}</b>（仅新建时设置，不会重置已有密码）。
+          已有账号只补空的工号/网格/班组，不改姓名。
+        </div>
+      </div>
+      <el-table v-if="syncInfo && syncInfo.skipped.length" :data="syncInfo.skipped" size="small" max-height="160">
+        <el-table-column prop="name" label="姓名" width="90" />
+        <el-table-column prop="username" label="拟用账号" width="110" />
+        <el-table-column prop="reason" label="跳过原因" />
+      </el-table>
+      <el-table v-if="syncInfo" :data="syncPreview" size="small" max-height="320" style="margin-top:8px">
+        <el-table-column prop="real_name" label="姓名" width="90" />
+        <el-table-column prop="username" label="账号" width="110" />
+        <el-table-column prop="staff_no" label="工号" width="90">
+          <template #default="{ row }">{{ row.staff_no || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="grid" label="网格" min-width="130" />
+        <el-table-column prop="team" label="班组" min-width="130" />
+        <el-table-column prop="position" label="岗位" width="90" />
+      </el-table>
+      <template #footer>
+        <el-button @click="syncDlg = false">取消</el-button>
+        <el-button type="primary" :loading="syncing" @click="doSync">确认创建 / 更新</el-button>
       </template>
     </el-dialog>
   </el-card>
@@ -128,6 +172,57 @@ async function save() {
   load()
 }
 
+// ---- 同步装维人员（v1.6.9）----
+const syncDlg = ref(false)
+const syncInfo = ref(null)
+const syncing = ref(false)
+const syncPreview = ref([])
+
+async function openSync() {
+  syncInfo.value = null
+  syncPreview.value = []
+  syncing.value = true
+  syncDlg.value = true
+  try {
+    const r = await api.post('/users/sync-staff', { district: '洪湖市', dry_run: true })
+    syncInfo.value = r
+    // 预览把「新建」和「更新」合在一起展示，更新项用 patch 里的值补齐
+    const created = r.created || []
+    const updated = (r.updated || []).map(u => {
+      const p = u.patch || {}
+      return {
+        real_name: u.real_name, username: u.username, staff_no: p.staff_no || '',
+        grid: p.grid || '（保持原值）', team: p.team || '（保持原值）',
+        position: p.position || '（保持原值）',
+      }
+    })
+    syncPreview.value = [...updated, ...created]
+  } catch (e) {
+    ElMessage.error('预览失败：' + (e?.response?.data?.detail || e.message))
+    syncDlg.value = false
+  } finally {
+    syncing.value = false
+  }
+}
+
+async function doSync() {
+  if (!syncInfo.value || !syncInfo.value.summary.create) {
+    const ok = await ElMessageBox.confirm('本次没有需要新建的账号，是否仍执行更新？', '提示', { type: 'info' })
+    if (!ok) return
+  }
+  syncing.value = true
+  try {
+    const r = await api.post('/users/sync-staff', { district: '洪湖市', dry_run: false })
+    ElMessage.success(`已新建 ${r.summary.create} 个、更新 ${r.summary.update} 个`)
+    syncDlg.value = false
+    load()
+  } catch (e) {
+    ElMessage.error('同步失败：' + (e?.response?.data?.detail || e.message))
+  } finally {
+    syncing.value = false
+  }
+}
+
 async function resetPwd(row) {
   const { value } = await ElMessageBox.prompt(`重置 ${row.real_name} 的密码（至少 8 位，含字母和数字）`, '重置密码', { inputValue: 'Honghu@2026' })
   await api.post('/auth/reset-password', { user_id: row.id, new_password: value })
@@ -156,3 +251,14 @@ onMounted(() => {
   api.get('/districts').then(d => districts.value = d)
 })
 </script>
+
+<style scoped>
+.muted { color: #b6bfcc; }
+.sync-hint { font-size: 13px; line-height: 1.9; color: #334155; }
+.sync-hint b { color: #0f172a; }
+.sync-hint .c-new { color: #0f766e; }
+.sync-hint .c-upd { color: #b45309; }
+.sync-hint .c-skip { color: #be123c; }
+.sync-note { margin-top: 6px; padding: 8px 10px; background: #f8fafc;
+  border-left: 3px solid #cbd5e1; border-radius: 4px; font-size: 12px; color: #475569; }
+</style>

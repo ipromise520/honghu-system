@@ -41,6 +41,8 @@ class User(Base):
     team: Mapped[str] = mapped_column(String(64), default="")
     grid: Mapped[str] = mapped_column(String(64), default="")
     position: Mapped[str] = mapped_column(String(64), default="")
+    # 装维人员工号（v1.6.9）：从 H5 详单/省公司通报自动同步，兼作登录名
+    staff_no: Mapped[str] = mapped_column(String(32), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # ---- 登录失败锁定（v1.6.4）----
     # 原实现把失败次数只存在进程内存 _login_failures 里，重启即清零，

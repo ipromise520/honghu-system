@@ -27,6 +27,9 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..status_resolver import (NOT_PENDING, is_pending, realtime_cand, report_cand,
                               resolve, wide_cand, complaint_realtime_cand)
+# 「H5回收」与 H5短信盯控同一套应发口径（同一函数），不另写 SQL —— 
+# 两端对不上是本项目最高频的 bug 来源，见 AGENTS §三十一/§三十三。
+from .h5 import mine_pending as _h5_mine_pending
 from ..models import (
     AiVisitIssue, AlertOrder, ComplaintOrder, District, ExtensionMember,
     H5SurveyStaff, InstallOrder, Notice, NoticeSignature, ReportDupOrder,
@@ -426,6 +429,19 @@ def _short_name(raw: str, district: str = "") -> str:
     return v
 
 
+def _age_text(age_h) -> str:
+    """小时数 → 人话（``3.5小时`` / ``2天4小时``）。"""
+    try:
+        h = float(age_h or 0)
+    except Exception:
+        return ""
+    if h <= 0:
+        return ""
+    if h < 24:
+        return "%.1f 小时" % h
+    return "%d 天 %d 小时" % (int(h // 24), int(h % 24))
+
+
 def _customer_level(db, order_no: str) -> str:
     """客户卡等级（仅投诉宽表有 global_pass，装机单通常拿不到 → 空串）"""
     if not order_no:
@@ -543,7 +559,11 @@ def overview(month: str = Query(""), scope: str = Query("mine"),
         _card("trace", "工器具追溯", None, kind="trace", state="none"),
     ]
 
+    # 本人名下「本月已完工、已发 H5 短信、客户还没参评」的单（v1.6.9）
+    h5_rec = _h5_mine_pending(db, name, district, m) if name else []
     tasks = [
+        _card("h5_recover", "H5回收", len(h5_rec), kind="h5_recover",
+              sub=("应发未收 %d 单" % len(h5_rec)) if h5_rec else "本月无待回收"),
         _card("port_clear", "端口清虚", None, kind="port_clear", state="none"),
         _card("inspection", "小区巡检", None, kind="inspection", state="none"),
         _card("care", "广义用户关怀", None, kind="care", state="none"),
@@ -609,12 +629,17 @@ COLS_ORDER = {
                      ("appoint", "预约时间", 0), ("left_text", "剩余", 0), ("customer", "客户等级", 0)],
     "completed_month": [("no", "工单号", 1), ("handler", "责任人", 0), ("theme", "主题", 0),
                         ("appoint", "预约时间", 0), ("status", "状态", 0)],
+    # H5回收（v1.6.9）：本人名下已发短信但客户未参评的单，按「已等多久」排序
+    # 状态固定是「已施工」（应发前提就是完工），不重复占一列；「已等」才是要盯的东西
+    "h5_recover": [("no", "工单号", 1), ("kind_name", "类型", 0), ("community", "小区", 0),
+                   ("number", "服务号码", 1), ("back", "回单时间", 0), ("wait", "已等", 0)],
 }
 
 
 @router.get("/orders")
 def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
-           level: str = Query(""), page: int = Query(1), page_size: int = Query(50),
+           level: str = Query(""), month: str = Query(""), page: int = Query(1),
+           page_size: int = Query(50),
            db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     sub = "grid" if scope == "grid" else "mine"
     p = _resolve(db, user)
@@ -647,6 +672,18 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
                  "status_conflict": r._st_conflict,
                  "grid": r.grid or "", "accept": r.accept_time or "",
                  "handler": _short_name(r.handler, r.district)} for r in objs]
+    elif kind == "h5_recover":
+        # 与卡片同一个函数（v1.6.9）：卡片 len() / 明细都走 mine_pending
+        items = _h5_mine_pending(db, name, district, _month(month)) if name else []
+        rows = [{"no": it.get("order_no", ""),
+                 "kind_name": "装机" if it.get("kind") == "install" else "投诉",
+                 "community": it.get("community_name", ""),
+                 "number": it.get("service_number") or it.get("fault_number", ""),
+                 "back": (it.get("back_time") or "")[:16],
+                 "wait": _age_text(it.get("age_h")),
+                 "wait_days": int((it.get("age_h") or 0) // 24),
+                 "status": it.get("status", ""),
+                 "handler": _short_name(it.get("handler", ""), district)} for it in items]
     else:
         raise HTTPException(400, "未知的工单类型：%s" % kind)
 
@@ -655,7 +692,8 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
     _SRC = {"near_timeout": "省公司预警附件（按预约时间剩余分档）",
             "pending_install": "装机宽表（在途未完工）",
             "pending_repair": "投诉宽表 + 投诉综合查询（在途未完工，跨源裁决）",
-            "completed_month": "装机宽表（本月已施工）"}
+            "completed_month": "装机宽表（本月已施工）",
+            "h5_recover": "装机宽表 + 投诉宽表（已发 H5 短信、客户未参评；回执来自 H5 满意度通报）"}
     return {"kind": kind, "scope": sub, "total": total, "source": _SRC.get(kind, ""),
             "columns": [{"key": k, "label": lb, "mono": mono} for k, lb, mono in COLS_ORDER[kind]],
             "rows": rows[start:start + page_size]}
@@ -861,6 +899,8 @@ ALERT_META = {
     "notice": {"label": "通知",     "detail": "notice",       "hint": "必签且未签收"},
     "kb":     {"label": "知识库",   "detail": "knowledge",    "hint": "新上架文档"},
     "warn":   {"label": "工单预警", "detail": "alert_order",  "hint": "预约剩余 ≤2 小时"},
+    # v1.6.9：H5 短信盯控里本人名下未回收的单，直接推到装维端提醒
+    "h5":     {"label": "H5回收",   "detail": "h5_recover",   "hint": "已发短信、客户未参评"},
 }
 
 
@@ -913,12 +953,14 @@ def alerts_summary(db: Session = Depends(get_db), user: User = Depends(get_curre
     _, notice_unsigned = _notice_count(db, user.id)
     kb_cnt, kb_state = _kb_new_count(db, user.id)
     warn_rows = _warn_rows(db, name, district, gkey)
+    h5_cnt = len(_h5_mine_pending(db, name, district, _month(""))) if name else 0
 
-    counts = {"task": task_cnt, "notice": notice_unsigned, "kb": kb_cnt, "warn": len(warn_rows)}
+    counts = {"task": task_cnt, "notice": notice_unsigned, "kb": kb_cnt,
+              "warn": len(warn_rows), "h5": h5_cnt}
     total = sum(counts.values())
 
     items = []
-    for key in ("task", "notice", "kb", "warn"):
+    for key in ("task", "notice", "h5", "kb", "warn"):
         m = ALERT_META[key]
         items.append({
             "key": key, "label": m["label"], "hint": m["hint"],

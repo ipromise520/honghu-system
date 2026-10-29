@@ -7,6 +7,7 @@ const KIND_EMOJI = {
   timeout: '⚠️', broad: '🔁', ai_issue: '📞', install_qc: '🛠️', h5: '⭐', qc: '✔️',
   trace: '🔄', port_clear: '🔌', inspection: '🏢', care: '❤️', xf: '🔧',
   my_task: '📌', notice: '🔔', knowledge: '📚',
+  h5_recover: '⭐',
 }
 
 Page({

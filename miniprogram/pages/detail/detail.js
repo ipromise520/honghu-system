@@ -1,5 +1,5 @@
 const { mp } = require('../../utils/request.js')
-const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month']
+const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month', 'h5_recover']
 
 Page({
   data: {
@@ -16,7 +16,8 @@ Page({
     const scope = o.scope || 'mine'
     this.setData({
       kind, level, title, state, scope,
-      canToggle: kind !== 'notice' && kind !== 'my_task' && kind !== 'warn' && kind !== '',
+      // H5回收 只有个人口径（本人名下未参评的单），不显示「我的/本网格」切换
+      canToggle: !['notice', 'my_task', 'warn', 'h5_recover', ''].includes(kind),
     })
     this.load()
   },

@@ -121,6 +121,21 @@
             </div>
           </div>
 
+          <!-- H5回收（v1.6.9）：本人名下已发短信、客户还没参评的单。
+               状态固定是「已施工」，所以不占一行，重点是「已等多久」。 -->
+          <template v-else-if="kind === 'h5_recover'" key="h5">
+            <div v-for="(r, i) in rows" :key="i" class="row" :style="{ '--i': i }">
+              <div class="row-h">
+                <span class="row-no">{{ r.no }}</span>
+                <span class="row-tag" :class="r.kind_name === '装机' ? 'info' : 'warn'">{{ r.kind_name }}</span>
+                <span class="row-tag" :class="waitClass(r.wait_days)">已等 {{ r.wait || '—' }}</span>
+              </div>
+              <div class="row-kv"><span><span class="k">小区</span> {{ r.community || '—' }}</span></div>
+              <div class="row-kv"><span><span class="k">服务号码</span> {{ r.number || '—' }}</span></div>
+              <div class="row-kv"><span><span class="k">回单时间</span> {{ r.back || '—' }}</span></div>
+            </div>
+          </template>
+
           <!-- 通用列表 -->
           <template v-else>
             <div v-for="(r, i) in rows" :key="i" class="row" :style="{ '--i': i }">
@@ -164,8 +179,8 @@ const title = computed(() => route.query.label || '明细')
 const state = computed(() => route.query.state || '')
 const scope = ref(route.query.scope || 'mine')
 
-const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month']
-const canToggle = computed(() => kind.value !== 'notice' && kind.value !== 'my_task' && kind.value !== 'warn' && kind.value !== '')
+const ORDERS = ['pending_install', 'pending_repair', 'near_timeout', 'completed_month', 'h5_recover']
+const canToggle = computed(() => !['notice', 'my_task', 'warn', 'h5_recover', ''].includes(kind.value))
 
 const loading = ref(true)
 const ready = ref(false)
@@ -191,6 +206,12 @@ function statusClass(r) {
   if (RE_DEAD.includes(r.status)) return 'dead'
   if (r.status === '退单中') return 'refunding'
   return 'warn'
+}
+// H5回收：等得越久越难回收，7 天转橙、15 天转红
+function waitClass(days) {
+  if (days >= 15) return 'danger'
+  if (days >= 7) return 'warn'
+  return 'ok'
 }
 function kvOf(r) {
   const cols = (r.__cols || []).slice(1)

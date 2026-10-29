@@ -39,6 +39,8 @@ def list_users(page: int = 1, page_size: int = 50, role: str = None, district_id
         "role": roles.get(u.role_id, ""), "role_name": role_names.get(u.role_id, ""),
         "district_id": u.district_id, "district": districts.get(u.district_id, ""),
         "team": u.team, "grid": u.grid, "position": u.position, "is_active": u.is_active,
+        # 装维人员工号（v1.6.9）：从 H5 详单/省公司通报自动同步，无工号时为空
+        "staff_no": getattr(u, "staff_no", "") or "",
         # 登录锁定状态（v1.6.4）：供管理端展示「已锁定 剩余X分钟」与解锁按钮
         "failed_attempts": u.failed_attempts or 0,
         "locked_until": u.locked_until or "",
@@ -111,6 +113,31 @@ def unlock_user(user_id: int, user=Depends(require_admin), db: Session = Depends
             "is_locked": False}
 
 
+@router.post("/users/sync-staff")
+def sync_staff(body: dict = None, user=Depends(require_admin), db: Session = Depends(get_db)):
+    """从各业务表聚合装维人员并批量建号（v1.6.9）
+
+    姓名/工号/网格散在六张表里，单看任何一张都建不出完整账号，这里做多源合并。
+    默认 ``dry_run=True``，先返回「将新建 N / 将更新 N / 跳过 N」让人确认，再落库。
+
+    幂等：已有账号只补空的字段，**不重置密码、不改姓名**；
+    同一人若早先用手机号建过号（如柴达 15171201240），按姓名命中后只补工号，不会重复建。
+    """
+    from ..staff_directory import DEFAULT_DISTRICT, DEFAULT_PASSWORD, sync_users
+    body = body or {}
+    district = body.get("district") or DEFAULT_DISTRICT
+    if get_role(user) == "district_admin" and user.district_id:
+        d = db.query(District).filter(District.id == user.district_id).first()
+        district = d.name if d else district
+    res = sync_users(db, district=district,
+                     default_password=body.get("default_password") or DEFAULT_PASSWORD,
+                     dry_run=bool(body.get("dry_run", True)),
+                     operator=user.username)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "同步失败")
+    return res
+
+
 @router.post("/users")
 def create_user(body: dict, user=Depends(require_admin), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == body["username"]).first():
@@ -123,7 +150,8 @@ def create_user(body: dict, user=Depends(require_admin), db: Session = Depends(g
     u = User(username=body["username"], password_hash=hash_password(body.get("password", "123456")),
              real_name=body["real_name"], phone=body.get("phone", ""), role_id=role.id,
              district_id=body.get("district_id"), team=body.get("team", ""),
-             grid=body.get("grid", ""), position=body.get("position", ""))
+             grid=body.get("grid", ""), position=body.get("position", ""),
+             staff_no=body.get("staff_no", ""))
     db.add(u)
     db.add(AuditLog(username=user.username, action="创建用户", detail=u.username))
     db.commit()
@@ -137,7 +165,7 @@ def update_user(user_id: int, body: dict, user=Depends(require_admin), db: Sessi
         raise HTTPException(status_code=404, detail="用户不存在")
     if get_role(user) == "district_admin" and u.district_id != user.district_id:
         raise HTTPException(status_code=403, detail="只能修改本区县用户")
-    for f in ["real_name", "phone", "team", "grid", "position"]:
+    for f in ["real_name", "phone", "team", "grid", "position", "staff_no"]:
         if f in body:
             setattr(u, f, body[f])
     if "district_id" in body:

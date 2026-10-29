@@ -150,7 +150,8 @@ def _back_col_install():
                                      InstallOrder.accept_time), 1, 19)
 
 
-def _derive_install(db: Session, start, end, district, hide_unfinished, name_scope) -> list[dict]:
+def _derive_install(db: Session, start, end, district, hide_unfinished, name_scope,
+                    handler=None) -> list[dict]:
     """装机 H5 应发：install_orders（「数据同步 → 装机宽表」）
 
     v1.6.8 起只读装机宽表。原来读 work_orders（H5盯控页自带的独立上传口），
@@ -174,6 +175,11 @@ def _derive_install(db: Session, start, end, district, hide_unfinished, name_sco
         q = q.filter(InstallOrder.district == district)
     if name_scope is not None:
         q = q.filter(InstallOrder.district.in_(list(name_scope) or ["-"]))
+    if handler:
+        # 装维端「H5回收」只看本人。用「等于 或 以姓名结尾」而不是 contains，
+        # 否则「王刚」会吃掉「王刚强」（mp.py 那边踩过同样的问题）。
+        q = q.filter(or_(InstallOrder.handler == handler,
+                         func.substr(InstallOrder.handler, -len(handler)) == handler))
     rows = q.all()
     _adjudicate_install(db, rows)          # 跨源裁决：实时判成已撤单的单不该再催 H5
     out = []
@@ -196,7 +202,8 @@ def _derive_install(db: Session, start, end, district, hide_unfinished, name_sco
     return out
 
 
-def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_scope) -> list[dict]:
+def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_scope,
+                      handler=None) -> list[dict]:
     """投诉 H5 应发：complaint_orders（「数据同步 → 投诉宽表」）
 
     原来读 h5_complaint（独立上传口，停在 10-22）。投诉宽表的小区/号码从
@@ -211,6 +218,9 @@ def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_s
         q = q.filter(ComplaintOrder.district == district)
     if name_scope is not None:
         q = q.filter(ComplaintOrder.district.in_(list(name_scope) or ["-"]))
+    if handler:
+        q = q.filter(or_(ComplaintOrder.handler == handler,
+                         func.substr(ComplaintOrder.handler, -len(handler)) == handler))
     rows = q.all()
     _adjudicate_complaint(db, rows)
     out = []
@@ -233,7 +243,7 @@ def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_s
     return out
 
 
-def _receipt_map(db: Session) -> dict:
+def _receipt_map(db: Session, order_nos=None) -> dict:
     """(工单号, 类型) → 已参评 / 空。
 
     两个来源合并，**缺一不可**：
@@ -244,23 +254,67 @@ def _receipt_map(db: Session) -> dict:
     是两套编号体系，无法自动关联，投诉只能靠 ② 手动标记。
     """
     m: dict = {}
+    nos = None if order_nos is None else [x for x in order_nos if x]
+    if nos is not None and not nos:
+        return m
     try:
-        for (no,) in db.query(H5SurveyRecord.order_no).filter(
-                H5SurveyRecord.kind == "装机",
-                H5SurveyRecord.order_no != "",
-                H5SurveyRecord.reply_time != "").all():
+        q = db.query(H5SurveyRecord.order_no).filter(
+            H5SurveyRecord.kind == "装机",
+            H5SurveyRecord.order_no != "",
+            H5SurveyRecord.reply_time != "")
+        if nos is not None:
+            q = q.filter(H5SurveyRecord.order_no.in_(nos))
+        for (no,) in q.all():
             if no:
                 m[(no, "install")] = "已参评"
     except Exception:
         pass
     # 人工标记后写覆盖：非空=手动标已参评，空=手动取消（点错了要能撤回来）
-    for r in db.query(H5Receipt).all():
+    qr = db.query(H5Receipt)
+    if nos is not None:
+        qr = qr.filter(H5Receipt.order_no.in_(nos))
+    for r in qr.all():
         m[(_clean(r.order_no), _clean(r.kind))] = _clean(r.h5_received) or ""
     return m
 
 
 def _is_received(item: dict, rmap: dict) -> bool:
     return rmap.get((item["order_no"], item["kind"])) == "已参评"
+
+
+def mine_pending(db: Session, name: str, district: str, month: str = "") -> list:
+    """某个装维人员**本人名下**「H5 应发但未回收」的工单（v1.6.9）。
+
+    这是装维端「H5回收」卡与明细的**唯一入口**——卡片数字与列表条数都调它，
+    避免又出现「卡片有数、点进去空」。
+
+    口径与网格长看的 ``/h5/pending`` 完全同一套（复用 ``_derive_install/_derive_complaint``
+    + ``_receipt_map``），只是把范围收窄到个人：本人在当月已完工、已发 H5 短信、
+    但客户还没参评的单。省公司通报的投诉详单用的是 CRM 单号，与 EOMS 号关联不上，
+    所以投诉侧只能靠网格长手动标记「已参评」来消账（见 AGENTS §三十三）。
+    """
+    if not name:
+        return []
+    month = (month or datetime.now().strftime("%Y-%m"))[:7]
+    try:
+        y, mth = int(month[:4]), int(month[5:7])
+        start = datetime(y, mth, 1)
+        end = datetime(y + 1, 1, 1) if mth == 12 else datetime(y, mth + 1, 1)
+    except Exception:
+        start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = start.replace(year=start.year + 1, month=1) if start.month == 12 \
+            else start.replace(month=start.month + 1)
+    items = _derive_install(db, start, end, district, False, None, handler=name)
+    items += _derive_complaint(db, start, end, district, False, None, handler=name)
+    nos = {it["order_no"] for it in items if it.get("order_no")}
+    if not nos:
+        return []
+    rmap = _receipt_map(db, nos)
+    out = [it for it in items if not _is_received(it, rmap)]
+    for it in out:
+        it["age_h"] = _age_hours(it.get("back_time"))
+    out.sort(key=lambda x: x.get("age_h") or 0, reverse=True)
+    return out
 
 
 def _collect(db, user, date, start_dt, end_dt, district, hide_unfinished, kind) -> tuple[list, dict]:
