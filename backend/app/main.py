@@ -117,7 +117,13 @@ _ADD_COLUMNS = {
                        ("refund_person", "VARCHAR(64) DEFAULT ''"),
                        ("ai_result", "VARCHAR(16) DEFAULT ''"),
                        ("zongdiao_result", "VARCHAR(16) DEFAULT ''"),
-                       ("city_result", "VARCHAR(16) DEFAULT ''")],
+                       ("city_result", "VARCHAR(16) DEFAULT ''"),
+                       # H5短信盯控（v1.6.8）：宽表自带小区/号码，一处导入全局生效
+                       ("community_name", "VARCHAR(255) DEFAULT ''"),
+                       ("service_number", "VARCHAR(64) DEFAULT ''")],
+    "complaint_orders": [("community_name", "VARCHAR(255) DEFAULT ''"),
+                         ("contact_person", "VARCHAR(64) DEFAULT ''"),
+                         ("fault_number", "VARCHAR(64) DEFAULT ''")],
 }
 
 # month 生成列（VIRTUAL）：把 substr(accept_time,1,7) 变为可索引列，月度聚合/筛选走索引
@@ -146,6 +152,11 @@ _INDEXES = [
     ("report_dup_orders", "ix_rdo_district", "district"),
     ("ai_visit_issues", "ix_aivisit_month", "month"),
     ("ai_visit_stats", "ix_aivisitstat_month", "month"),
+    # H5 盯控（v1.6.8）：应发清单要用 NOT EXISTS 反查回执/详单，没有索引会退化成全表扫
+    ("h5_receipts", "ix_receipt_order", "order_no, kind"),
+    ("h5_survey_records", "ix_h5rec_order", "order_no, kind"),
+    ("install_orders", "ix_io_status_order", "status, order_id"),
+    ("complaint_orders", "ix_co_status_eoms", "status, eoms_no"),
 ]
 
 

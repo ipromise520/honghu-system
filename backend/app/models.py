@@ -325,6 +325,9 @@ class InstallOrder(Base):
     ai_result: Mapped[str] = mapped_column(String(16), default="")              # BV AI回访结果
     zongdiao_result: Mapped[str] = mapped_column(String(16), default="")        # BY 综调回访结果
     city_result: Mapped[str] = mapped_column(String(16), default="")            # CB 地市回访结果
+    # ---- H5 短信盯控所需（v1.6.8，宽表自带，不再依赖独立上传口）----
+    community_name: Mapped[str] = mapped_column(String(255), default="")   # 所属小区
+    service_number: Mapped[str] = mapped_column(String(64), default="")     # 服务号码
 
 
 class ComplaintOrder(Base):
@@ -347,6 +350,10 @@ class ComplaintOrder(Base):
     grid: Mapped[str] = mapped_column(String(64), default="")              # 网格
     is_high_quality: Mapped[str] = mapped_column(String(8), default="")    # 是否高品质
     global_pass: Mapped[str] = mapped_column(String(32), default="")       # 全球通标识
+    # ---- H5 短信盯控所需（v1.6.8，从宽表投诉内容解析）----
+    community_name: Mapped[str] = mapped_column(String(255), default="")   # 装机地址/所属小区
+    contact_person: Mapped[str] = mapped_column(String(64), default="")     # 受理电话号码
+    fault_number: Mapped[str] = mapped_column(String(64), default="")       # 主叫号码
 
 
 class Setting(Base):

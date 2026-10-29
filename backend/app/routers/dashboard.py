@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from ..config import COMPLETED_STATUS
 from ..database import get_db
-from ..models import (WorkOrder, InstallOrder, ExtensionOrder, Task, Alert, H5Complaint, H5Receipt,
+from ..models import (WorkOrder, InstallOrder, InstallRealtimeStatus, ComplaintOrder,
+                      ExtensionOrder, Task, Alert, H5Complaint, H5Receipt, H5SurveyRecord,
                       District, User, AiVisitIssue, AiVisitStat)
 from ..deps import get_current_user, scope_district_ids
 
@@ -88,21 +89,33 @@ def _h5_pending_count(db, window: str) -> int:
 
     NOT EXISTS 子查询下推 SQL，避免把全部应发单号拉进内存做集合差。
     """
-    install_pending = db.query(func.count(WorkOrder.id)).filter(
-        WorkOrder.month == window,
-        WorkOrder.status.in_(COMPLETED_STATUS),
-        WorkOrder.broadband_type == "个人",
-        WorkOrder.order_id.like("27%"),
+    # 装机：宽表（27 前缀、个人/空类型、非空壳行）
+    install_pending = db.query(func.count(InstallOrder.order_id)).filter(
+        InstallOrder.month == window,
+        InstallOrder.status.in_(("已施工",)),
+        InstallOrder.order_id.like("27%"),
+        func.coalesce(InstallOrder.broadband_type, "").in_(("个人", "")),
+        (InstallOrder.handler != "") | (InstallOrder.current_step != ""),
+        # 宽表停在「已施工」、实时查询已判撤单的单不该再催 H5（与 h5.py 的裁决口径对齐）
+        ~db.query(InstallRealtimeStatus.order_id).filter(
+            InstallRealtimeStatus.order_id == InstallOrder.order_id,
+            InstallRealtimeStatus.status.in_(("已撤单", "已取消", "已作废"))).exists(),
+        # 未收：既没有「回复详单」，也没被网格长手动标记已参评
         ~db.query(H5Receipt.id).filter(
-            H5Receipt.order_no == WorkOrder.order_id,
+            H5Receipt.order_no == InstallOrder.order_id,
             H5Receipt.h5_received == "已参评").exists(),
+        ~db.query(H5SurveyRecord.id).filter(
+            H5SurveyRecord.kind == "装机",
+            H5SurveyRecord.order_no == InstallOrder.order_id,
+            H5SurveyRecord.reply_time != "").exists(),
     ).scalar()
-    complaint_pending = db.query(func.count(H5Complaint.id)).filter(
-        H5Complaint.month == window,
-        H5Complaint.order_status == "已施工",
-        H5Complaint.eoms_order_no.like("HB-058%"),
+    # 投诉：投诉宽表（HB-058）。投诉回复详单是 CRM 单号，关联不上，只能看手动标记
+    complaint_pending = db.query(func.count(ComplaintOrder.eoms_no)).filter(
+        ComplaintOrder.month == window,
+        ComplaintOrder.status.in_(("已施工",)),
+        ComplaintOrder.eoms_no.like("HB-058%"),
         ~db.query(H5Receipt.id).filter(
-            H5Receipt.order_no == H5Complaint.eoms_order_no,
+            H5Receipt.order_no == ComplaintOrder.eoms_no,
             H5Receipt.h5_received == "已参评").exists(),
     ).scalar()
     return (install_pending or 0) + (complaint_pending or 0)

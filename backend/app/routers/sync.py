@@ -898,6 +898,9 @@ def _normalize_install_wide(sheets: dict) -> list[dict]:
             "ai_result": str(r.get("AI回访结果") or "").strip(),
             "zongdiao_result": str(r.get("综调回访结果") or "").strip(),
             "city_result": str(r.get("地市回访结果") or "").strip(),
+            # H5短信盯控（v1.6.8）：宽表自带，不再依赖「宽表查询-装机」单独上传
+            "community_name": _short_addr(r.get("所属小区") or r.get("小区简称")),
+            "service_number": _pick_num(r, "服务号码", "业务号码"),
         })
     return out
 
@@ -928,8 +931,86 @@ def _normalize_complaint_wide(sheets: dict) -> list[dict]:
             "grid": str(r.get("首次派单目标网格") or r.get("最终回单网格") or "").strip(),
             "is_high_quality": str(r.get("是否高品质") or "").strip(),
             "global_pass": str(r.get("全球通标识") or "").strip(),
+            # H5短信盯控（v1.6.8）：投诉宽表没有独立的小区/号码列，从投诉正文解析
+            **_cmp_contact(r),
         })
     return out
+
+
+# ---- H5 短信盯控字段（v1.6.8）：宽表自带的小区/号码直接落库 ----
+_ADDR_PREFIX = "湖北荆州"
+_ADDR_DISTRICTS = ("洪湖市", "监利市", "石首市", "松滋市", "公安县", "江陵县",
+                   "荆州区", "沙市区", "荆州开发区")
+
+
+def _short_addr(v) -> str:
+    """「湖北荆州洪湖市XX小区」→「XX小区」；9 个区县前缀都剥；空/NaN → 空串"""
+    t = str(v or "").strip()
+    if not t or t.lower() in ("nan", "none"):
+        return ""
+    if t.startswith(_ADDR_PREFIX):
+        t = t[len(_ADDR_PREFIX):]
+        for d in _ADDR_DISTRICTS:
+            if t.startswith(d):
+                t = t[len(d):]
+                break
+    return t.strip()
+
+
+def _num_str(v) -> str:
+    """号码/编码转字符串：pandas 读成 float 时 5200016915001.0 → 5200016915001"""
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        if v != v:                      # NaN
+            return ""
+        return str(int(v)) if v.is_integer() else str(v)
+    t = str(v).strip()
+    if t.lower() in ("nan", "none"):
+        return ""
+    if t.endswith(".0") and t[:-2].isdigit():
+        return t[:-2]
+    return t
+
+
+def _pick_num(row: dict, *keys) -> str:
+    """按候选列名取第一个非空号码。**不能写 a or b**：pandas 的 NaN 是真值。"""
+    for k in keys:
+        got = _num_str(row.get(k))
+        if got:
+            return got
+    return ""
+
+
+def _complaint_contact(topic, content, row) -> tuple:
+    """从投诉主题/内容里抠 装机地址 / 主叫号码 / 受理电话号码。
+
+    实测投诉宽表没有独立的「小区名称」「故障号码」列，这些信息只在
+    「投诉内容」正文里，形如：
+        [装机地址: 湖北荆州洪湖市XX小区X栋X单元]  主叫号码：139xxxx
+        受理电话号码：0716xxxx
+    取不到时回退表格里可能存在的同名列，再不行给空串（前端只是显示空）。
+    """
+    text = str(topic or "") + "\n" + str(content or "")
+    community = ""
+    m = re.search(r"\[\s*装机地址\s*[:：]\s*([^\]]{2,300}?)\s*\]", text)
+    if m:
+        community = _short_addr(m.group(1))
+    if not community:
+        community = _short_addr(row.get("所属小区") or row.get("小区名称") or row.get("小区简称"))
+    mf = re.search(r"主叫号码\s*[:：]\s*(\d{5,20})", text)
+    fault = mf.group(1) if mf else _pick_num(row, "故障号码", "主叫号码")
+    mc = re.search(r"受理电话号码\s*[:：]\s*(\d{5,20})", text)
+    contact = mc.group(1) if mc else ""
+    if not contact:
+        contact = _pick_num(row, "联系电话", "联系人")
+    return community, contact, fault
+
+
+def _cmp_contact(row: dict) -> dict:
+    """投诉宽表一行 → {community_name, contact_person, fault_number}"""
+    c, contact, fault = _complaint_contact(row.get("投诉主题"), row.get("投诉内容"), row)
+    return {"community_name": c, "contact_person": contact, "fault_number": fault}
 
 
 def _calc_timely(accept: str, done: str, hours: int) -> str:

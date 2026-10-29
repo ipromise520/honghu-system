@@ -35,76 +35,28 @@
             style="width:130px"
             @change="loadAll" />
           <el-button size="small" type="primary" :loading="loading" @click="loadAll">🔄 刷新</el-button>
-          <el-button size="small" @click="importOpen = !importOpen">📥 数据导入</el-button>
+          <el-button size="small" @click="importOpen = !importOpen">📊 数据源</el-button>
         </div>
       </div>
     </el-card>
 
-    <!-- 数据导入（折叠区） -->
+    <!-- 数据源（v1.6.8：与「数据同步」合并，一处导入全局生效） -->
     <el-card v-if="importOpen" shadow="never" class="import-card">
-      <div class="import-grid">
-        <div class="import-item">
-          <div class="import-name">① 投诉单综合（H5投诉）</div>
-          <el-upload :auto-upload="false" :limit="1" :accept="ACCEPT_TYPES"
-            :on-change="f => onFileChange('complaint', f)" :file-list="fileList.complaint"
-            @remove="() => onFileRemove('complaint')">
-            <el-button size="small">📎 选择文件</el-button>
-          </el-upload>
-          <el-checkbox v-model="replaceComplaint" size="small">替换全部历史批次</el-checkbox>
-          <el-button size="small" type="primary" :disabled="!files.complaint"
-            :loading="loadingUp.complaint" @click="uploadFile('complaint')">上传并入库</el-button>
-          <span v-if="result.complaint" class="up-res">✅ 入库 {{ result.complaint.inserted }} 条</span>
-        </div>
-        <div class="import-item">
-          <div class="import-name">② 装机待施工综合工单列表</div>
-          <el-upload :auto-upload="false" :limit="1" :accept="ACCEPT_TYPES"
-            :on-change="f => onFileChange('install', f)" :file-list="fileList.install"
-            @remove="() => onFileRemove('install')">
-            <el-button size="small">📎 选择文件</el-button>
-          </el-upload>
-          <el-button size="small" type="primary" :disabled="!files.install"
-            :loading="loadingUp.install" @click="uploadFile('install')">上传并入库</el-button>
-          <span v-if="result.install" class="up-res">✅ 入库 {{ result.install.inserted }} 条</span>
-        </div>
-        <div class="import-item">
-          <div class="import-name">③ 宽表查询-投诉</div>
-          <el-upload :auto-upload="false" :limit="1" :accept="ACCEPT_TYPES"
-            :on-change="f => onFileChange('wide', f)" :file-list="fileList.wide"
-            @remove="() => onFileRemove('wide')">
-            <el-button size="small">📎 选择文件</el-button>
-          </el-upload>
-          <el-button size="small" type="primary" :disabled="!files.wide"
-            :loading="loadingUp.wide" @click="uploadWide">上传并匹配</el-button>
-          <span v-if="result.wide" class="up-res">✅ 匹配 {{ result.wide.rows }} 条 / 回填 {{ result.wide.updated_complaint }} 条</span>
-        </div>
-        <div class="import-item">
-          <div class="import-name">④ 宽表查询-装机</div>
-          <el-upload :auto-upload="false" :limit="1" :accept="ACCEPT_TYPES"
-            :on-change="f => onFileChange('wideInstall', f)" :file-list="fileList.wideInstall"
-            @remove="() => onFileRemove('wideInstall')">
-            <el-button size="small">📎 选择文件</el-button>
-          </el-upload>
-          <el-button size="small" type="primary" :disabled="!files.wideInstall"
-            :loading="loadingUp.wideInstall" @click="uploadWideInstall">上传并匹配</el-button>
-          <span v-if="result.wideInstall" class="up-res">✅ 匹配 {{ result.wideInstall.rows }} 条 / 回填 {{ result.wideInstall.matched }} 条</span>
-        </div>
+      <div class="src-line">
+        <span class="src-label">数据源</span>
+        <el-tag size="small" effect="plain">装机应发 ← 数据同步 · 装机宽表</el-tag>
+        <el-tag size="small" effect="plain" type="warning">投诉应发 ← 数据同步 · 投诉宽表</el-tag>
+        <el-tag size="small" effect="plain" type="success">已参评 ← 数据同步 · H5满意度通报</el-tag>
+        <el-button size="small" type="primary" plain class="src-go" @click="goSync">前往数据同步</el-button>
       </div>
-      <div class="import-hint">💡 家宽投诉/装机表生成应发清单；宽表-投诉补齐投诉工单的小区名称、联系人、故障号码；宽表-装机按工单编码匹配回填最新状态、所属网格与缺失字段</div>
+      <div class="import-hint">
+        💡 本页不再单独导入：在「数据同步」上传一次，看板 / 宽表查询 / 本页同时生效。
+        回执自动从「H5满意度通报」的装机回复详单匹配；没有详单的单，可在下方清单里手动标「已参评」。
+      </div>
     </el-card>
 
-    <!-- 2 张统计卡片 -->
+    <!-- 2 张统计卡片（v1.6.8：装机在左、投诉在右） -->
     <el-row :gutter="12" class="cards-row">
-      <el-col :xs="24" :sm="12">
-        <el-card shadow="never" class="stat-card" body-style="padding:14px">
-          <div class="card-head"><span class="card-title">🏠 投诉 H5（家庭市场 HB-058）</span></div>
-          <div class="card-grid">
-            <div class="cell"><div class="num">{{ stats.complaint.total }}</div><div class="lab">应发</div></div>
-            <div class="cell ok"><div class="num">{{ stats.complaint.received }}</div><div class="lab">已收</div></div>
-            <div class="cell warn"><div class="num">{{ stats.complaint.pending }}</div><div class="lab">未收</div></div>
-            <div class="cell"><div class="num">{{ stats.complaint.ratio }}%</div><div class="lab">收取率</div></div>
-          </div>
-        </el-card>
-      </el-col>
       <el-col :xs="24" :sm="12">
         <el-card shadow="never" class="stat-card" body-style="padding:14px">
           <div class="card-head"><span class="card-title">📶 装机 H5（个人宽带）</span></div>
@@ -113,6 +65,17 @@
             <div class="cell ok"><div class="num">{{ stats.install.received }}</div><div class="lab">已收</div></div>
             <div class="cell warn"><div class="num">{{ stats.install.pending }}</div><div class="lab">未收</div></div>
             <div class="cell"><div class="num">{{ stats.install.ratio }}%</div><div class="lab">收取率</div></div>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :sm="12">
+        <el-card shadow="never" class="stat-card" body-style="padding:14px">
+          <div class="card-head"><span class="card-title">🏠 投诉 H5（家庭市场 HB-058）</span></div>
+          <div class="card-grid">
+            <div class="cell"><div class="num">{{ stats.complaint.total }}</div><div class="lab">应发</div></div>
+            <div class="cell ok"><div class="num">{{ stats.complaint.received }}</div><div class="lab">已收</div></div>
+            <div class="cell warn"><div class="num">{{ stats.complaint.pending }}</div><div class="lab">未收</div></div>
+            <div class="cell"><div class="num">{{ stats.complaint.ratio }}%</div><div class="lab">收取率</div></div>
           </div>
         </el-card>
       </el-col>
@@ -154,7 +117,7 @@
           </span>
         </span>
         <el-checkbox v-model="showUnfinished" size="small" @change="loadPending">
-          显示未完工工单（<span class="status-tag">#待预约、待施工、待地址确认、待调度</span>）
+          显示未完工工单
         </el-checkbox>
         <el-radio-group v-model="kind" size="small" @change="loadPending">
           <el-radio-button value="all">全部</el-radio-button>
@@ -282,9 +245,13 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import api from '../api'
 
 const ACCEPT_TYPES = '.xls,.xlsx,.csv'
+const router = useRouter()
+// 数据源统一到「数据同步」后，本页只负责看数（v1.6.8）
+function goSync() { router.push('/sync') }
 
 const district = ref('')
 const dateMode = ref('today')
@@ -523,7 +490,9 @@ onMounted(() => {
 .alert-body { margin-top: 8px; }
 .list-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .list-head .el-checkbox { font-weight: normal; }
-.list-head .status-tag { color: #909399; }
+.src-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.src-line .src-label { font-weight: 600; color: #303133; margin-right: 2px; }
+.src-line .src-go { margin-left: auto; }
 .list-tip { font-size: 12px; color: #909399; }
 .list-tools { margin-left: auto; display: flex; gap: 6px; }
 .time-range { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }

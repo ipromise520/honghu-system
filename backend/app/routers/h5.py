@@ -20,12 +20,14 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..config import OVERDUE_HOURS
 from ..database import get_db
-from ..models import (Alert, District, ExtensionMember, H5Complaint, H5Receipt, H5Session,
-                      H5SurveyDistrict, H5SurveyStaff, Setting, SyncJob, WorkOrder)
+from ..models import (Alert, ComplaintOrder, District, ExtensionMember, H5Complaint, H5Receipt,
+                      H5Session, H5SurveyDistrict, H5SurveyRecord, H5SurveyStaff, InstallOrder,
+                      Setting, SyncJob, WorkOrder)
 from ..deps import get_current_user, require_admin, scope_district_ids
 from ..utils_excel import parse_upload_sheets
 
@@ -131,32 +133,63 @@ def _strip_addr_prefix(v: str) -> str:
 # --------------------------------------------------------------------------
 # 应发明细派生
 # --------------------------------------------------------------------------
+def _adjudicate_install(db, rows):
+    """跨源状态裁决（与桌面端/装维端同一套规则，status_resolver 唯一真源）"""
+    from .metrics import _adh_install
+    return _adh_install(db, rows)
+
+
+def _adjudicate_complaint(db, rows):
+    from .metrics import _adh_complaint
+    return _adh_complaint(db, rows)
+
+
+def _back_col_install():
+    """装机的「回单时间」，缺失时回落受理时间；截到秒，避免 '...:44.0' 与 '...:44' 比较错位"""
+    return func.substr(func.coalesce(func.nullif(InstallOrder.completion_time, ""),
+                                     InstallOrder.accept_time), 1, 19)
+
+
 def _derive_install(db: Session, start, end, district, hide_unfinished, name_scope) -> list[dict]:
-    """装机 H5 应发：work_orders（个人宽带、27 开头定单编码）"""
-    dmap = {d.id: d.name for d in db.query(District).all()}
-    q = db.query(WorkOrder).filter(WorkOrder.status.in_(ISSUE_STATUSES),
-                                   WorkOrder.broadband_type == "个人",
-                                   WorkOrder.order_id.like("27%"))
+    """装机 H5 应发：install_orders（「数据同步 → 装机宽表」）
+
+    v1.6.8 起只读装机宽表。原来读 work_orders（H5盯控页自带的独立上传口），
+    那份数据停在 10-22，用户在「数据同步」传了宽表也看不到任何数。
+    宽表自带 所属小区 / 服务号码（见 sync.py 的 _normalize_install_wide），
+    所以这里不再需要「宽表查询-装机」单独回填。
+    """
+    bt = _back_col_install()
+    q = db.query(InstallOrder).filter(
+        # SQL 层先放宽：宽表可能滞后 2 小时（还是「处理中」），实时查询已判成「已施工」，
+        # 如果这里只放 ISSUE_STATUSES，这类单在裁决前就被筛掉了。裁决后再精确判一次。
+        InstallOrder.status.in_(ISSUE_STATUSES + ("处理中",)),
+        InstallOrder.order_id.like("27%"),
+        # 宽表 broadband_type 有空值（导出缺失），业务主题均为家宽类，空值视为个人；
+        # 「小微」是明确的非个人，排除。
+        func.coalesce(InstallOrder.broadband_type, "").in_(("个人", "")),
+        # 全空壳行（状态/处理人/环节都空，仅剩区县和受理时间）是导出残缺记录，不是真实在途单
+        or_(InstallOrder.handler != "", InstallOrder.current_step != ""),
+        bt >= _fmt(start), bt < _fmt(end))
+    if district:
+        q = q.filter(InstallOrder.district == district)
     if name_scope is not None:
-        ids = [i for i, n in dmap.items() if n in name_scope]
-        q = q.filter(WorkOrder.district_id.in_(ids or [-1]))
+        q = q.filter(InstallOrder.district.in_(list(name_scope) or ["-"]))
+    rows = q.all()
+    _adjudicate_install(db, rows)          # 跨源裁决：实时判成已撤单的单不该再催 H5
     out = []
-    for o in q.all():
-        bt = _norm_dt(o.completion_time) or _norm_dt(o.accept_time)
-        if not bt or not (start <= bt < end):
+    for o in rows:
+        status = _clean(getattr(o, "_st_status", "") or o.status)
+        if status not in ISSUE_STATUSES:
             continue
-        dist = dmap.get(o.district_id, "")
-        if district and dist != district:
-            continue
-        status = _clean(o.status)
         if hide_unfinished and status in UNFINISHED_STATUSES:
             continue
+        bt_s = _clean(o.completion_time) or _clean(o.accept_time)
         out.append({
-            "order_no": o.order_id, "kind": "install", "district": dist,
-            "district_unknown": not bool(dist), "handler": _clean(o.construction_dept),
-            "grid": _clean(o.grid), "back_time": _fmt(bt), "accept_time": _clean(o.accept_time),
+            "order_no": o.order_id, "kind": "install", "district": _clean(o.district),
+            "district_unknown": not bool(o.district), "handler": _clean(o.handler),
+            "grid": _clean(o.grid), "back_time": bt_s, "accept_time": _clean(o.accept_time),
             "status": status, "community_name": _clean(o.community_name),
-            "contact_person": _clean(o.construction_dept),
+            "contact_person": _clean(o.handler),
             "fault_number": _clean(o.service_number),
             "service_number": _clean(o.service_number),
         })
@@ -164,34 +197,66 @@ def _derive_install(db: Session, start, end, district, hide_unfinished, name_sco
 
 
 def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_scope) -> list[dict]:
-    """投诉 H5 应发：h5_complaint（HB-058 前缀）"""
-    q = db.query(H5Complaint).filter(H5Complaint.eoms_order_no.like(COMPLAINT_PREFIX + "%"),
-                                     H5Complaint.order_status.in_(ISSUE_STATUSES))
+    """投诉 H5 应发：complaint_orders（「数据同步 → 投诉宽表」）
+
+    原来读 h5_complaint（独立上传口，停在 10-22）。投诉宽表的小区/号码从
+    「投诉内容」正文里解析写入（见 sync.py 的 _cmp_contact）。
+    """
+    t = func.substr(func.coalesce(func.nullif(ComplaintOrder.accept_time, ""), ""), 1, 19)
+    q = db.query(ComplaintOrder).filter(
+        ComplaintOrder.eoms_no.like(COMPLAINT_PREFIX + "%"),
+        ComplaintOrder.status.in_(ISSUE_STATUSES + ("处理中",)),
+        t >= _fmt(start), t < _fmt(end))
+    if district:
+        q = q.filter(ComplaintOrder.district == district)
+    if name_scope is not None:
+        q = q.filter(ComplaintOrder.district.in_(list(name_scope) or ["-"]))
+    rows = q.all()
+    _adjudicate_complaint(db, rows)
     out = []
-    for c in q.all():
-        t = _norm_dt(c.accept_time)
-        if not t or not (start <= t < end):
+    for c in rows:
+        status = _clean(getattr(c, "_st_status", "") or c.status)
+        if status not in ISSUE_STATUSES:
             continue
-        dist = _norm_district(c.district)
-        if district and dist != district:
-            continue
-        if name_scope is not None and dist not in name_scope:
-            continue
-        status = _clean(c.order_status)
         if hide_unfinished and status in UNFINISHED_STATUSES:
             continue
+        dist = _clean(c.district)
         out.append({
-            "order_no": c.eoms_order_no, "kind": "complaint", "district": dist,
-            "district_unknown": not bool(dist), "handler": _clean(c.construction_dept_person),
-            "grid": _clean(c.grid), "back_time": _fmt(t), "accept_time": _clean(c.accept_time),
-            "status": status, "community_name": _clean(c.community_name),
-            "contact_person": _clean(c.contact_person), "fault_number": _clean(c.fault_number),
+            "order_no": c.eoms_no, "kind": "complaint", "district": dist,
+            "district_unknown": not bool(dist), "handler": _clean(c.handler),
+            "grid": _clean(c.grid), "back_time": _clean(c.accept_time),
+            "accept_time": _clean(c.accept_time), "status": status,
+            "community_name": _clean(c.community_name),
+            "contact_person": _clean(c.contact_person),
+            "fault_number": _clean(c.fault_number),
         })
     return out
 
 
 def _receipt_map(db: Session) -> dict:
-    return {(r.order_no, r.kind): _clean(r.h5_received) for r in db.query(H5Receipt).all()}
+    """(工单号, 类型) → 已参评 / 空。
+
+    两个来源合并，**缺一不可**：
+      ① h5_survey_records —— 「H5满意度通报」里的装机H5回复详单，是**真实回执**。
+         实测 2556 条装机详单里 2470 条能对上装机宽表（96.6%）。
+      ② h5_receipts —— 网格长在页面上手动点「已参评」补标的，以及历史遗留记录。
+    投诉详单用的是 CRM 工单号（20261001114634X…），与 EOMS 单号（HB-058-…）
+    是两套编号体系，无法自动关联，投诉只能靠 ② 手动标记。
+    """
+    m: dict = {}
+    try:
+        for (no,) in db.query(H5SurveyRecord.order_no).filter(
+                H5SurveyRecord.kind == "装机",
+                H5SurveyRecord.order_no != "",
+                H5SurveyRecord.reply_time != "").all():
+            if no:
+                m[(no, "install")] = "已参评"
+    except Exception:
+        pass
+    # 人工标记后写覆盖：非空=手动标已参评，空=手动取消（点错了要能撤回来）
+    for r in db.query(H5Receipt).all():
+        m[(_clean(r.order_no), _clean(r.kind))] = _clean(r.h5_received) or ""
+    return m
 
 
 def _is_received(item: dict, rmap: dict) -> bool:
@@ -303,7 +368,15 @@ def h5_receipt_list(kind: str = Query("all"), date: str = Query("today"), distri
                     user=Depends(get_current_user), db: Session = Depends(get_db)):
     """已收清单：已标记「已参评」的应发工单（按工单时间窗口，与待收清单口径一致）"""
     items, rmap = _collect(db, user, date, start_dt, end_dt, district, False, kind)
+    # 标记时间：手动标记用 h5_receipts.updated_at；来自回复详单的用 reply_time（否则整列空着）
     rmap_ts = {(r.order_no, r.kind): _fmt(r.updated_at) for r in db.query(H5Receipt).all()}
+    try:
+        for no, rt in db.query(H5SurveyRecord.order_no, H5SurveyRecord.reply_time).filter(
+                H5SurveyRecord.kind == "装机", H5SurveyRecord.order_no != "",
+                H5SurveyRecord.reply_time != "").all():
+            rmap_ts.setdefault((no, "install"), rt or "")
+    except Exception:
+        pass
     out = []
     for p in items:
         if not _is_received(p, rmap):
