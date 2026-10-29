@@ -132,11 +132,39 @@ def _pick(atts: dict, key: str) -> bytes:
 
 
 def _parse(raw: bytes) -> pd.DataFrame:
-    return pd.read_excel(io.BytesIO(raw), sheet_name=0, header=2, engine="openpyxl")
+    """解析附件。
+
+    省公司附件可能**内容为空**（只含一个空单元格），此时 header=2 读出来是
+    零列 DataFrame，后续 df.columns[1] 会 IndexError。这里统一兜底返回空表
+    （保留原列结构语义：无列）。
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(raw), sheet_name=0, header=2, engine="openpyxl")
+    except Exception as e:                     # 文件损坏 / 非 xlsx / 完全空白
+        print(f"[alerts] 附件解析失败，按空表处理: {e}", flush=True)
+        return pd.DataFrame()
+    if df is None or len(df.columns) == 0:
+        # 省公司偶尔改表头行数（不是固定前 2 行），退回 header=0 再试一次，
+        # 能读出列就用，读不出才当空表。
+        try:
+            alt = pd.read_excel(io.BytesIO(raw), sheet_name=0, header=0, engine="openpyxl")
+            if alt is not None and len(alt.columns) > 1:
+                print("[alerts] 附件按 header=2 无列，已回退 header=0 解析成功", flush=True)
+                return alt
+        except Exception:
+            pass
+        return pd.DataFrame()
+    return df
 
 
 def _jz(df: pd.DataFrame) -> pd.DataFrame:
-    """只保留荆州地市数据"""
+    """只保留荆州地市数据。
+
+    ⚠️ 必须先判空：空 DataFrame 的 columns 是 RangeIndex(0)，取 [1] 直接 IndexError，
+    而 IndexError 不在调用方 except RuntimeError 的捕获范围内 → 整轮同步失败。
+    """
+    if df is None or len(df.columns) == 0:
+        return df if df is not None else pd.DataFrame()
     col = "地市名称" if "地市名称" in df.columns else df.columns[1]
     return df[df[col].astype(str).str.contains(CITY, na=False)]
 
@@ -159,16 +187,27 @@ def sync_alerts(db: Session) -> dict:
     info = fetch_mail()
     atts = info["attachments"]
     df1 = _jz(_parse(_pick(atts, "投诉清单")))          # 装机+投诉清单（必需）
+    if df1 is None or len(df1) == 0:
+        # 省公司偶发推送「空附件」（只含一个空单元格），read_excel 得到零列，
+        # 继续往下会 IndexError 且信息不可读。这里直接给出人能看懂的原因。
+        raise RuntimeError(
+            "省公司本次推送的「投诉清单」附件为空（%s），"
+            "未产生预警数据。请等下一轮邮件，或联系省公司确认。"
+            % info.get("subject", ""))
     df2 = df3 = None
     export_time = _export_time(_pick(atts, "投诉清单"))
     try:                                                # 预约状态清单（可选）
         df2 = _jz(_parse(_pick(atts, "预约状态清单")))
-    except RuntimeError:
-        pass
+    except Exception as e:                              # 缺失/为空/结构异常都降级为「无」
+        print(f"[alerts] 预约状态清单不可用，按空处理: {e}", flush=True)
+        df2 = None
     try:                                                # 人员单量预警（可选，部分时段无此附件）
         df3 = _jz(_parse(_pick(atts, "监控预警")))
-    except RuntimeError:
-        pass
+    except Exception as e:                              # 同上：空附件是常态，不能拖垮整轮
+        print(f"[alerts] 监控预警不可用，按空处理: {e}", flush=True)
+        df3 = None
+    if df3 is not None and len(df3) == 0:
+        print("[alerts] 监控预警附件为空（省公司未生成预警），黄/红告警计 0", flush=True)
     # 注：千里眼.xlsx(千里眼-加装工单清单)/待区县.xlsx(家宽投诉施工单) 均非人员预警表，不作为监控预警数据源
 
     rows: list[dict] = []
@@ -205,6 +244,21 @@ def sync_alerts(db: Session) -> dict:
             order_count=int(r.get("工单量") or 0) if _s(r.get("工单量")) else 0))
     n_yellow = sum(1 for r in rows if r["type"] == "monitor" and "黄" in r["warn_level"])
     n_red = sum(1 for r in rows if r["type"] == "monitor" and "红" in r["warn_level"])
+    # 监控预警附件为空：说明省公司本次没生成预警数据（不是「人数归零」）。
+    # 此时沿用上一轮快照的 monitor 行，避免黄/红告警卡片被误清零。
+    if df3 is None or len(df3) == 0:
+        prev = db.query(AlertOrder).filter(AlertOrder.type == "monitor").all()
+        for r in prev:
+            rows.append(dict(
+                type="monitor", district=r.district, grid=r.grid, handler=r.handler,
+                warn_level=r.warn_level, warn_time=r.warn_time, order_count=r.order_count))
+        n_yellow = sum(1 for r in prev if "黄" in (r.warn_level or ""))
+        n_red = sum(1 for r in prev if "红" in (r.warn_level or ""))
+        if prev:
+            print(f"[alerts] 沿用上一轮监控预警 {len(prev)} 行（黄{n_yellow}/红{n_red}）", flush=True)
+
+    if not rows:
+        raise RuntimeError("解析附件后无任何预警数据，为保护现有快照本轮不做替换")
 
     # ---- 替换式入库：清旧 → 插新 → 更新 meta ----
     db.query(AlertOrder).delete()
