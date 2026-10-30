@@ -866,6 +866,203 @@ def completion_multidim(req: _MultiDimReq,
     }
 
 
+# ============================ 来单分析（v1.8.0） ============================
+# 移植自 Streamlit「待装工单盯控」的 5 块功能，数据**全部**读装机宽表 install_orders
+# （即「数据同步 → 装机宽表」维护的那张表），口径与竣工率多维分析完全一致。
+#
+# 设计要点：
+#   * 只新增接口，不改动 multidim / drill 的既有行为
+#   * 所有分组聚合调 _agg()，与 21 维度表同一套 _pick()，不会出现「卡片 N / 明细 0」
+#   * 状态一律用 _status_of(r)（裁决后），不用 r.status（宽表原始值）
+
+_INTAKE_UNASSIGNED = "(未分配)"
+_INTAKE_NOSTATE = "(无状态)"
+
+# 按单量分档的告警阈值（用户 2026-10-30 确认：≥5 高负荷 / 3~4 偏高 / ≤2 正常）
+_INTAKE_WARN_HIGH = 5
+_INTAKE_WARN_MID = 3
+
+
+def _intake_handler(r) -> str:
+    """取处理人。空处理人分两种，必须分开统计：
+    - 无状态单（status/step/theme 全空）：压根没进流程，谈不上「分配给谁」
+    - 其余空处理人：确实未指派，单独成行，否则各人加总对不上总数
+    """
+    h = (r.handler or "").strip()
+    if h:
+        return h
+    return _INTAKE_NOSTATE if _is_nostate(r) else _INTAKE_UNASSIGNED
+
+
+def _intake_is_pending(r, include_nostate: bool = False) -> bool:
+    """是否算「待装」（未完工且未退撤）。
+
+    口径与竣工率页「在途压单」（_pick(rows, "pending") → is_pending()）保持**完全一致**，
+    两处卡片数字必须相等，否则同一页面两个数字打架。
+
+    历史版本曾把「全字段空白」的无状态单也算进来，实测洪湖 10 月会凭空多出 2480 单压单
+    （占全量 10.8%），与「在途压单 148」矛盾。现改为默认不算；这些单在「全量来单」
+    口径里归入 (无状态) 独立分组展示，盯控不被遗漏。
+    include_nostate 仅供排查用，默认 False。
+    """
+    st = _status_of(r)
+    if is_pending(st):
+        return True
+    if include_nostate and _is_nostate(r) and not st:
+        return True
+    return False
+
+
+def _intake_day(t: str) -> str:
+    return (t or "")[:10]
+
+
+class _IntakeReq(BaseModel):
+    month: str
+    district: str = ""
+    scope: str = "all"          # all=全量来单 / pending=仅待装（Streamlit 原口径）
+    handler: str = ""           # 可选：只看某个处理人（点人名时用）
+
+
+@router.post("/completion/intake")
+def completion_intake(req: _IntakeReq,
+                      user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """来单分析：统计信息 / 按人图表 / 详细统计表 / 压单分组 / 网格压单 / 人员详情
+
+    一次请求返回全部 5 块数据，前端只发一次，避免 46 个人各发一次请求。
+    """
+    rows = _grid_rows(db, req.month, req.district)
+
+    scope = (req.scope or "all").strip()
+    if scope == "pending":
+        rows = [r for r in rows if _intake_is_pending(r)]
+
+    if not rows:
+        return {"has_data": False, "month": req.month,
+                "district": req.district or "全部区县", "scope": scope}
+
+    # ---------- ① 统计信息 ----------
+    states = sorted({_status_of(r) or "(空)" for r in rows})
+    t = _agg(rows)
+    info = {
+        "records": len(rows),                                    # 生成记录数
+        "refund_back": len(_pick(rows, "refund")),               # 退单打回
+        "state_count": len(states),                              # 选择状态数
+        "states": states,
+        "days": sorted({_intake_day(r.accept_time) for r in rows if _intake_day(r.accept_time)}),
+        "fttr_yes": t["come"] and len([r for r in rows if (r.is_fttr or "") == "是"]) or 0,
+        "fttr_all": len([r for r in rows if (r.is_fttr or "") == "是"]) == len(rows),
+        "total": t,
+    }
+
+    # ---------- 按处理人分组（② ③ ④ 共用） ----------
+    by_handler = {}
+    for r in rows:
+        by_handler.setdefault(_intake_handler(r), []).append(r)
+
+    today = _time.strftime("%Y-%m-%d")
+    people = []
+    for name, rs in by_handler.items():
+        a = _agg(rs)
+        # 所属网格：一人可能跨多网格（实测「万里」跨 4 个），取单量最多的为主网格
+        gc = {}
+        for r in rs:
+            gg = _std_grid((r.grid or "").strip(), r.district) if (r.grid or "").strip() else "未知(未映射)"
+            gc[gg] = gc.get(gg, 0) + 1
+        gc_sorted = sorted(gc.items(), key=lambda x: -x[1])
+        main_grid = gc_sorted[0][0] if gc_sorted else "未知(未映射)"
+        # 今日受理 / 今日完工（按日期前缀，宽表无独立字段）
+        today_accept = len([r for r in rs if _intake_day(r.accept_time) == today])
+        today_done = len([r for r in rs if _intake_day(r.completion_time) == today])
+        # 压单时长：最早受理时间距今天数（越大越久）
+        acc_days = [_intake_day(r.accept_time) for r in rs if _intake_day(r.accept_time)]
+        oldest = min(acc_days) if acc_days else ""
+        pend = len([r for r in rs if _intake_is_pending(r)])
+        lvl = ("高负荷" if pend >= _INTAKE_WARN_HIGH
+               else "偏高" if pend >= _INTAKE_WARN_MID
+               else "正常")
+        people.append({
+            "name": name,
+            "is_unassigned": name in (_INTAKE_UNASSIGNED, _INTAKE_NOSTATE),
+            "grid": main_grid,
+            "grid_count": len(gc_sorted),
+            "grid_extra": [{"grid": g, "n": n} for g, n in gc_sorted[1:4]],
+            "today_accept": today_accept,
+            "today_done": today_done,
+            "today_rate": _pct(today_done, today_accept) if today_accept else None,
+            "count": a["come"],          # 单量（该范围内）
+            "pending": pend,
+            "done": a["done"],
+            "oldest_accept": oldest,
+            "warn": lvl,
+            **{k: a[k] for k in ("cancel", "refund", "rate_eff")},
+        })
+    # 未分配/无状态固定排最后，其余按单量降序
+    people.sort(key=lambda x: (x["is_unassigned"], -x["count"], x["name"]))
+
+    # ---------- ② 图表数据（不含未分配/无状态，它们不是「人」） ----------
+    chart = [{"name": p["name"], "count": p["count"], "grid": p["grid"]}
+             for p in people if not p["is_unassigned"]]
+
+    # ---------- ④ 按单量分组分布 ----------
+    dist = {}
+    for p in people:
+        if p["is_unassigned"]:
+            continue
+        dist[p["count"]] = dist.get(p["count"], 0) + 1
+    dist_rows = [{"count": k, "people": v, "orders": k * v}
+                 for k, v in sorted(dist.items(), key=lambda x: -x[0])]
+
+    # ---------- ④ 按网格压单 ----------
+    by_grid = {}
+    for r in rows:
+        g = _std_grid((r.grid or "").strip(), r.district) if (r.grid or "").strip() else "未知(未映射)"
+        by_grid.setdefault(g, []).append(r)
+    grid_rows = []
+    for g, rs in by_grid.items():
+        a = _agg(rs)
+        pend_rs = [r for r in rs if _intake_is_pending(r)]
+        grid_rows.append({
+            "grid": g,
+            "is_unknown": g.startswith("未知"),
+            "count": a["come"],
+            "pending": len(pend_rs),
+            "done": a["done"],
+            "people": len({_intake_handler(r) for r in rs if not _intake_handler(r).startswith("(")}),
+            "rate_eff": a["rate_eff"],
+        })
+    grid_rows.sort(key=lambda x: (x["is_unknown"], -x["pending"]))
+
+    # ---------- ④ 人员工单详情（每个人的压单概况） ----------
+    staff = [{
+        "name": p["name"], "grid": p["grid"], "pending": p["pending"],
+        "count": p["count"], "oldest_accept": p["oldest_accept"], "warn": p["warn"],
+    } for p in people if not p["is_unassigned"]]
+
+    pend_total = len([r for r in rows if _intake_is_pending(r)])
+    return {
+        "has_data": True,
+        "month": req.month,
+        "district": req.district or "全部区县",
+        "scope": scope,
+        "today": today,
+        "info": info,
+        "chart": chart,
+        "people": people,
+        "dist": dist_rows,
+        "grids": grid_rows,
+        "staff": staff,
+        "summary": {
+            "orders": len(rows),
+            "pending": pend_total,
+            "people": len(chart),
+            "top": chart[0]["name"] if chart else "",
+            "top_count": chart[0]["count"] if chart else 0,
+        },
+        "note": "数据源：装机宽表（数据同步 → 装机宽表）。状态取跨源裁决结果，与竣工率多维分析同口径。",
+    }
+
+
 class _DrillReq(BaseModel):
     month: str
     district: str = ""
@@ -874,6 +1071,11 @@ class _DrillReq(BaseModel):
     keyword: str = ""
     page: int = 1
     page_size: int = 50
+    # v1.8.0 来单分析点人名时用；默认空串 = 不加限制，原有调用行为完全不变
+    handler: str = ""
+    # v1.8.0 来单分析「仅待装」口径下钻取要跟着收窄，否则卡片 18 / 明细 1538。
+    # 取值 all（默认，原行为不变）/ pending
+    scope: str = "all"
 
 
 @router.post("/completion/drill")
@@ -892,6 +1094,13 @@ def completion_drill(req: _DrillReq,
             rows = [r for r in rows if _std_grid((r.grid or "").strip(), r.district) == req.grid]
 
     rows = _pick(rows, req.metric)
+
+    # v1.8.0：按处理人过滤（来单分析点人名弹抽屉）。
+    # 判定复用 _intake_handler，保证「(未分配)」「(无状态)」两个虚拟组也能钻取。
+    if (req.scope or "all").strip() == "pending":
+        rows = [r for r in rows if _intake_is_pending(r)]
+    if (req.handler or "").strip():
+        rows = [r for r in rows if _intake_handler(r) == req.handler.strip()]
 
     kw = (req.keyword or "").strip()
     if kw:
@@ -928,6 +1137,12 @@ def completion_drill(req: _DrillReq,
             "is_perform": r.is_perform or "",
             "broadband_type": r.broadband_type or "",
             "current_step": r.current_step or "",
+            # v1.8.0：来单分析个人详情需要的 3 列（原有调用方不读则忽略，无副作用）
+            "is_fttr": r.is_fttr or "",
+            "is_high_quality": r.is_high_quality or "",
+            "urge_cnt": r.urge_cnt or 0,
+            "appointment_time": (r.appointment_time or "")[:16],
+            "district_name": r.district or "",
         } for r in page_rows],
     }
 

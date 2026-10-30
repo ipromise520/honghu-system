@@ -11,6 +11,7 @@
       <el-radio-group v-model="viewMode" size="small">
         <el-radio-button value="grid">按网格</el-radio-button>
         <el-radio-button value="dim">按维度</el-radio-button>
+        <el-radio-button value="intake">来单分析</el-radio-button>
       </el-radio-group>
       <div class="spacer" />
       <span class="data-tip">
@@ -22,13 +23,16 @@
 
     <el-skeleton v-if="loading && !data.has_data" :rows="10" animated />
 
-    <!-- ============ 空态 ============ -->
     <el-empty v-else-if="!data.has_data" :image-size="120"
               :description="`${month} 暂无装机宽表数据`">
       <el-button type="primary" @click="goSync">去「数据同步」上传装机宽表</el-button>
     </el-empty>
 
-    <template v-else>
+    <!-- v1.8.0 坑 1：v-else 必须是整条链的最后一支，其后不能再跟 v-else-if，
+         否则 Vue 3.5 processIf 直接报「no adjacent v-if」。所以顶上这支显式写全条件。
+         坑 2：这里**不能**写 v-else-if="true" —— 编译器会把静态真值简化掉，
+         后续 v-else-if 变成死代码，运行时切到「来单分析」渲染空白。 -->
+    <template v-else-if="viewMode === 'grid' || viewMode === 'dim'">
       <!-- ============ 全区总览 ============ -->
       <div class="section-title">
         <span class="bar" />全区总览
@@ -175,8 +179,7 @@
         </el-table>
       </template>
 
-      <!-- ============ 按维度视图 ============ -->
-      <template v-else>
+      <template v-else-if="viewMode === 'dim'">
         <div class="section-title">
           <span class="bar" />维度总览
           <span class="muted-sm">每个数字都可点击查看明细</span>
@@ -253,14 +256,205 @@
         </div>
       </div>
     </template>
+    <template v-else>
+      <el-skeleton v-if="intake.loading && !intake.data.has_data" :rows="8" animated />
+
+      <template v-else-if="intake.data.has_data">
+        <!-- ---- 口径开关 ---- -->
+        <div class="ik-scope">
+          <el-radio-group v-model="intake.scope" size="small" @change="loadIntake">
+            <el-radio-button value="all">全量来单</el-radio-button>
+            <el-radio-button value="pending">仅待装</el-radio-button>
+          </el-radio-group>
+          <span class="ik-scope-tip">
+            {{ intake.scope === 'pending'
+              ? '只看未完工、未退撤的待装单，口径与上方「在途压单」完全一致'
+              : '整月全部受理单，看结构与负荷分布（含无状态单，单独成组不混入待装）' }}
+          </span>
+          <template v-if="intake.scope === 'all'">
+            <el-divider direction="vertical" />
+            <el-button link type="primary" size="small"
+                       @click="openDrill('', 'pending', '在途压单')">
+              其中待装 {{ intake.data.summary.pending }} 单 · 查看明细
+            </el-button>
+          </template>
+          <div class="spacer" />
+          <el-tag size="small" type="info" effect="plain">{{ intake.data.district }} · {{ intake.data.month }}</el-tag>
+        </div>
+
+        <!-- ---- ① 统计信息 ---- -->
+        <div class="section-title"><span class="bar" />统计信息</div>
+        <div class="ik-info">
+          <div class="ik-cell" @click="openDrill('', 'come', '全部来单')">
+            <div class="ik-lb">生成记录数</div>
+            <div class="ik-val">{{ intake.data.info.records }}</div>
+            <div class="ik-sub">{{ intake.scope === 'pending' ? '待装单' : '受理单' }}</div>
+          </div>
+          <div class="ik-cell" @click="openDrill('', 'refund', '退单打回')">
+            <div class="ik-lb">退单打回</div>
+            <div class="ik-val">{{ intake.data.info.refund_back }}</div>
+            <div class="ik-sub">退回重派</div>
+          </div>
+          <div class="ik-cell">
+            <div class="ik-lb">选择状态数</div>
+            <div class="ik-val">{{ intake.data.info.state_count }}</div>
+            <div class="ik-sub">{{ (intake.data.info.states || []).join(' / ') }}</div>
+          </div>
+          <div class="ik-cell">
+            <div class="ik-lb">时间范围</div>
+            <div class="ik-val small">{{ intake.data.info.days?.[0] || '—' }} ~ {{ intake.data.info.days?.at(-1) || '—' }}</div>
+            <div class="ik-sub">按受理时间</div>
+          </div>
+          <div class="ik-cell">
+            <div class="ik-lb">是否FTTR</div>
+            <div class="ik-val small">{{ intake.data.info.fttr_all ? '全部' : (intake.data.info.fttr_yes || 0) + ' 单' }}</div>
+            <div class="ik-sub">{{ intake.data.info.fttr_all ? '全部为 FTTR' : 'FTTR 单量' }}</div>
+          </div>
+        </div>
+
+        <!-- ---- ② 当前处理人统计图表 ---- -->
+        <div class="section-title">
+          <span class="bar" />当前处理人统计图表
+          <el-tooltip content="柱子颜色按单量从红到紫渐变" placement="top" :show-after="200">
+            <span class="hint-icon"><el-icon><QuestionFilled /></el-icon></span>
+          </el-tooltip>
+        </div>
+        <div class="ik-chart-card">
+          <div ref="intakeChartRef" class="ik-chart" />
+        </div>
+
+        <!-- ---- ③ 详细统计表 ---- -->
+        <div class="section-title">
+          <span class="bar" />详细统计表
+          <el-tag size="small" effect="plain">{{ intake.data.people.length }} 人（含未分配/无状态）</el-tag>
+          <span class="muted-sm">点击行看该人明细</span>
+        </div>
+        <el-table :data="intake.data.people" size="small" border class="ik-table"
+                  max-height="420" @row-click="onPersonRow">
+          <el-table-column prop="name" label="当前处理人" min-width="110" fixed>
+            <template #default="{ row }">
+              <span :class="{ 'ik-muted': row.is_unassigned }">{{ row.name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="所属网格" width="120">
+            <template #default="{ row }">
+              <span>{{ shortGrid(row.grid) }}</span>
+              <el-tag v-if="row.grid_count > 1" size="small" type="info" effect="plain" style="margin-left:4px">
+                +{{ row.grid_count - 1 }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="today_accept" label="当日受理" width="90" align="right" />
+          <el-table-column prop="today_done" label="当日完工" width="90" align="right" />
+          <el-table-column label="当日竣工率" width="100" align="right">
+            <template #default="{ row }">
+              <span v-if="row.today_rate === null || row.today_rate === undefined">—</span>
+              <span v-else :style="{ color: rateColor(row.today_rate) }">{{ row.today_rate }}%</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="count" label="单量" width="80" align="right" sortable />
+          <el-table-column prop="pending" label="待装" width="80" align="right" sortable />
+          <el-table-column label="告警状态" width="105" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="warnType(row.warn)" effect="dark">{{ row.warn }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <!-- ---- ④ 按工单 / 网格 / 人员压单情况 ---- -->
+        <div class="section-title"><span class="bar" />压单情况</div>
+        <div class="ik-alert-line">
+          待装工单共 <b>{{ intake.data.summary.pending }}</b> 件，涉及 <b>{{ intake.data.summary.people }}</b> 人
+        </div>
+        <el-collapse v-model="intake.panels" class="ik-collapse">
+          <el-collapse-item name="dist">
+            <template #title>
+              <span class="ik-cp-title">显示按工单数量分组详情</span>
+            </template>
+            <el-table :data="intake.data.dist" size="small" border>
+              <el-table-column prop="count" label="每人工单数" width="120" align="right" />
+              <el-table-column prop="people" label="人数" width="100" align="right" />
+              <el-table-column prop="orders" label="小计单量" width="110" align="right" />
+              <el-table-column label="占比" min-width="160">
+                <template #default="{ row }">
+                  <div class="ik-bar-wrap">
+                    <div class="ik-bar" :style="{ width: distPct(row.orders) + '%' }" />
+                    <span class="ik-bar-txt">{{ distPct(row.orders) }}%</span>
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item name="grid">
+            <template #title>
+              <span class="ik-cp-title">显示按网格待装情况</span>
+            </template>
+            <el-table :data="intake.data.grids" size="small" border>
+              <el-table-column label="网格" min-width="130">
+                <template #default="{ row }">
+                  <span :class="{ 'ik-muted': row.is_unknown }">{{ shortGrid(row.grid) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="count" label="单量" width="90" align="right" sortable />
+              <el-table-column prop="pending" label="待装" width="90" align="right" sortable />
+              <el-table-column prop="people" label="涉及人数" width="100" align="right" />
+              <el-table-column label="人均待装" width="100" align="right">
+                <template #default="{ row }">
+                  {{ row.people ? (row.pending / row.people).toFixed(1) : '—' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="有效竣工率" width="110" align="right">
+                <template #default="{ row }">
+                  <span :style="{ color: rateColor(row.rate_eff) }">{{ row.rate_eff }}%</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-collapse-item>
+
+          <el-collapse-item name="staff">
+            <template #title>
+              <span class="ik-cp-title">显示人员工单详情</span>
+            </template>
+            <div class="ik-staff">
+              <div v-for="p in intake.data.staff" :key="p.name" class="ik-staff-card" @click="openDrill('', 'come', p.name, p.name)">
+                <div class="ik-staff-name">
+                  {{ p.name }}
+                  <el-tag size="small" :type="warnType(p.warn)" effect="plain">{{ p.warn }}</el-tag>
+                </div>
+                <div class="ik-staff-grid">{{ shortGrid(p.grid) }}</div>
+                <div class="ik-staff-num">{{ p.pending }}<span>单待装</span></div>
+                <div class="ik-staff-sub">共 {{ p.count }} 单 · 最早 {{ p.oldest_accept || '—' }}</div>
+              </div>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+
+        <div class="ik-note">
+          {{ intake.data.note }}
+        </div>
+      </template>
+
+      <!-- 加载完但接口无数据（该月宽表一条都没有）时兜底 -->
+      <el-empty v-else :image-size="100" :description="month + ' 暂无来单数据'">
+        <el-button type="primary" @click="goSync">去「数据同步」上传装机宽表</el-button>
+      </el-empty>
+    </template>
+
+
 
     <!-- ============ 钻取明细抽屉 ============ -->
     <el-drawer v-model="drill.show" size="72%" :destroy-on-close="false">
       <template #header>
         <div class="drill-head">
           <span class="drill-title">
-            {{ drill.grid ? shortGrid(drill.grid) : '全区' }} ·
-            <b>{{ drill.label }}</b>
+            <template v-if="drill.handlerName">
+              <b>{{ drill.handlerName }}</b> · {{ drill.label }}
+            </template>
+            <template v-else>
+              {{ drill.grid ? shortGrid(drill.grid) : '全区' }} ·
+              <b>{{ drill.label }}</b>
+            </template>
           </span>
           <el-tag size="small" type="primary" effect="plain">共 {{ drill.total }} 单</el-tag>
         </div>
@@ -292,6 +486,14 @@
         <el-table-column prop="theme" label="业务主题" min-width="130" show-overflow-tooltip />
         <el-table-column prop="accept_time" label="受理时间" width="130" />
         <el-table-column prop="completion_time" label="完工时间" width="130" />
+        <!-- v1.8.0：来单分析要看的 3 列（Streamlit 原有，原抽屉没有） -->
+        <el-table-column prop="is_fttr" label="是否FTTR" width="95">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.is_fttr === '是' ? 'success' : 'info'">{{ row.is_fttr || '否' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="urge_cnt" label="催装次数" width="90" align="right" />
+        <el-table-column prop="appointment_time" label="前台预约时间" width="145" />
       </el-table>
 
       <div class="drill-pager">
@@ -304,17 +506,32 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Search, InfoFilled, QuestionFilled, WarningFilled } from '@element-plus/icons-vue'
+import * as echarts from 'echarts/core'
+import { BarChart, ScatterChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, ToolboxComponent, VisualMapComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import api from '../api'
+
+// 来单分析用：竖条柱状 + 视觉映射（彩虹色阶）+ 工具条（缩放/下载/表格视图）
+echarts.use([BarChart, ScatterChart, GridComponent, TooltipComponent,
+             ToolboxComponent, VisualMapComponent, CanvasRenderer])
 
 const router = useRouter()
 
 const month = ref(new Date().toISOString().slice(0, 7))
 const district = ref('洪湖市')          // 默认洪湖市（本项目主战场），可切「全部区县」
 const viewMode = ref('grid')
+// 来单分析（v1.8.0）
+const intake = reactive({
+  scope: 'all',           // all=全量来单 / pending=仅待装
+  loading: false,
+  panels: [],             // 折叠面板展开项
+  data: { has_data: false },
+})
 const loading = ref(false)
 const data = ref({ has_data: false, cols: [], grids: [], total: {}, unmapped: {} })
 
@@ -469,12 +686,15 @@ function goSync() {
 const drill = reactive({
   show: false, grid: '', label: '', metric: 'come', keyword: '',
   rows: [], total: 0, page: 1, pageSize: 50, loading: false,
+  handler: '', handlerName: '',     // v1.8.0 来单分析按人钻取
 })
 
-function openDrill(grid, metric, label) {
+function openDrill(grid, metric, label, handler = '') {
   drill.grid = grid || ''
   drill.metric = metric || 'come'
   drill.label = label || '来单'
+  drill.handler = handler || ''
+  drill.handlerName = handler || ''
   drill.keyword = ''
   drill.page = 1
   drill.show = true
@@ -496,6 +716,7 @@ async function loadDrill() {
       keyword: drill.keyword,
       page: drill.page,
       page_size: drill.pageSize,
+      handler: drill.handler || '',
     })
     drill.rows = r.rows || []
     drill.total = r.total || 0
@@ -514,11 +735,187 @@ function onSize(s) { drill.pageSize = s; drill.page = 1; loadDrill() }
 // 冲突单高亮：跨源状态不一致时给行加底色，方便一眼看出哪条要人工核
 const drillRowClass = ({ row }) => (row.status_conflict ? 'row-conflict' : '')
 
+// ---- 来单分析 ----
+const warnType = w => (w === '高负荷' ? 'danger' : w === '偏高' ? 'warning' : 'success')
+
+// 按单量分组的占比（用于面板里的横条）
+const distPct = n => {
+  const tot = (intake.data.dist || []).reduce((a, x) => a + x.orders, 0)
+  return tot ? +((n / tot) * 100).toFixed(1) : 0
+}
+
+async function loadIntake() {
+  intake.loading = true
+  try {
+    const r = await api.post('/metrics/completion/intake', {
+      month: month.value,
+      district: distParam(),
+      scope: intake.scope,
+    })
+    intake.data = r || { has_data: false }
+    await nextTick()
+    renderIntakeChart()
+  } catch (e) {
+    if (e?.name !== 'CanceledError') ElMessage.error('加载来单分析失败：' + (e?.response?.data?.detail || e.message))
+    intake.data = { has_data: false }
+  } finally {
+    intake.loading = false
+  }
+}
+
+// 点人名 → 复用钻取抽屉
+function onPersonRow(row) {
+  openDrill('', 'come', row.is_unassigned ? row.name : `${row.name} 的工单`, row.name)
+}
+
+// ---- ② 竖条图（照搬 Streamlit：竖排 + 彩虹色阶 + 横轴人名斜排） ----
+const intakeChartRef = ref()
+let intakeChart = null
+
+function renderIntakeChart() {
+  const el = intakeChartRef.value
+  if (!el) return
+  const list = intake.data.chart || []
+  if (!list.length) {
+    intakeChart?.dispose()
+    intakeChart = null
+    return
+  }
+  // 容器在 v-if 分支里时宽高为 0，直接 init 会得到空图（项目里 AiVisit 踩过同样的坑）
+  if (!intakeChart || intakeChart.isDisposed?.()) intakeChart = echarts.init(el)
+
+  const max = Math.max(...list.map(x => x.count), 1)
+  intakeChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: ps => {
+        const i = ps[0].dataIndex
+        const d = list[i]
+        return `<b>${d.name}</b><br/>所属网格：${shortGrid(d.grid)}<br/>工单数量：<b>${d.count}</b> 单`
+      },
+    },
+    toolbox: {
+      right: 8, top: 0,
+      feature: { dataZoom: {}, magicType: { type: ['bar'] }, saveAsImage: { name: '来单分析-按处理人' } },
+    },
+    grid: { left: 56, right: 76, top: 24, bottom: 108 },
+    // 色阶：与 Streamlit 一致，红(0) → 橙 → 黄 → 绿 → 青 → 蓝 → 紫(max)
+    visualMap: {
+      show: true, min: 0, max, right: 6, top: 60, orient: 'vertical',
+      itemHeight: 120, calculable: true, text: ['高', '低'],
+      inRange: { color: ['#f56c6c', '#ff9f43', '#ffd93d', '#67c23a', '#36cfc9', '#1a6fdb', '#9b59b6'] },
+      textStyle: { fontSize: 11 },
+    },
+    xAxis: {
+      type: 'category',
+      data: list.map(x => x.name),
+      axisLabel: { rotate: 45, fontSize: 10, interval: 0, color: '#606266' },
+      axisTick: { alignWithLabel: true },
+    },
+    yAxis: { type: 'value', name: '工单数量', nameTextStyle: { fontSize: 11 }, minInterval: 1 },
+    series: [{
+      type: 'bar',
+      data: list.map(x => x.count),
+      barMaxWidth: 26,
+      itemStyle: { borderRadius: [2, 2, 0, 0] },
+      // 单量够大才标数字，否则 46 个人挤在一起会糊
+      label: {
+        show: true, position: 'top', fontSize: 10,
+        formatter: p => (p.value >= Math.max(2, max * 0.15) ? p.value : ''),
+      },
+    }],
+  }, true)
+}
+
+// 切到「来单分析」时才首次加载；容器已渲染，直接画图不会得到空图
+watch(viewMode, v => {
+  if (v === 'intake' && !intake.data.has_data) loadIntake()
+  else if (v === 'intake') nextTick(renderIntakeChart)
+})
+
+// 窗口变化时重绘
+const onResize = () => intakeChart?.resize()
+window.addEventListener('resize', onResize)
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  intakeChart?.dispose()
+  intakeChart = null
+})
+
 onMounted(load)
 </script>
 
 <style scoped>
 .cr-page { padding: 4px; }
+
+/* ============ 来单分析（v1.8.0） ============ */
+.ik-scope {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: #fff; border-radius: 10px; padding: 10px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06); margin-bottom: 14px;
+}
+.ik-scope-tip { font-size: 12px; color: #909399; }
+.ik-info {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px;
+}
+.ik-cell {
+  background: #fff; border-radius: 10px; padding: 14px 16px; cursor: default;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06); border-left: 3px solid #1a6fdb;
+}
+.ik-cell:first-child { cursor: pointer; }
+.ik-cell:nth-child(2) { border-left-color: #f56c6c; cursor: pointer; }
+.ik-cell:nth-child(3) { border-left-color: #e6a23c; }
+.ik-cell:nth-child(4) { border-left-color: #67c23a; }
+.ik-cell:nth-child(5) { border-left-color: #9b59b6; }
+.ik-lb { font-size: 12px; color: #909399; }
+.ik-val { font-size: 24px; font-weight: 600; color: #303133; margin-top: 4px; line-height: 1.2; }
+.ik-val.small { font-size: 15px; font-weight: 600; padding-top: 6px; }
+.ik-sub { font-size: 11px; color: #b0b3b8; margin-top: 4px; line-height: 1.4; }
+
+.ik-chart-card {
+  background: #fff; border-radius: 10px; padding: 10px 12px 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06); margin-bottom: 18px;
+}
+.ik-chart { width: 100%; height: 400px; }
+
+.ik-table { margin-bottom: 18px; }
+.ik-table :deep(.el-table__row) { cursor: pointer; }
+.ik-muted { color: #b0b3b8; }
+
+.ik-alert-line {
+  background: #eef5ff; color: #1a6fdb; border-radius: 8px;
+  padding: 10px 16px; font-size: 13px; margin-bottom: 12px;
+}
+.ik-collapse { margin-bottom: 16px; background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+.ik-collapse :deep(.el-collapse) { border: none; }
+.ik-collapse :deep(.el-collapse-item__header) { padding-left: 16px; }
+.ik-collapse :deep(.el-collapse-item__content) { padding: 0 16px 14px; }
+.ik-cp-title { font-size: 13px; font-weight: 600; color: #303133; }
+
+.ik-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.ik-bar { height: 12px; background: linear-gradient(90deg, #1a6fdb, #67c23a); border-radius: 6px; min-width: 2px; }
+.ik-bar-txt { font-size: 11px; color: #909399; }
+
+.ik-staff { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.ik-staff-card {
+  border: 1px solid #ebeef5; border-radius: 8px; padding: 10px 12px; cursor: pointer;
+  transition: all .15s;
+}
+.ik-staff-card:hover { border-color: #1a6fdb; box-shadow: 0 2px 8px rgba(26, 111, 219, .12); }
+.ik-staff-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; }
+/* v1.8.0：这里原来是 gap:6px，ElTag 有描边 + 圆角，6px 留白视觉上像一个空框，
+   看着像多画了个占位标签。改成 margin-left，标签紧贴姓名。 */
+.ik-staff-name .el-tag { margin-left: 6px; }
+.ik-staff-grid { font-size: 11px; color: #909399; margin-top: 2px; }
+.ik-staff-num { font-size: 20px; font-weight: 700; color: #e6a23c; margin-top: 6px; }
+.ik-staff-num span { font-size: 11px; font-weight: 400; color: #909399; margin-left: 4px; }
+.ik-staff-sub { font-size: 11px; color: #b0b3b8; margin-top: 2px; }
+
+.ik-note {
+  font-size: 12px; color: #909399; padding: 10px 14px;
+  background: #fafafa; border-radius: 8px; line-height: 1.6;
+}
 
 /* ---- 工具栏 ---- */
 .toolbar {
