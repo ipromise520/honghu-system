@@ -500,7 +500,20 @@
         <el-table-column prop="number" label="服务号码" width="115" />
         <el-table-column prop="theme" label="业务主题" min-width="130" show-overflow-tooltip />
         <el-table-column prop="accept_time" label="受理时间" width="130" />
-        <el-table-column prop="completion_time" label="完工时间" width="130" />
+        <!-- v1.8.3：待装单不可能有完工时间（实测 148 条 100% 为空），那列只是一片空白。
+             改看「预约截止时间」——待装单 100% 有值，是判断「还剩多久 / 是否已超期」的唯一依据。
+             已过截止时间且仍未完工的标红，盯控时一眼能挑出来。 -->
+        <el-table-column prop="appointment_time" label="预约截止时间" width="130">
+          <template #default="{ row }">
+            <span v-if="!row.appointment_time" class="ik-muted">—</span>
+            <span v-else :class="{ 'appt-overdue': apptOverdue(row) }"
+                  :title="apptOverdue(row) ? '已过预约截止时间且仍未完工' : ''">
+              {{ row.appointment_time }}
+            </span>
+          </template>
+        </el-table-column>
+        <!-- 完工时间只在非待装口径出现（看已完工单时这列才有意义） -->
+        <el-table-column v-if="!isPendingDrill" prop="completion_time" label="完工时间" width="130" />
         <!-- v1.8.0：来单分析要看的 3 列（Streamlit 原有，原抽屉没有） -->
         <el-table-column prop="is_fttr" label="是否FTTR" width="95">
           <template #default="{ row }">
@@ -508,7 +521,8 @@
           </template>
         </el-table-column>
         <el-table-column prop="urge_cnt" label="催装次数" width="90" align="right" />
-        <el-table-column prop="appointment_time" label="前台预约时间" width="145" />
+        <!-- v1.8.3：原「前台预约时间」列与上面新增的「预约截止时间」是同一字段，
+             同一份数据画两遍没意义，删掉（它原本还在横向滚动的最右侧，基本没人看到）。 -->
       </el-table>
 
       <div class="drill-pager">
@@ -755,6 +769,22 @@ function onSize(s) { drill.pageSize = s; drill.page = 1; loadDrill() }
 
 // 冲突单高亮：跨源状态不一致时给行加底色，方便一眼看出哪条要人工核
 const drillRowClass = ({ row }) => (row.status_conflict ? 'row-conflict' : '')
+
+// v1.8.3：当前抽屉是不是「待装」口径。按网格视图里点「待装」卡片钻取时
+// metric 就是 pending、scope 还是 all，所以两个都要判。
+const isPendingDrill = computed(() => drill.metric === 'pending' || drill.scope === 'pending')
+
+// 预约截止时间是否已过（且仍未完工）。
+// 不直接 new Date('2026-10-30 00:00')：带空格的时间串在部分浏览器里解析成 NaN，
+// 那样会静默判成「未超期」，比不标还糟。手动拆段构造 Date 各浏览器一致。
+function apptOverdue(row) {
+  if (!row) return false
+  if ((row.completion_time || '').trim()) return false      // 已完工不算超期
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(row.appointment_time || '')
+  if (!m) return false
+  const t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime()
+  return t < Date.now()
+}
 
 // ---- 来单分析 ----
 const warnType = w => (w === '高负荷' ? 'danger' : w === '偏高' ? 'warning' : 'success')
@@ -1181,6 +1211,8 @@ onMounted(load)
 .drill-title { font-size: 15px; color: #303133; }
 .drill-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .drill-pager { display: flex; justify-content: flex-end; margin-top: 12px; }
+/* v1.8.3：已过预约截止时间且未完工 —— 盯控里最该被看见的一类 */
+.appt-overdue { color: #f56c6c; font-weight: 600; }
 :deep(.row-conflict) { background: #fef0f0 !important; }
 
 @media (max-width: 768px) {
