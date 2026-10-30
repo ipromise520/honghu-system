@@ -295,10 +295,13 @@
             <div class="ik-val">{{ intake.data.info.refund_back }}</div>
             <div class="ik-sub">退回重派</div>
           </div>
+          <!-- v1.8.1：这里原来是「选择状态数」，统计全量后是 11 种，混进了
+               已施工 / 已撤单 / 已退单 三个终态；盯控要看的是「还没做完的单卡在哪些环节」，
+               后端已改为只数待装单，称谓也跟着改清楚。 -->
           <div class="ik-cell">
-            <div class="ik-lb">选择状态数</div>
+            <div class="ik-lb">待装状态数</div>
             <div class="ik-val">{{ intake.data.info.state_count }}</div>
-            <div class="ik-sub">{{ (intake.data.info.states || []).join(' / ') }}</div>
+            <div class="ik-sub">{{ (intake.data.info.states || []).join(' / ') || '当前无待装单' }}</div>
           </div>
           <div class="ik-cell">
             <div class="ik-lb">时间范围</div>
@@ -313,14 +316,20 @@
         </div>
 
         <!-- ---- ② 当前处理人统计图表 ---- -->
+        <!-- v1.8.1：这张图恒按「待装」画，不随上面的口径开关变 —— 盯控要回答的是
+             「谁手上还压着几单」，不是「谁这个月接单多」。压单为 0 的人不画。 -->
         <div class="section-title">
           <span class="bar" />当前处理人统计图表
-          <el-tooltip content="柱子颜色按单量从红到紫渐变" placement="top" :show-after="200">
+          <el-tag size="small" type="warning" effect="plain">按待装单量</el-tag>
+          <span class="muted-sm">只画手上有待装单的人，压单为 0 不显示</span>
+          <el-tooltip content="柱子颜色按待装单量从低到高渐变（红→紫）；点击任意柱子可看该人明细"
+                      placement="top" :show-after="200">
             <span class="hint-icon"><el-icon><QuestionFilled /></el-icon></span>
           </el-tooltip>
         </div>
         <div class="ik-chart-card">
-          <div ref="intakeChartRef" class="ik-chart" />
+          <div v-if="(intake.data.chart || []).length" ref="intakeChartRef" class="ik-chart" />
+          <el-empty v-else :image-size="80" description="当前没有待装单，全员已清空" />
         </div>
 
         <!-- ---- ③ 详细统计表 ---- -->
@@ -363,8 +372,14 @@
 
         <!-- ---- ④ 按工单 / 网格 / 人员压单情况 ---- -->
         <div class="section-title"><span class="bar" />压单情况</div>
+        <!-- v1.8.1：原来只写「待装 N 件、涉及 M 人」，但 N 里有未分配的单，
+             会和 M 人手上的件数对不上（洪湖 10 月：148 件 vs 45 人手上 135 件）。 -->
         <div class="ik-alert-line">
-          待装工单共 <b>{{ intake.data.summary.pending }}</b> 件，涉及 <b>{{ intake.data.summary.people }}</b> 人
+          待装工单共 <b>{{ intake.data.summary.pending }}</b> 件，其中
+          <b>{{ intake.data.summary.assigned_pending ?? intake.data.summary.pending }}</b> 件
+          压在 <b>{{ intake.data.summary.people }}</b> 人手上<template
+            v-if="intake.data.summary.unassigned_pending">，另有
+            <b class="warn-num">{{ intake.data.summary.unassigned_pending }}</b> 件未分配责任人</template>
         </div>
         <el-collapse v-model="intake.panels" class="ik-collapse">
           <el-collapse-item name="dist">
@@ -417,7 +432,7 @@
               <span class="ik-cp-title">显示人员工单详情</span>
             </template>
             <div class="ik-staff">
-              <div v-for="p in intake.data.staff" :key="p.name" class="ik-staff-card" @click="openDrill('', 'come', p.name, p.name)">
+              <div v-for="p in intake.data.staff" :key="p.name" class="ik-staff-card" @click="openDrill('', 'come', '全部工单', p.name)">
                 <div class="ik-staff-name">
                   {{ p.name }}
                   <el-tag size="small" :type="warnType(p.warn)" effect="plain">{{ p.warn }}</el-tag>
@@ -687,14 +702,19 @@ const drill = reactive({
   show: false, grid: '', label: '', metric: 'come', keyword: '',
   rows: [], total: 0, page: 1, pageSize: 50, loading: false,
   handler: '', handlerName: '',     // v1.8.0 来单分析按人钻取
+  // v1.8.1：钻取要跟着来单口径走。之前没传 scope，「仅待装」下点人名
+  // 卡片写 18、抽屉弹 1538（明细按全量返回），两处数字打架。
+  scope: 'all',
 })
 
-function openDrill(grid, metric, label, handler = '') {
+// scope 传空 = 跟随当前视图：来单分析下用它的口径开关，其他视图就是全量。
+function openDrill(grid, metric, label, handler = '', scope = '') {
   drill.grid = grid || ''
   drill.metric = metric || 'come'
   drill.label = label || '来单'
   drill.handler = handler || ''
   drill.handlerName = handler || ''
+  drill.scope = scope || (viewMode.value === 'intake' ? intake.scope : 'all')
   drill.keyword = ''
   drill.page = 1
   drill.show = true
@@ -717,6 +737,7 @@ async function loadDrill() {
       page: drill.page,
       page_size: drill.pageSize,
       handler: drill.handler || '',
+      scope: drill.scope || 'all',
     })
     drill.rows = r.rows || []
     drill.total = r.total || 0
@@ -765,7 +786,8 @@ async function loadIntake() {
 
 // 点人名 → 复用钻取抽屉
 function onPersonRow(row) {
-  openDrill('', 'come', row.is_unassigned ? row.name : `${row.name} 的工单`, row.name)
+  // label 只描述口径 —— 标题已单独渲染 handlerName，再写一遍人名会变成「胡辉 · 胡辉 的工单」
+  openDrill('', 'come', row.is_unassigned ? '未分配单' : '全部工单', row.name)
 }
 
 // ---- ② 竖条图（照搬 Streamlit：竖排 + 彩虹色阶 + 横轴人名斜排） ----
@@ -774,17 +796,25 @@ let intakeChart = null
 
 function renderIntakeChart() {
   const el = intakeChartRef.value
-  if (!el) return
   const list = intake.data.chart || []
-  if (!list.length) {
-    intakeChart?.dispose()
-    intakeChart = null
+  // 容器被 v-if 拿掉（当前无人压单）或没有数据：旧实例要一起扔掉，
+  // 否则下次复用一个挂在已移除 DOM 上的实例，图永远是空的。
+  if (!el || !list.length) {
+    if (intakeChart) { intakeChart.dispose?.(); intakeChart = null }
     return
+  }
+  // 容器被 v-if 重建过时，旧实例的 DOM 已不在文档里，必须重建（否则 setOption 无声无效）
+  if (intakeChart && !intakeChart.isDisposed?.() && intakeChart.getDom() !== el) {
+    intakeChart.dispose()
+    intakeChart = null
   }
   // 容器在 v-if 分支里时宽高为 0，直接 init 会得到空图（项目里 AiVisit 踩过同样的坑）
   if (!intakeChart || intakeChart.isDisposed?.()) intakeChart = echarts.init(el)
 
   const max = Math.max(...list.map(x => x.count), 1)
+  // 色阶下限取实际最小值：list 里已滤掉压单 0 的人，若仍从 0 起，
+  // 色阶条底部那格「0」在图上找不到对应柱子，读者会误以为存在 0 单还被画出来的情况。
+  const min = Math.min(...list.map(x => x.count), max)
   intakeChart.setOption({
     tooltip: {
       trigger: 'axis',
@@ -792,7 +822,8 @@ function renderIntakeChart() {
       formatter: ps => {
         const i = ps[0].dataIndex
         const d = list[i]
-        return `<b>${d.name}</b><br/>所属网格：${shortGrid(d.grid)}<br/>工单数量：<b>${d.count}</b> 单`
+        return `<b>${d.name}</b><br/>所属网格：${shortGrid(d.grid)}` +
+               `<br/>待装：<b>${d.count}</b> 单<br/>全月来单：${d.total ?? '—'} 单`
       },
     },
     toolbox: {
@@ -802,7 +833,7 @@ function renderIntakeChart() {
     grid: { left: 56, right: 76, top: 24, bottom: 108 },
     // 色阶：与 Streamlit 一致，红(0) → 橙 → 黄 → 绿 → 青 → 蓝 → 紫(max)
     visualMap: {
-      show: true, min: 0, max, right: 6, top: 60, orient: 'vertical',
+      show: true, min, max, right: 6, top: 60, orient: 'vertical',
       itemHeight: 120, calculable: true, text: ['高', '低'],
       inRange: { color: ['#f56c6c', '#ff9f43', '#ffd93d', '#67c23a', '#36cfc9', '#1a6fdb', '#9b59b6'] },
       textStyle: { fontSize: 11 },
@@ -813,19 +844,44 @@ function renderIntakeChart() {
       axisLabel: { rotate: 45, fontSize: 10, interval: 0, color: '#606266' },
       axisTick: { alignWithLabel: true },
     },
-    yAxis: { type: 'value', name: '工单数量', nameTextStyle: { fontSize: 11 }, minInterval: 1 },
+    yAxis: { type: 'value', name: '待装单量', nameTextStyle: { fontSize: 11 }, minInterval: 1 },
     series: [{
       type: 'bar',
       data: list.map(x => x.count),
       barMaxWidth: 26,
       itemStyle: { borderRadius: [2, 2, 0, 0] },
-      // 单量够大才标数字，否则 46 个人挤在一起会糊
-      label: {
-        show: true, position: 'top', fontSize: 10,
-        formatter: p => (p.value >= Math.max(2, max * 0.15) ? p.value : ''),
-      },
+      // v1.8.1：改按待装量画后，值域只有 1~8，原来是「够大才标」会把几乎全部数字省掉，
+      // 图上看不出谁压了几单。现在全标。
+      label: { show: true, position: 'top', fontSize: 10, formatter: p => p.value },
     }],
   }, true)
+
+  // 点图 → 该人的待装明细。metric 用 pending、scope 固定 pending，
+  // 这样抽屉条数必然等于柱子的高度（图恒按待装画，不随口径开关变）。
+  //
+  // v1.8.1：不用 intakeChart.on('click') —— 45 根柱子很细，必须正好点在柱形上，
+  // 稍微偏一两个像素就没反应，用户会当成「点了没反应」。
+  // 改成监听容器 + convertFromPixel，点在绘图区内任意位置都算「最近的那根柱」。
+  if (el.__ikClick) el.removeEventListener('click', el.__ikClick)
+  const onClick = ev => {
+    if (!intakeChart || intakeChart.isDisposed?.()) return
+    const rect = el.getBoundingClientRect()
+    const pt = [ev.clientX - rect.left, ev.clientY - rect.top]
+    // 点在绘图区内才算（轴标签、工具栏、色阶条都排除）
+    if (!intakeChart.containPixel({ gridIndex: 0 }, pt)) return
+    // finder 必须是 gridIndex —— 实测传 {xAxisIndex:0} 返回 NaN，
+    // list[NaN] 取到 undefined，回调静默 return，表现就是「点柱子毫无反应」。
+    const xv = intakeChart.convertFromPixel({ gridIndex: 0 }, pt)
+    const raw = Array.isArray(xv) ? xv[0] : xv
+    const idx = Math.round(raw)
+    if (!Number.isFinite(idx) || idx < 0 || idx >= list.length) return
+    const d = list[idx]
+    if (!d) return
+    openDrill('', 'pending', '待装单', d.name, 'pending')
+  }
+  el.__ikClick = onClick
+  el.addEventListener('click', onClick)
+  if (typeof window !== 'undefined') window.__intakeChart = intakeChart   // 排查用
 }
 
 // 切到「来单分析」时才首次加载；容器已渲染，直接画图不会得到空图
@@ -887,6 +943,7 @@ onMounted(load)
   background: #eef5ff; color: #1a6fdb; border-radius: 8px;
   padding: 10px 16px; font-size: 13px; margin-bottom: 12px;
 }
+.ik-alert-line .warn-num { color: #e6a23c; font-weight: 700; }
 .ik-collapse { margin-bottom: 16px; background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
 .ik-collapse :deep(.el-collapse) { border: none; }
 .ik-collapse :deep(.el-collapse-item__header) { padding-left: 16px; }

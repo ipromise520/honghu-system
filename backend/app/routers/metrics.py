@@ -933,6 +933,13 @@ def completion_intake(req: _IntakeReq,
     """
     rows = _grid_rows(db, req.month, req.district)
 
+    # v1.8.1：柱状图 tooltip 要显示「压 N / 全月 M」，这里的 M 必须恒为全月来单量，
+    # 不能跟着 scope 变 —— 否则「仅待装」口径下 M 等于待装量，读起来就是「全月来单 8 单」。
+    total_by_handler = {}
+    for _r in rows:
+        _h = _intake_handler(_r)
+        total_by_handler[_h] = total_by_handler.get(_h, 0) + 1
+
     scope = (req.scope or "all").strip()
     if scope == "pending":
         rows = [r for r in rows if _intake_is_pending(r)]
@@ -942,7 +949,10 @@ def completion_intake(req: _IntakeReq,
                 "district": req.district or "全部区县", "scope": scope}
 
     # ---------- ① 统计信息 ----------
-    states = sorted({_status_of(r) or "(空)" for r in rows})
+    # v1.8.1：状态种类只数「待装」单。盯控工具要回答的是「还没做完的单卡在哪些环节」，
+    # 混进已施工/已撤单/已退单三个终态会虚增（洪湖 2026-10：全量 11 种 vs 待装 7 种）。
+    pend_rows = [r for r in rows if _intake_is_pending(r)]
+    states = sorted({_status_of(r) or "(空)" for r in pend_rows})
     t = _agg(rows)
     info = {
         "records": len(rows),                                    # 生成记录数
@@ -1000,9 +1010,15 @@ def completion_intake(req: _IntakeReq,
     # 未分配/无状态固定排最后，其余按单量降序
     people.sort(key=lambda x: (x["is_unassigned"], -x["count"], x["name"]))
 
-    # ---------- ② 图表数据（不含未分配/无状态，它们不是「人」） ----------
-    chart = [{"name": p["name"], "count": p["count"], "grid": p["grid"]}
-             for p in people if not p["is_unassigned"]]
+    # ---------- ② 图表数据（按「待装」量，与 Streamlit 盯控图一致） ----------
+    # v1.8.1：原来取 count（全月受理量），画出来是「谁这个月接单多」，不是「谁手上压着单」，
+    # 与盯控目的相反（石力全月 93 单最显眼，实际只压 6 单）。
+    # 现改为 pending；pending=0 的人不画 —— 一排空柱只会把真实压力压扁。
+    # total 一并带上，tooltip 里可显示「压 N / 全月 M」。
+    chart = [{"name": p["name"], "count": p["pending"], "grid": p["grid"],
+              "total": total_by_handler.get(p["name"], p["count"])}
+             for p in people if not p["is_unassigned"] and p["pending"] > 0]
+    chart.sort(key=lambda x: (-x["count"], x["name"]))
 
     # ---------- ④ 按单量分组分布 ----------
     dist = {}
@@ -1040,6 +1056,10 @@ def completion_intake(req: _IntakeReq,
     } for p in people if not p["is_unassigned"]]
 
     pend_total = len([r for r in rows if _intake_is_pending(r)])
+    # 待装里有多少挂在真人名下、多少是 (未分配)/(无状态)。不拆开的话，
+    # 「待装 148 件、涉及 45 人」会让人以为这 45 个人扛了 148 单。
+    pend_assigned = len([r for r in pend_rows
+                         if _intake_handler(r) not in (_INTAKE_UNASSIGNED, _INTAKE_NOSTATE)])
     return {
         "has_data": True,
         "month": req.month,
@@ -1054,7 +1074,10 @@ def completion_intake(req: _IntakeReq,
         "staff": staff,
         "summary": {
             "orders": len(rows),
+            "orders": len(rows),
             "pending": pend_total,
+            "assigned_pending": pend_assigned,
+            "unassigned_pending": pend_total - pend_assigned,
             "people": len(chart),
             "top": chart[0]["name"] if chart else "",
             "top_count": chart[0]["count"] if chart else 0,
