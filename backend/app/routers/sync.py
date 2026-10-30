@@ -31,9 +31,7 @@ SYNC_MODULES = {
                   "columns": ["当月明细：订单号/县域/受理人/受理时间/服务项目名称/服务项目收入",
                               "人员明细：区县/网格/姓名/职位/状态"],
                   "note": "白名单解析「当月明细」+「人员明细」两个 sheet；month 从受理时间推导；通报为当月累计快照，订单按月替换、人员全量替换"},
-    "h5_complaint": {"name": "H5投诉工单", "target": "h5_complaint",
-                     "columns": ["工单编号(HB-058前缀)", "工单状态", "施工人", "受理时间"],
-                     "note": "投诉 H5 工单列表"},
+    # v1.7.1 已下线：H5投诉工单上传入口（表保留，口径已改读投诉宽表）
     "install_wide": {"name": "装机宽表", "target": "install_orders",
                      "columns": ["数据1：定单编码/区县/网格/受理时间/业务主题/定单状态/宽带类型/是否FTTR/回单人员/回单时间/24小时及时/8小时及时/是否履约/是否退单/一级退单原因/装机时长/完工时长/H5装机满意度",
                                  "盯控列（旧版导出无这些列时取空）：首联时间/首联是否及时/上门时间/是否及时上门/首次激活时间/回访时间/回访结果/IVR回访(装通/满意/评分/最终)/催单次数/二级退单原因/退单人员/AI回访结果/综调回访结果/地市回访结果"],
@@ -1359,16 +1357,10 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
             n += len(members)
         msg = (f"入库成功：订单 {len(orders)} 行（月份 {'、'.join(months) or '无'}，按月替换）、"
                f"人员 {len(members)} 人（全量替换），指标已实时生效")
-    elif job.metric == "h5_complaint":
-        for r in rows:
-            no = str(r.get("工单编号") or "").strip()
-            if not no:
-                continue
-            if not db.query(H5Complaint).filter(H5Complaint.eoms_order_no == no).first():
-                db.add(H5Complaint(eoms_order_no=no, order_status=str(r.get("工单状态") or "已施工"),
-                                   construction_dept_person=str(r.get("施工人") or ""),
-                                   accept_time=str(r.get("受理时间") or "")))
-                n += 1
+    # v1.7.1 已下线：H5投诉工单上传入口（表保留，口径已改读投诉宽表）
+    # elif job.metric == "h5_complaint":  ← 原入库逻辑已删除
+    #     若要恢复：改回写 H5Complaint 表即可，但该表已不参与计算，
+    #     投诉 H5 应发请走「投诉宽表」(complaint_orders)。
     elif job.metric == "install_query":
         # v1.6.5：综合查询是「实时状态快照」，写独立表，**整表替换**
         # 不再走 sync_wide_batch 覆盖 install_orders——那会把宽表 97 列冲成 20 列，

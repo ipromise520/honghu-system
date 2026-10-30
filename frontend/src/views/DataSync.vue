@@ -81,11 +81,9 @@ const modules = {
     columns: ['工单编号', '区县', '施工人', '受理时间', '业务项目', '收入'],
     note: '只入库「当月明细」；month 从受理时间推导，禁止硬编码',
   },
-  h5_complaint: {
-    name: 'H5 投诉工单', target: 'h5_complaint',
-    columns: ['工单编号(HB-058前缀)', '工单状态', '施工人', '受理时间'],
-    note: '家宽投诉综合工单列表',
-  },
+  // v1.7.1 已下线「H5 投诉工单」上传入口：该表数据停在 2026-10-22，
+  // 投诉 H5 应发口径早已改读「投诉宽表」(complaint_orders)，见 h5.py::_derive_complaint。
+  // 表与历史数据仍在库里，只是不再有上传口，也不再参与计算。
   install_wide: {
     name: '装机宽表', target: 'install_orders',
     columns: ['数据1：定单编码/区县/受理时间/定单状态/回单人员/24小时及时/8小时及时/是否退单/一级退单原因'],
