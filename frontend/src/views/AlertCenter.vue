@@ -105,8 +105,18 @@
               <el-table-column prop="handler" label="处理人" min-width="80" sortable />
               <el-table-column prop="grid" label="网格" min-width="95" show-overflow-tooltip sortable />
               <el-table-column prop="community" label="小区" min-width="110" show-overflow-tooltip sortable />
-              <el-table-column prop="is_fttr" label="FTTR" width="70" sortable />
-              <el-table-column prop="is_high_quality" label="高品质" width="70" sortable />
+              <!-- v1.7.3：与「装机工单明细」同一套色标（高品质=是 红实心 / FTTR=是 绿实心） -->
+              <el-table-column prop="is_fttr" label="FTTR" width="80" sortable>
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.is_fttr === '是' ? 'success' : 'info'">{{ row.is_fttr || '否' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="is_high_quality" label="高品质" width="80" sortable>
+                <template #default="{ row }">
+                  <el-tag v-if="row.is_high_quality === '是'" size="small" type="danger" effect="dark">是</el-tag>
+                  <el-tag v-else size="small" type="info" effect="plain">否</el-tag>
+                </template>
+              </el-table-column>
             </el-table>
             <el-table v-else-if="alertType === 'complaint'" :data="alertRows" size="small" max-height="560">
               <el-table-column prop="district" label="区县" width="85" sortable />
@@ -172,7 +182,12 @@
               <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
               <el-table-column prop="handler" label="处理人" min-width="80" sortable />
               <el-table-column prop="phone" label="联系电话" width="115" sortable />
-              <el-table-column prop="is_high_quality" label="高品质" width="80" sortable />
+              <el-table-column prop="is_high_quality" label="高品质" width="80" sortable>
+                <template #default="{ row }">
+                  <el-tag v-if="row.is_high_quality === '是'" size="small" type="danger" effect="dark">是</el-tag>
+                  <el-tag v-else size="small" type="info" effect="plain">否</el-tag>
+                </template>
+              </el-table-column>
             </el-table>
             <el-table v-else-if="alertType === 'book'" :data="alertRows" size="small" max-height="560">
               <el-table-column prop="district" label="区县" width="85" sortable />
