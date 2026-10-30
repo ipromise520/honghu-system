@@ -811,10 +811,14 @@ function renderIntakeChart() {
   // 容器在 v-if 分支里时宽高为 0，直接 init 会得到空图（项目里 AiVisit 踩过同样的坑）
   if (!intakeChart || intakeChart.isDisposed?.()) intakeChart = echarts.init(el)
 
-  const max = Math.max(...list.map(x => x.count), 1)
+  const vals = list.map(x => x.count)
+  const max = Math.max(...vals, 1)
   // 色阶下限取实际最小值：list 里已滤掉压单 0 的人，若仍从 0 起，
   // 色阶条底部那格「0」在图上找不到对应柱子，读者会误以为存在 0 单还被画出来的情况。
-  const min = Math.min(...list.map(x => x.count), max)
+  // 但 min === max（全员压单量一样，比如月末只剩 5 个人各压 1 单）时色阶会塌成
+  // 单一颜色，条的上下两端标同一个数，看着像坏了；这种退化情况退回 0 起。
+  const rawMin = Math.min(...vals)
+  const min = rawMin === max ? 0 : rawMin
   intakeChart.setOption({
     tooltip: {
       trigger: 'axis',
@@ -830,7 +834,10 @@ function renderIntakeChart() {
       right: 8, top: 0,
       feature: { dataZoom: {}, magicType: { type: ['bar'] }, saveAsImage: { name: '来单分析-按处理人' } },
     },
-    grid: { left: 56, right: 76, top: 24, bottom: 108 },
+    // v1.8.1b：top 24 → 48。柱顶 label 是画在柱子上方的，最大值 8 的那根柱
+    // 标签会往上探出绘图区；原来只留 24px，标签直接顶到容器边、跟 y 轴名称和
+    // 顶部刻度「8」叠成一团（用户截图圈的就是这块）。
+    grid: { left: 56, right: 76, top: 48, bottom: 108 },
     // 色阶：与 Streamlit 一致，红(0) → 橙 → 黄 → 绿 → 青 → 蓝 → 紫(max)
     visualMap: {
       show: true, min, max, right: 6, top: 60, orient: 'vertical',
@@ -844,7 +851,19 @@ function renderIntakeChart() {
       axisLabel: { rotate: 45, fontSize: 10, interval: 0, color: '#606266' },
       axisTick: { alignWithLabel: true },
     },
-    yAxis: { type: 'value', name: '待装单量', nameTextStyle: { fontSize: 11 }, minInterval: 1 },
+    // v1.8.1b：去掉 name:'待装单量'。它的默认位置是轴顶端（nameLocation:'end'），
+    // 正好落在「顶部刻度 8」和「最高柱的数值标签 8」中间，三处文字糊成一片。
+    // 「按待装单量」这层意思标题旁的 el-tag 已经写了，轴名在这里纯属冗余，
+    // 删掉把这块空间让给柱顶数字最干净。
+    // 另加淡色 splitLine：45 根柱靠高度差判读，没有横向基准线很容易看错一档。
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: { margin: 8, fontSize: 11, color: '#909399' },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: '#f0f2f5' } },
+    },
     series: [{
       type: 'bar',
       data: list.map(x => x.count),
@@ -852,7 +871,12 @@ function renderIntakeChart() {
       itemStyle: { borderRadius: [2, 2, 0, 0] },
       // v1.8.1：改按待装量画后，值域只有 1~8，原来是「够大才标」会把几乎全部数字省掉，
       // 图上看不出谁压了几单。现在全标。
-      label: { show: true, position: 'top', fontSize: 10, formatter: p => p.value },
+      // v1.8.1b：distance 默认 5，最高那根柱的标签会贴到绘图区上边界、压住刻度线；
+      // 给到 6px 并显式指定颜色，让 45 个数字都能读清。
+      label: {
+        show: true, position: 'top', distance: 6,
+        fontSize: 10, color: '#606266', formatter: p => p.value,
+      },
     }],
   }, true)
 
