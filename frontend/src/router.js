@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { bumpAuthEpoch } from './authEpoch'
 
 const routes = [
   { path: '/login', component: () => import('./views/Login.vue'), meta: { public: true } },
@@ -30,6 +31,9 @@ const routes = [
 const router = createRouter({ history: createWebHistory(), routes })
 
 router.beforeEach(to => {
+  // v1.7.2：每次进入登录页开启新一代 —— 401 去重闸门据此复位，
+  // 保证「重新登录后再次过期」还会正常提示一次（见 api.js::__handle401）
+  if (to.path === '/login') bumpAuthEpoch()
   const token = localStorage.getItem('honghu_token')
   if (!to.meta.public && !token) return '/login'
   if (to.path === '/login' && token) return '/dashboard'

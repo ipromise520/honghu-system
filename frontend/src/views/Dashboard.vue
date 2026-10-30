@@ -198,7 +198,7 @@
                      layout="total, sizes, prev, pager, next, jumper"
                      :total="detailTotal" :current-page="detailPage" :page-size="pageSize"
                      :page-sizes="[50, 100, 200, 500]"
-                     small background style="margin-top:10px;justify-content:flex-end"
+                     size="small" background style="margin-top:10px;justify-content:flex-end"
                      @current-change="onDetailPageChange" @size-change="onDetailSizeChange" />
 
       <!-- 省公司邮件预警（139邮箱每小时快照，仅保留最新） -->

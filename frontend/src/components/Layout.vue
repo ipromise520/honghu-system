@@ -88,6 +88,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '../store'
 import api from '../api'
+import { bumpAuthEpoch } from '../authEpoch'
 
 const OVERDUE_HOURS = 2
 const router = useRouter()
@@ -135,6 +136,7 @@ const pwdForm = ref({ old_password: '', new_password: '' })
 function onCmd(cmd) {
   if (cmd === 'logout') {
     store.logout()
+    bumpAuthEpoch()
     router.push('/login')
   } else if (cmd === 'pwd') {
     pwdForm.value = { old_password: '', new_password: '' }
@@ -150,6 +152,7 @@ async function changePwd() {
   await api.post('/auth/change-password', pwdForm.value)
   ElMessage.success('密码修改成功，请重新登录')
   store.logout()
+  bumpAuthEpoch()
   router.push('/login')
 }
 

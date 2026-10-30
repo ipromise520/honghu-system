@@ -10,7 +10,7 @@ from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.datastructures import MutableHeaders
 
 from app.config import CORS_ORIGINS, DOCS_ENABLED, MOBILE_DIST
@@ -275,15 +275,27 @@ if os.path.isdir(FRONTEND_DIST):
             fp = os.path.join(MOBILE_DIST, full_path)
             if full_path and os.path.isfile(fp):
                 return FileResponse(fp)
+            # v1.7.2：本路由比桌面端 catch-all 先注册，会先拿到 /m/api/xxx，
+            # 所以 API 保护必须在这里也写一遍，否则小程序端接口写错照样白屏 200。
+            if full_path.startswith("api/"):
+                return JSONResponse(status_code=404,
+                                    content={"detail": "接口不存在: /m/%s" % full_path})
             return FileResponse(
                 os.path.join(MOBILE_DIST, "index.html"),
                 headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+    # v1.7.2：未知接口必须返回 404 JSON，不能兜成 index.html。
+    # 此前 /api/v1/xxx 写错路径会得到 200 + HTML，前端 axios 把 HTML 当业务数据，
+    # 控制台只留下一句看不懂的语法错误，排查成本极高。
+    _API_PREFIXES = ("api/", "m/api/")
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
         fp = os.path.join(FRONTEND_DIST, full_path)
         if full_path and os.path.isfile(fp):
             return FileResponse(fp)
+        if full_path.startswith(_API_PREFIXES):
+            return JSONResponse(status_code=404, content={"detail": "接口不存在: /%s" % full_path})
         # index.html 不缓存，确保发版后浏览器立即加载新版本（assets 文件名带 hash 可长缓存）
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"),
                             headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
