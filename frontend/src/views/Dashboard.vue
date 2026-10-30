@@ -275,9 +275,19 @@
                 </el-tooltip>
               </template>
             </el-table-column>
+            <!-- v1.7.4：投诉场景的「高品质」按**风险**标红（原为 success 绿色，语义反了 ——
+                 绿色读作「良好」，会让人以为高品质投诉单是好单而不去催）。
+                 口径：高品质投诉单需重点盯，早上门、早回单。 -->
             <el-table-column prop="is_high_quality" label="是否高品质" width="100" sortable>
               <template #default="{ row }">
-                <el-tag size="small" :type="row.is_high_quality === '是' ? 'success' : 'info'">{{ row.is_high_quality || '否' }}</el-tag>
+                <!-- v1.7.4：外面这层 <span> 不能省 —— el-tooltip 直接包 el-tag 拿不到触发节点，
+                     实测 hover 无任何反应（不含 el-tooltip__trigger）。包原生 span 后才正常。 -->
+                <el-tooltip v-if="row.is_high_quality === '是'"
+                            content="高品质投诉单：需重点盯，尽量早上门、早回单"
+                            placement="top" :show-after="220">
+                  <span><el-tag size="small" type="danger" effect="dark">是</el-tag></span>
+                </el-tooltip>
+                <el-tag v-else size="small" type="info" effect="plain">否</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="accept_time" label="受理时间" width="150" sortable />
