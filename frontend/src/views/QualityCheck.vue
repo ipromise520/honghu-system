@@ -21,7 +21,6 @@
                 style="white-space:nowrap">
           {{ noAccount }} 人无账号
         </el-tag>
-        <el-tag v-if="ov.date" size="small" type="info">通报数据：{{ ov.date }}</el-tag>
         <span class="tip">
           口径：合格率 = 合格量 / 抽检量 · 低于达标线标红（投诉/义诊/延伸/看家/组网 96%，
           装机 98%，企宽、FTTR 100%）· 考核 10 元/件 · 不结算按类型单件计
@@ -298,18 +297,18 @@ const cards = computed(() => {
   const p = ov.push || {}
   return [
     { label: '质检总量', value: s.scanned ?? 0, unit: '单',
-      sub: `覆盖 ${s.districts ?? 0} 个区县 · ${s.people ?? 0} 人` },
+      sub: `${s.districts ?? 0} 区县 · ${s.people ?? 0} 人` },
     { label: '不合格件数', value: s.ng ?? 0, unit: '件',
       color: (s.ng ?? 0) > 0 ? '#f56c6c' : '', sub: `合格 ${s.passed ?? 0} 件` },
     { label: '整体合格率', value: s.rate ?? 0, unit: '%',
       color: (s.rate ?? 100) < 96 ? '#f56c6c' : '#67c23a',
-      sub: `${(ov.types || []).filter(t => t.ok).length}/${(ov.types || []).length} 个类型达标` },
+      sub: `${(ov.types || []).filter(t => t.ok).length}/${(ov.types || []).length} 类达标` },
     { label: '考核金额', value: fmt(s.penalty), unit: '元', color: (s.ng ?? 0) ? '#e6a23c' : '',
       sub: `${s.ng ?? 0} 件 × 10 元` },
     { label: '不结算金额', value: fmt(s.no_settle), unit: '元', color: (s.ng ?? 0) ? '#e6a23c' : '',
-      sub: '按质检类型单件计' },
+      sub: '按类型单件计' },
     { label: '已推送装维端', value: p.pushed ?? 0, unit: '件',
-      sub: `不合格 ${s.ng ?? 0} 件 · 已整改 ${p.fixed ?? 0} 件` },
+      sub: `已整改 ${p.fixed ?? 0} / ${s.ng ?? 0}` },
   ]
 })
 
