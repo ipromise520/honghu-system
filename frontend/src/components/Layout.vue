@@ -110,6 +110,7 @@ const allMenus = [
   { path: '/metrics/completion-rate', title: '竣工率', icon: 'DataLine' },
   { path: '/metrics/extension', title: '延伸服务', icon: 'Coin' },
   { path: '/metrics/ai-visit', title: 'AI装维即访', icon: 'ChatLineSquare' },
+  { path: '/metrics/quality-check', title: '质检规范', icon: 'CircleCheck' },
   { path: '/metrics/shortcomings', title: '短板分析', icon: 'Warning' },
   { path: '/h5-monitor', title: 'H5短信盯控', icon: 'ChatDotRound' },
   { path: '/h5-rate', title: 'H5参与率通报', icon: 'DataAnalysis' },

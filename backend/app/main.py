@@ -16,7 +16,8 @@ from starlette.datastructures import MutableHeaders
 from app.config import CORS_ORIGINS, DOCS_ENABLED, MOBILE_DIST
 from app.database import engine, SessionLocal, Base
 from app.seed import seed
-from app.routers import auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users, alerts, honghu, mp
+from app.routers import (auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users,
+                          alerts, honghu, mp, qc)
 
 app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.3.0",
               docs_url="/docs" if DOCS_ENABLED else None,
@@ -68,7 +69,8 @@ class SecurityHeadersMiddleware:
 app.add_middleware(SecurityHeadersMiddleware)
 
 for r in [auth.router, dashboard.router, metrics.router, h5.router, work_orders.router,
-          tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router, mp.router]:
+          tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router,
+          mp.router, qc.router]:
     app.include_router(r, prefix="/api/v1")
 
 # 装维人员端 H5 专用 API 前缀 /m/api（由 8011 独立承载，与桌面端 /api/v1 隔离，避免跨实例 token 问题）

@@ -13,6 +13,7 @@ const routes = [
       { path: 'metrics/completion-rate', component: () => import('./views/CompletionRate.vue'), meta: { title: '竣工率' } },
       { path: 'metrics/extension', component: () => import('./views/Extension.vue'), meta: { title: '延伸服务' } },
       { path: 'metrics/ai-visit', component: () => import('./views/AiVisit.vue'), meta: { title: 'AI装维即访' } },
+      { path: 'metrics/quality-check', component: () => import('./views/QualityCheck.vue'), meta: { title: '质检规范' } },
       { path: 'metrics/shortcomings', component: () => import('./views/Shortcomings.vue'), meta: { title: '短板分析' } },
       { path: 'h5-monitor', component: () => import('./views/H5Monitor.vue'), meta: { title: 'H5短信盯控' } },
       { path: 'h5-rate', component: () => import('./views/H5Rate.vue'), meta: { title: 'H5参与率通报' } },

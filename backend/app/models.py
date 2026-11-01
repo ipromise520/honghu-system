@@ -706,3 +706,54 @@ class ComplaintRealtimeStatus(Base):
     remark: Mapped[str] = mapped_column(String(255), default="")
     batch_id: Mapped[int] = mapped_column(Integer, default=0)
     fetched_at: Mapped[str] = mapped_column(String(32), default="")
+
+class QcRecord(Base):
+    """人工质检明细（v1.8.4「质检规范」通报分析源）：一单一行。
+
+    来源：市公司每日「人工质检明细」xlsx，三个明细 sheet 合一
+      · 人工质检明细（抽检：投诉 / 义诊 / 延伸服务 / 移动看家 / 智能组网 / 装机）
+      · FTTR（全量）
+      · 企宽装机（全量）
+    按 date（质检完成时间所在日）替换；「分析汇总」sheet 不入库——它是透视表，
+    本表重算结果与通报合计逐格核对一致（198 单 / 不合格 12 件 / 考核 120 元 / 不结算 608.16 元）。
+
+    推送字段：把「不通过」记录按回单人匹配装维端账号后写入，
+    装维人员在 /m 端提交整改 → fix_status='fixed'，页面显示整改结果。
+    """
+    __tablename__ = "qc_records"
+    __table_args__ = (
+        Index("ix_qc_date", "date"),
+        Index("ix_qc_district", "district"),
+        Index("ix_qc_push", "push_to_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[str] = mapped_column(String(10), default="")          # 质检日期 YYYY-MM-DD
+    month: Mapped[str] = mapped_column(String(7), default="")          # YYYY-MM
+    district: Mapped[str] = mapped_column(String(32), default="")
+    grid: Mapped[str] = mapped_column(String(64), default="")
+    category: Mapped[str] = mapped_column(String(32), default="")      # 通报八类
+    raw_type: Mapped[str] = mapped_column(String(64), default="")      # 原始「定单类型」
+    order_no: Mapped[str] = mapped_column(String(64), default="")      # 定单编码
+    qc_order_no: Mapped[str] = mapped_column(String(64), default="")   # 质检定单编码
+    service_no: Mapped[str] = mapped_column(String(64), default="")
+    biz_no: Mapped[str] = mapped_column(String(128), default="")
+    subject: Mapped[str] = mapped_column(String(128), default="")
+    handler: Mapped[str] = mapped_column(String(64), default="")       # 回单人（已剥离区县前缀）
+    handler_no: Mapped[str] = mapped_column(String(32), default="")
+    qc_person: Mapped[str] = mapped_column(String(64), default="")     # 质检人
+    result: Mapped[str] = mapped_column(String(16), default="")        # 通过 / 不通过
+    is_pass: Mapped[bool] = mapped_column(Boolean, default=True)
+    ng_item: Mapped[str] = mapped_column(String(64), default="")       # 不合格原因（归类后，聚合用）
+    ng_detail: Mapped[str] = mapped_column(String(500), default="")    # 原文
+    penalty: Mapped[float] = mapped_column(Float, default=0.0)         # 考核（负数）
+    no_settle: Mapped[float] = mapped_column(Float, default=0.0)       # 不结算金额（负数）
+    dispatch_time: Mapped[str] = mapped_column(String(32), default="")
+    finish_time: Mapped[str] = mapped_column(String(32), default="")
+    # ---- 推送至装维端 ----
+    push_to_id: Mapped[int] = mapped_column(Integer, default=0)
+    push_to_name: Mapped[str] = mapped_column(String(64), default="")
+    push_at: Mapped[str] = mapped_column(String(20), default="")
+    push_by: Mapped[str] = mapped_column(String(64), default="")
+    fix_status: Mapped[str] = mapped_column(String(16), default="")    # '' 未推送 / pushed 待整改 / fixed 已整改
+    fix_at: Mapped[str] = mapped_column(String(20), default="")
+    fix_note: Mapped[str] = mapped_column(String(255), default="")

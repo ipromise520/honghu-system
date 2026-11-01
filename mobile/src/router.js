@@ -7,6 +7,7 @@ const routes = [
   { path: '/detail', name: 'detail', component: () => import('./pages/Detail.vue') },
   { path: '/notice/:id', name: 'notice', component: () => import('./pages/Notice.vue') },
   { path: '/knowledge', name: 'knowledge', component: () => import('./pages/Knowledge.vue') },
+  { path: '/qc', name: 'qc', component: () => import('./pages/Qc.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

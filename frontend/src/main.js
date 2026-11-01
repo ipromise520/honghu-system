@@ -7,7 +7,7 @@ import ElMessageBox from 'element-plus/es/components/message-box/index.mjs'
 import {
   Platform, Menu, WarningFilled, Edit, Lock, User, Upload, UploadFilled,
   Odometer, TrendCharts, DataLine, Coin, ChatLineSquare, Warning, ChatDotRound,
-  DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message,
+  DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message, CircleCheck,
 } from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
@@ -26,7 +26,7 @@ import 'element-plus/theme-chalk/el-overlay.css'
 const ICONS = {
   Platform, Menu, WarningFilled, Edit, Lock, User, Upload, UploadFilled,
   Odometer, TrendCharts, DataLine, Coin, ChatLineSquare, Warning, ChatDotRound,
-  DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message,
+  DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message, CircleCheck,
 }
 
 const app = createApp(App)

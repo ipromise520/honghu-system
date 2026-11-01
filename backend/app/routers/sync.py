@@ -15,9 +15,10 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import (SyncJob, WorkOrder, ExtensionOrder, ExtensionMember, District, AuditLog,
                       Setting, H5Complaint, CompletionRecord, InstallOrder, ComplaintOrder,
-                      AiVisitIssue, AiVisitStat)
+                      AiVisitIssue, AiVisitStat, QcRecord)
 from ..deps import require_admin
 from ..utils_excel import parse_upload, parse_upload_sheets, parse_upload_raw
+from ..qc_rules import QC_UNIT_PRICE, QC_PENALTY_PER_ITEM
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -65,6 +66,13 @@ SYNC_MODULES = {
                              "当月装机即访清单 / 当月投诉即访清单：责任人/不规范项/工单号/回单时间"],
                  "note": "通报表→区县×类型×周期(当日/当月)规范率；清单→不规范明细（仅「外呼成功」且勾选项答案为「不是」，工单×不规范项 一行）；"
                          "日期从文件名推导，month 取其年月；均按月替换；展示在首页「AI装维即访-不规范」卡片与「AI装维即访」页面"},
+    "qc": {"name": "人工质检明细", "target": "qc_records（质检通报分析）",
+           "columns": ["人工质检明细（表头第 1 行）：区县/网格/定单编码/质检单完成时间/定单主题/定单类型/回单人工号/回单人姓名/质检人姓名/质检结果/不通过原因/不合格原因/质检考核/不结算金额",
+                       "FTTR（表头第 2 行，首行是标题）：同上",
+                       "企宽装机（表头第 2 行）：区县/网格/定单编码/质检时间/回单工号/回单人员/整体是否合格"],
+           "note": "三个明细 sheet 合一入库，按质检日期替换；「分析汇总」为透视表不入库——"
+                   "由明细重算，与通报合计逐格核对（抽检量/不合格件数/考核金额/不结算金额）；"
+                   "驱动「质检规范」页汇总卡片，并把不规范清单推送到装维端"},
 }
 
 
@@ -1119,6 +1127,151 @@ def _normalize_complaint_query(sheets: dict) -> list[dict]:
     return out
 
 
+# ---------------- 人工质检明细（v1.8.4 质检规范） ----------------
+
+def _qc_sheet_dicts(rows: list) -> list[dict]:
+    """原始矩阵 → 字典行。表头不一定在第 1 行：FTTR / 企宽 sheet 首行是「XX质检不合格」标题，
+    按「同时含 区县 与 定单编码/服务号码」定位表头行，找不到就退回首行。"""
+    if not rows:
+        return []
+    hi = 0
+    for i, r in enumerate(rows[:6]):
+        cells = {str(c).strip() for c in r if c is not None}
+        if "区县" in cells and ({"定单编码", "服务号码"} & cells):
+            hi = i
+            break
+    head = rows[hi]
+    seen: dict = {}
+    header = []
+    for h in head:
+        h = str(h).strip() if h is not None else ""
+        if h in seen:
+            seen[h] += 1
+            header.append(f"{h}.{seen[h]}")
+        else:
+            seen[h] = 0
+            header.append(h)
+    out = []
+    for r in rows[hi + 1:]:
+        if all(v is None or str(v).strip() == "" for v in r):
+            continue
+        out.append({header[i]: r[i] for i in range(min(len(header), len(r)))})
+    return out
+
+
+def _qc_category(raw_type, sheet: str) -> str:
+    """原始定单类型 → 通报八类之一。
+
+    注意顺序：先 FTTR 再 装机（「FTTR全量质检」不含「装机」但「企宽装机质检」含），
+    投诉类三种（投诉质检 / 互联网电视投诉归因质检 / 一次上门解决不彻底投诉质检）归为一类。
+    """
+    t = str(raw_type or "").strip()
+    if t:
+        if "FTTR" in t.upper():
+            return "FTTR质检"
+        if "企宽" in t:
+            return "企宽装机质检"
+        if "装机" in t:
+            return "装机质检"
+        if "投诉" in t:
+            return "投诉质检"
+        if "义诊" in t:
+            return "义诊质检"
+        if "延伸" in t:
+            return "延伸服务质检"
+        if "看家" in t:
+            return "移动看家质检"
+        if "组网" in t:
+            return "智能组网质检"
+        return t
+    st = str(sheet or "")
+    if "企宽" in st:
+        return "企宽装机质检"
+    if "FTTR" in st.upper():
+        return "FTTR质检"
+    return ""
+
+
+def _qc_ng_item(reason, fallback="") -> str:
+    """不合格原因原文 → 归类项（聚合用）。
+    原文形如「资源清查不规范-清查结果与现场图片不一致|」「服务卡片-其他（请备注说明）|」，
+    取第一条，破折号后为具体项，去掉「（请备注说明）」这类占位后缀。"""
+    txt = str(reason or "").replace("|", "\n").strip()
+    first = next((ln.strip() for ln in txt.split("\n") if ln.strip()), "")
+    if not first:
+        first = str(fallback or "").strip()
+    if not first:
+        return "未填原因"
+    for sep in ("-", "—", "－"):
+        if sep in first:
+            first = first.split(sep, 1)[1].strip() or first
+            break
+    for junk in ("（请备注说明）", "(请备注说明)", "（备注）"):
+        first = first.replace(junk, "")
+    return first.strip()[:64] or "未填原因"
+
+
+def _normalize_qc(raw: dict) -> list[dict]:
+    """三个明细 sheet → qc_records 行。跳过无区县/无编码/无法归类的行（多为小计行）。"""
+    out: list[dict] = []
+    seen: set = set()
+    for sheet in ("人工质检明细", "FTTR", "企宽装机"):
+        for r in _qc_sheet_dicts(raw.get(sheet) or []):
+            district = str(r.get("区县") or "").strip()
+            order_no = str(r.get("定单编码") or "").strip()
+            raw_type = str(r.get("定单类型") or "").strip()
+            cat = _qc_category(raw_type, sheet)
+            if not district or not order_no or not cat:
+                continue
+            # 去重键含「环节」：同一质检单会有一级+二级两条（SGZJ...013 装机、SGZJ...011 组网），
+            # 通报是按行计的（装机 26 / 组网 13 就含这两条），只按 定单编码+类型 去重会少 2 单
+            key = (order_no, cat, str(r.get("环节") or "").strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            finish = _norm_time(r.get("质检单完成时间") or r.get("质检时间") or r.get("回单时间"))
+            dispatch = _norm_time(r.get("质检单派单时间") or r.get("受理时间"))
+            date = (finish or dispatch)[:10]
+            if not date:
+                continue
+            res_raw = str(r.get("质检结果") or r.get("整体是否合格") or "").strip()
+            is_pass = res_raw in ("通过", "合格", "是")
+            detail = str(r.get("不通过原因") or r.get("质检不合格原因") or "").strip()
+            detail = detail.replace("|", "；").strip("；")[:500]
+            remark = str(r.get("不合格原因") or "").strip()
+            penalty = _to_num(r.get("质检考核"), as_int=False)
+            no_settle = _to_num(r.get("不结算金额"), as_int=False)
+            if not is_pass:
+                if not penalty:
+                    penalty = QC_PENALTY_PER_ITEM
+                if not no_settle:
+                    no_settle = -QC_UNIT_PRICE.get(cat, 0.0)
+            out.append({
+                "date": date, "month": date[:7], "district": district,
+                "grid": str(r.get("网格") or "").strip(),
+                "category": cat, "raw_type": raw_type or sheet,
+                "order_no": order_no,
+                "qc_order_no": str(r.get("质检定单编码") or "").strip(),
+                "service_no": str(r.get("服务号码") or "").strip(),
+                "biz_no": str(r.get("业务号码") or "").strip()[:128],
+                "subject": str(r.get("定单主题") or r.get("业务主题") or "").strip()[:128],
+                "handler": _strip_district_prefix(r.get("回单人姓名") or r.get("回单人"), district),
+                "handler_no": str(r.get("回单人工号") or r.get("回单工号") or "").strip(),
+                "qc_person": str(r.get("质检人姓名") or r.get("质检人") or "").strip(),
+                "result": "通过" if is_pass else "不通过",
+                "is_pass": is_pass,
+                # 「不合格原因」列是质检员归并后的规范说法（回单内容不一致 / 未填写虚拟号码），
+                # 比机器拼的「服务卡片-其他（请备注说明）」更适合聚合展示，优先用它
+                "ng_item": "" if is_pass else (
+                    (str(r.get("不合格原因") or "").strip()[:64] or _qc_ng_item(detail, remark))),
+                "ng_detail": detail,
+                "penalty": round(penalty, 2),
+                "no_settle": round(no_settle, 2),
+                "dispatch_time": dispatch, "finish_time": finish,
+            })
+    return out
+
+
 @router.get("/info/{metric}")
 def sync_info(metric: str, user=Depends(require_admin)):
     if metric not in SYNC_MODULES:
@@ -1286,6 +1439,32 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         col_override = ["_kind", "period", "kind", "district", "outbound", "connected", "problem",
                         "problem_rate", "rate", "handler", "item", "order_no", "completion_time"]
         preview = stats[:100] + issues[:200]
+    elif metric == "qc":
+        # 人工质检明细：三个明细 sheet 合一（表头行位置不统一，用 _qc_sheet_dicts 定位）
+        filename, raw = await parse_upload_raw(
+            request, ["人工质检明细", "FTTR", "企宽装机"])
+        rows = _normalize_qc(raw)
+        if not rows:
+            raise HTTPException(status_code=400,
+                                detail="未解析到质检明细，请确认上传的是「人工质检明细」导出"
+                                       "（需含 人工质检明细 / FTTR / 企宽装机 三个 sheet）")
+        dates = sorted({r["date"] for r in rows})
+        ng = [r for r in rows if not r["is_pass"]]
+        ty: dict = {}
+        for r in rows:
+            t = ty.setdefault(r["category"], {"scanned": 0, "ng": 0})
+            t["scanned"] += 1
+            if not r["is_pass"]:
+                t["ng"] += 1
+        extra = {"date": "、".join(dates), "ng": len(ng),
+                 "penalty": round(sum(r["penalty"] for r in ng), 2),
+                 "no_settle": round(sum(r["no_settle"] for r in ng), 2),
+                 "districts": len({r["district"] for r in rows}),
+                 "types": "、".join(f"{k} {v['scanned'] - v['ng']}/{v['scanned']}"
+                                   for k, v in ty.items()),
+                 "note": "预览合计应与邮件通报「分析汇总」合计行一致（抽检量 / 合格量 / 不合格件数 / "
+                         "考核金额 / 不结算金额）；八个类型 = 通报的八个质检列"}
+        preview = rows[:150]
     else:
         filename, rows = await parse_upload(request)
         if not rows:
@@ -1507,12 +1686,51 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                f"（月份 {'、'.join(m or '未标' for m in months) or '无'}，按月替换）"
                + (f"；不规范项 {'、'.join(f'{k}{v}条' for k, v in cnt.items())}" if cnt else "")
                + "，首页「AI装维即访-不规范」与「AI装维即访」页面已更新")
+    elif job.metric == "qc":
+        # 人工质检明细：按质检日期替换。重传只换质检数据，已推送/已整改状态按
+        # (date, 定单编码, 类型) 保留 —— 否则补传一次就白推了。
+        from ..models import QcRecord as _QR
+        dates = sorted({r.get("date") for r in rows if r.get("date")})
+        keep: dict = {}
+        if dates:
+            for old in db.query(_QR).filter(_QR.date.in_(dates)).all():
+                keep[(old.date, old.order_no, old.category)] = old
+            db.query(_QR).filter(_QR.date.in_(dates)).delete(synchronize_session=False)
+        for r in rows:
+            old = keep.get((r.get("date"), r.get("order_no"), r.get("category")))
+            db.add(_QR(
+                date=r.get("date") or "", month=r.get("month") or "",
+                district=r.get("district") or "", grid=r.get("grid") or "",
+                category=r.get("category") or "", raw_type=r.get("raw_type") or "",
+                order_no=r.get("order_no") or "", qc_order_no=r.get("qc_order_no") or "",
+                service_no=r.get("service_no") or "", biz_no=r.get("biz_no") or "",
+                subject=r.get("subject") or "", handler=r.get("handler") or "",
+                handler_no=r.get("handler_no") or "", qc_person=r.get("qc_person") or "",
+                result=r.get("result") or "", is_pass=bool(r.get("is_pass")),
+                ng_item=r.get("ng_item") or "", ng_detail=r.get("ng_detail") or "",
+                penalty=float(r.get("penalty") or 0), no_settle=float(r.get("no_settle") or 0),
+                dispatch_time=r.get("dispatch_time") or "",
+                finish_time=r.get("finish_time") or "",
+                push_to_id=old.push_to_id if old else 0,
+                push_to_name=old.push_to_name if old else "",
+                push_at=old.push_at if old else "",
+                push_by=old.push_by if old else "",
+                fix_status=old.fix_status if old else "",
+                fix_at=old.fix_at if old else "",
+                fix_note=old.fix_note if old else "",
+            ))
+            n += 1
+        ng = [r for r in rows if not r.get("is_pass")]
+        msg = (f"入库成功：人工质检明细 {len(rows)} 单（{'、'.join(dates) or '无日期'}，按天替换）；"
+               f"不合格 {len(ng)} 件 / 考核 {abs(round(sum(r['penalty'] for r in ng), 2))} 元 / "
+               f"不结算 {abs(round(sum(r['no_settle'] for r in ng), 2))} 元；"
+               f"「质检规范」页已更新，历史推送与整改状态已保留")
     job.status = "confirmed"
     job.confirmed_at = datetime.now()
     db.add(AuditLog(username=user.username, action="数据入库", detail=f"{job.metric} {n} 行"))
     db.commit()
     if job.metric in ("extension", "completion_rate", "install_wide", "complaint_wide",
-                      "install_query", "complaint_query", "ai_visit", "h5_survey"):
+                      "install_query", "complaint_query", "ai_visit", "h5_survey", "qc"):
         return {"msg": msg, "rows": n}
     return {"msg": f"入库成功 {n} 行（指标实时计算，无需重算）", "rows": n}
 

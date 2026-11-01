@@ -72,4 +72,7 @@ export const mp = {
   notice: (id) => request('/mp/notices/' + id),
   sign: (id) => request(`/mp/notices/${id}/sign`, { method: 'POST' }),
   knowledge: (kw = '') => request('/mp/knowledge?keyword=' + encodeURIComponent(kw)),
+  // 质检整改（桌面端「质检规范」推送过来的不规范清单）
+  qc: () => request('/mp/qc/my'),
+  qcFix: (id, note) => request('/mp/qc/' + id + '/feedback', { method: 'POST', body: { note } }),
 }

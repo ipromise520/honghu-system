@@ -66,6 +66,31 @@
       <div v-if="panelOpen" class="ap-mask" @click="panelOpen = false"></div>
 
 
+    <!-- 质检整改（桌面端「质检规范」推送到装维端的不规范清单） -->
+    <section v-if="qcTotal > 0" class="grp">
+      <div class="grp-h">
+        <span class="grp-t">质检整改</span>
+        <span class="grp-line"></span>
+      </div>
+      <div class="grid">
+        <button class="card" style="--c:#dc2626" @click="router.push('/qc')">
+          <span class="arrow"><Icon name="right" /></span>
+          <div class="card-h">
+            <Icon name="check" />
+            <span>质检不规范</span>
+            <span v-if="qcPending > 0" class="badge-dot">{{ qcPending }}</span>
+          </div>
+          <div class="card-v">
+            <span class="v">{{ qcPending }}</span>
+            <span class="u">条</span>
+          </div>
+          <div class="card-s">
+            <span class="gbadge">{{ qcPending > 0 ? '待整改 · 点击提交整改' : '已全部提交整改' }}</span>
+          </div>
+        </button>
+      </div>
+    </section>
+
     <!-- 分组 -->
     <section v-for="(g, gi) in data.groups" :key="g.key" class="grp">
       <div class="grp-h">
@@ -240,6 +265,17 @@ async function loadAlerts() {
   try { alerts.value = await mp.alerts() } catch (e) { /* 提醒失败不影响主看板 */ }
 }
 
+// 质检整改条数：为 0 时首页不显示该分组，避免长期挂着一条「0 条」的空卡
+const qcPending = ref(0)
+const qcTotal = ref(0)
+async function loadQc() {
+  try {
+    const d = await mp.qc()
+    qcPending.value = d.pending || 0
+    qcTotal.value = d.total || 0
+  } catch (e) { /* 质检接口失败不影响主看板 */ }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -247,6 +283,7 @@ async function load() {
     data.value = d
     animateAll()
     loadAlerts()
+    loadQc()
   } catch (e) {
     if (e.message !== '登录已过期') alert(e.message || '加载失败')
   } finally {

@@ -32,7 +32,7 @@ from ..status_resolver import (NOT_PENDING, is_pending, realtime_cand, report_ca
 from .h5 import mine_pending as _h5_mine_pending
 from ..models import (
     AiVisitIssue, AlertOrder, ComplaintOrder, District, ExtensionMember,
-    H5SurveyStaff, InstallOrder, Notice, NoticeSignature, ReportDupOrder,
+    H5SurveyStaff, InstallOrder, Notice, NoticeSignature, QcRecord, ReportDupOrder,
     ReportTimeout, ReportWideOrder, Task, TaskLog, User,
 )
 
@@ -994,3 +994,51 @@ def alerts_warn(db: Session = Depends(get_db), user: User = Depends(get_current_
             "source": "省公司预警附件（预约剩余 ≤2 小时的未完工单，含已逾期）",
             "columns": [{"key": k, "label": lb, "mono": mono} for k, lb, mono in cols],
             "rows": rows}
+
+# ---------------------------------------------------------------- 质检整改（v1.8.4 质检规范）
+
+@router.get("/qc/my")
+def qc_my(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """我的质检整改单：桌面端「质检规范」把这些「不通过」记录推给你。
+
+    只返回推给本人的，按「待整改在前、日期倒序」排。fix_status:
+    pushed=待整改 / fixed=已整改（本人已提交整改说明）。
+    """
+    rows = (db.query(QcRecord).filter(QcRecord.push_to_id == user.id)
+            .order_by(QcRecord.fix_status.desc(), QcRecord.date.desc(), QcRecord.id.desc()).all())
+    return {
+        "total": len(rows),
+        "pending": sum(1 for r in rows if (r.fix_status or "") != "fixed"),
+        "fixed": sum(1 for r in rows if r.fix_status == "fixed"),
+        "rows": [{
+            "id": r.id, "date": r.date, "district": r.district, "grid": r.grid,
+            "category": r.category, "order_no": r.order_no, "subject": r.subject,
+            "handler": r.handler, "qc_person": r.qc_person,
+            "ng_item": r.ng_item, "ng_detail": r.ng_detail,
+            "penalty": float(r.penalty or 0), "no_settle": float(r.no_settle or 0),
+            "finish_time": r.finish_time, "push_at": r.push_at,
+            "fix_status": r.fix_status or "pushed",
+            "fix_at": r.fix_at, "fix_note": r.fix_note,
+        } for r in rows],
+    }
+
+
+@router.post("/qc/{qid}/feedback")
+def qc_feedback(qid: int, body: dict = None, db: Session = Depends(get_db),
+                user: User = Depends(get_current_user)):
+    """提交整改说明（装维端）。只能改推给自己的单，已整改的不重复提交。"""
+    r = db.query(QcRecord).filter(QcRecord.id == qid, QcRecord.push_to_id == user.id).first()
+    if not r:
+        raise HTTPException(404, "整改单不存在")
+    if r.fix_status == "fixed":
+        return {"msg": "该单已提交过整改", "fix_at": r.fix_at, "fix_status": "fixed"}
+    note = str((body or {}).get("note") or "").strip()
+    if not note:
+        raise HTTPException(400, "请填写整改情况说明")
+    r.fix_status = "fixed"
+    # 只到分钟：与开单/整改记录展示口径一致，_now() 带微秒会显示成 11:00:15.812143
+    # 注意本模块是 `import datetime as _dt`，没有裸 datetime 名字
+    r.fix_at = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    r.fix_note = note[:255]
+    db.commit()
+    return {"msg": "整改已提交，等质检复核", "fix_at": r.fix_at, "fix_status": "fixed"}
