@@ -104,15 +104,27 @@ def fetch_mail() -> dict:
         latest = None
         subject = ""
         for i in reversed(ids[-80:]):                     # 最近80封内找主题
-            _, md = m.fetch(i, "(BODY[HEADER.FIELDS (SUBJECT)])")
-            s = _dec(email_lib.message_from_bytes(md[0][1]).get("Subject"))
+            # 单封取不到头是常态（并发收信时被移走、UID 失效、网络闪断）。
+            # 以前这里直接 md[0][1]，一封坏邮件就把整轮打崩 → 该小时卡片停在旧数据。
+            # 跳过坏的继续找下一封，才配得上「最近 80 封里找一封」的本意。
+            try:
+                _, md = m.fetch(i, "(BODY[HEADER.FIELDS (SUBJECT)])")
+                part = (md or [None])[0]
+                if not part or len(part) < 2:
+                    continue
+                s = _dec(email_lib.message_from_bytes(part[1]).get("Subject") or "")
+            except Exception:
+                continue
             if SUBJECT_KEY in s:
                 latest, subject = i, s
                 break
         if latest is None:
             raise RuntimeError("收件箱最近邮件中未找到「待处理工单预警」")
         _, md = m.fetch(latest, "(RFC822)")
-        msg = email_lib.message_from_bytes(md[0][1])
+        part = (md or [None])[0]
+        if not part or len(part) < 2:
+            raise RuntimeError(f"邮件正文取不到（{subject}），可能已被移动或删除")
+        msg = email_lib.message_from_bytes(part[1])
         atts = {}
         for part in msg.walk():
             fn = part.get_filename()
@@ -342,15 +354,25 @@ def fetch_report_mail() -> dict:
         ids = data[0].split()
         latest, subject = None, ""
         for i in reversed(ids[-10:]):
-            _, md = m.fetch(i, "(BODY[HEADER.FIELDS (SUBJECT)])")
-            s = _dec(email_lib.message_from_bytes(md[0][1]).get("Subject"))
+            # 同上：坏邮件跳过，不让一封失效邮件拖垮整轮
+            try:
+                _, md = m.fetch(i, "(BODY[HEADER.FIELDS (SUBJECT)])")
+                part = (md or [None])[0]
+                if not part or len(part) < 2:
+                    continue
+                s = _dec(email_lib.message_from_bytes(part[1]).get("Subject") or "")
+            except Exception:
+                continue
             if REPORT_SUBJECT_KEY in s:
                 latest, subject = i, s
                 break
         if latest is None:
             raise RuntimeError("未找到【重要通报】邮件")
         _, md = m.fetch(latest, "(RFC822)")
-        msg = email_lib.message_from_bytes(md[0][1])
+        part = (md or [None])[0]
+        if not part or len(part) < 2:
+            raise RuntimeError(f"重要通报正文取不到（{subject}），可能已被移动或删除")
+        msg = email_lib.message_from_bytes(part[1])
         atts = {}
         for part in msg.walk():
             fn = part.get_filename()
