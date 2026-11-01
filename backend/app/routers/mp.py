@@ -1011,8 +1011,9 @@ def qc_my(db: Session = Depends(get_db), user: User = Depends(get_current_user))
         "pending": sum(1 for r in rows if (r.fix_status or "") != "fixed"),
         "fixed": sum(1 for r in rows if r.fix_status == "fixed"),
         "rows": [{
-            "id": r.id, "date": r.date, "district": r.district, "grid": r.grid,
-            "category": r.category, "order_no": r.order_no, "subject": r.subject,
+            "id": r.id, "date": r.date, "report_date": r.report_date, "district": r.district,
+            "grid": r.grid, "source": r.source, "category": r.category,
+            "order_no": r.order_no, "subject": r.subject,
             "handler": r.handler, "qc_person": r.qc_person,
             "ng_item": r.ng_item, "ng_detail": r.ng_detail,
             "penalty": float(r.penalty or 0), "no_settle": float(r.no_settle or 0),

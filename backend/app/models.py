@@ -708,14 +708,22 @@ class ComplaintRealtimeStatus(Base):
     fetched_at: Mapped[str] = mapped_column(String(32), default="")
 
 class QcRecord(Base):
-    """人工质检明细（v1.8.4「质检规范」通报分析源）：一单一行。
+    """质检通报（v1.8.5「质检规范」五项通报合一）明细：一单一行。
 
-    来源：市公司每日「人工质检明细」xlsx，三个明细 sheet 合一
+    来源：市公司每日下发的 **5 个质检表项**，全部并入本表，用 source 区分：
       · 人工质检明细（抽检：投诉 / 义诊 / 延伸服务 / 移动看家 / 智能组网 / 装机）
-      · FTTR（全量）
-      · 企宽装机（全量）
-    按 date（质检完成时间所在日）替换；「分析汇总」sheet 不入库——它是透视表，
-    本表重算结果与通报合计逐格核对一致（198 单 / 不合格 12 件 / 考核 120 元 / 不结算 608.16 元）。
+      · FTTR质检（FTTR 质检工单汇总表，全量，当月累计）
+      · 企宽质检（企宽装机质检统计，全量，当月累计）
+      · 改约质检（装、维改约质检通报：装机新增 / 投诉新增，听音判「真实/虚假」）
+      · 集团AI质检（集团智能质检结果：清单 sheet 全量）
+    两张联合主键语义不同，别混用：
+      date        = 数据日期（明细行自己的质检/受理时间所在日）
+      report_date = 通报批次日（同一次上传的 5 个文件共用 = 该批最大数据日）——页面按它分组
+    FTTR 月汇总 ⊇ 人工质检明细的 FTTR sheet、企宽月统计 ⊇ 其企宽 sheet，
+    同批上传按 QC_SOURCE_PRIORITY 去重，只保留一份。
+
+    替换粒度：(report_date, source) 二元组 —— 单传某一个文件时不会误删其他来源的行；
+    「分析汇总」等透视 sheet 不入库，由明细重算。
 
     推送字段：把「不通过」记录按回单人匹配装维端账号后写入，
     装维人员在 /m 端提交整改 → fix_status='fixed'，页面显示整改结果。
@@ -725,9 +733,13 @@ class QcRecord(Base):
         Index("ix_qc_date", "date"),
         Index("ix_qc_district", "district"),
         Index("ix_qc_push", "push_to_id"),
+        Index("ix_qc_report", "report_date"),
+        Index("ix_qc_source", "source"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
-    date: Mapped[str] = mapped_column(String(10), default="")          # 质检日期 YYYY-MM-DD
+    report_date: Mapped[str] = mapped_column(String(10), default="")   # 通报批次日 YYYY-MM-DD
+    source: Mapped[str] = mapped_column(String(32), default="")        # 五个通报来源之一
+    date: Mapped[str] = mapped_column(String(10), default="")          # 数据日期 YYYY-MM-DD
     month: Mapped[str] = mapped_column(String(7), default="")          # YYYY-MM
     district: Mapped[str] = mapped_column(String(32), default="")
     grid: Mapped[str] = mapped_column(String(64), default="")

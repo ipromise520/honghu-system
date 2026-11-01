@@ -127,6 +127,10 @@ _ADD_COLUMNS = {
     "complaint_orders": [("community_name", "VARCHAR(255) DEFAULT ''"),
                          ("contact_person", "VARCHAR(64) DEFAULT ''"),
                          ("fault_number", "VARCHAR(64) DEFAULT ''")],
+    # 质检五项通报合一（v1.8.5）：来源 + 通报批次日；已有库由本迁移补齐，
+    # 历史行随后由 _backfill_qc_source 回填 source='人工质检明细'、report_date=date
+    "qc_records": [("source", "VARCHAR(32) DEFAULT ''"),
+                   ("report_date", "VARCHAR(10) DEFAULT ''")],
 }
 
 # month 生成列（VIRTUAL）：把 substr(accept_time,1,7) 变为可索引列，月度聚合/筛选走索引
@@ -160,6 +164,8 @@ _INDEXES = [
     ("h5_survey_records", "ix_h5rec_order", "order_no, kind"),
     ("install_orders", "ix_io_status_order", "status, order_id"),
     ("complaint_orders", "ix_co_status_eoms", "status, eoms_no"),
+    ("qc_records", "ix_qc_report", "report_date"),
+    ("qc_records", "ix_qc_source", "source"),
 ]
 
 
@@ -207,6 +213,27 @@ def _migrate_columns():
                 print(f"[honghu] 警告：索引 {name} 创建失败（{e}）")
 
 
+def _backfill_qc_source():
+    """v1.8.5 历史数据回填：五个来源合并前入库的行 source 为空，
+    按来源归类补上 —— 旧数据全部来自「人工质检明细」（当时只有这一个模块），
+    report_date 直接取原 date（当时一天一批，两者等价）。"""
+    with engine.begin() as conn:
+        try:
+            have = _table_columns(conn, "qc_records")
+        except Exception:
+            return
+        if not have or "source" not in have:
+            return
+        n = conn.execute(text(
+            "UPDATE qc_records SET source = '人工质检明细' "
+            "WHERE source IS NULL OR source = ''")).rowcount
+        m = conn.execute(text(
+            "UPDATE qc_records SET report_date = date "
+            "WHERE (report_date IS NULL OR report_date = '') AND date <> ''")).rowcount
+        if n or m:
+            print(f"[honghu] 质检历史数据回填：source {n} 行 / report_date {m} 行")
+
+
 def _rebuild_h5_districts():
     """h5_survey_districts 重建：旧版 satisfaction/q_timely/q_service/q_effect/fttr_sat 为 NOT NULL，
     新版解析器对「无测评」区县写 None，而 bulk_insert_mappings 会省略无默认值的列 → NOT NULL 冲突。
@@ -238,6 +265,7 @@ def _rebuild_h5_districts():
 def startup():
     Base.metadata.create_all(engine)
     _migrate_columns()
+    _backfill_qc_source()
     _rebuild_h5_districts()
     created = seed()
     if created:

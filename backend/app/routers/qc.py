@@ -1,18 +1,25 @@
 # -*- coding: utf-8 -*-
-"""质检规范（人工质检通报）接口
+"""质检规范（五项通报合一）接口
 
-数据源：市公司每日「人工质检明细」xlsx（经「数据同步」上传入库到 qc_records）
-  · 人工质检明细（抽检：投诉 / 义诊 / 延伸服务 / 移动看家 / 智能组网 / 装机）
-  · FTTR（全量）
-  · 企宽装机（全量）
+数据源：市公司每天下发的 **5 个质检表项**（经「数据同步」一次多选上传入库到 qc_records）
+  1. 人工质检明细      → 投诉 / 义诊 / 延伸服务 / 移动看家 / 智能组网 / 装机（抽检）
+  2. FTTR质检工单汇总表 → FTTR质检（全量）
+  3. 企宽装机质检统计   → 企宽装机质检（全量）
+  4. 装、维改约质检通报 → 装机改约质检 / 投诉改约质检（听音判真实·虚假）
+  5. 集团智能质检结果   → 集团AI质检（AI 图像质检）
 
-通报分析维度（对齐「分析汇总」sheet）：
-  区县 × 质检类型 → 抽检量 / 合格量 / 合格率（各类型有达标线）
-  区县 → 不合格件数 / 考核金额 / 不结算金额
-  全市 → 不合格原因 Top（不规范项聚合）
+通报分析维度：
+  · 卡片区：五个来源各自一张卡（抽检量 / 合格 / 不合格 / 合格率 / 待推送）
+  · 类型维度：11 个通报类型 × 抽检量/合格量/合格率/达标线/考核/不结算
+  · 区县维度：不合格件数 / 考核 / 不结算 / 短板类型
+  · 全市：不合格原因 Top（不规范项聚合）
 
-推送：把「不通过」记录按 回单人 → 装维人员账号 匹配后推到装维端（/m/qc），
+推送：把「不通过」记录按 责任人 → 装维人员账号 匹配后推到装维端（/m/qc），
       装维人员提交整改后回写 fix_status='fixed'，页面据此显示整改结果。
+
+分组键是 report_date（通报批次日）而非 date（数据日期）：
+改约通报用前一日的数据、集团AI质检自带独立日期标注，五个来源的数据日本来就不齐，
+按各自数据日分组会把一张通报拆成两天，看不全。
 """
 from datetime import datetime
 
@@ -23,7 +30,8 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import QcRecord, District, User, AuditLog
-from ..qc_rules import QC_ORDER, QC_THRESHOLD, QC_UNIT_PRICE
+from ..qc_rules import (QC_ORDER, QC_THRESHOLD, QC_SOURCE_ORDER,
+                        QC_SOURCE_LABEL, QC_SOURCE_TYPES)
 
 router = APIRouter(prefix="/qc", tags=["qc"])
 
@@ -37,25 +45,32 @@ def _now() -> str:
 
 
 def _dates(db: Session) -> list[dict]:
-    rows = (db.query(QcRecord.date, func.count(QcRecord.id))
-            .group_by(QcRecord.date).order_by(QcRecord.date.desc()).all())
+    """通报批次日列表（倒序）。olds：同一天合并了几个来源、多少行、多少件不合格。"""
+    rows = (db.query(QcRecord.report_date, func.count(QcRecord.id))
+            .filter(QcRecord.report_date != "")
+            .group_by(QcRecord.report_date)
+            .order_by(QcRecord.report_date.desc()).all())
     out = []
     for d, n in rows:
         if not d:
             continue
         ng = (db.query(func.count(QcRecord.id))
-              .filter(QcRecord.date == d, QcRecord.is_pass.is_(False)).scalar() or 0)
-        out.append({"date": d, "rows": n, "ng": ng})
+              .filter(QcRecord.report_date == d, QcRecord.is_pass.is_(False)).scalar() or 0)
+        src = (db.query(func.count(func.distinct(QcRecord.source)))
+               .filter(QcRecord.report_date == d).scalar() or 0)
+        out.append({"date": d, "rows": n, "ng": ng, "sources": src})
     return out
 
 
 @router.get("/dates")
 def dates(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    return {"rows": _dates(db)}
+    rows = _dates(db)
+    src_opts = sorted({s for (s,) in db.query(QcRecord.source).distinct().all() if s})
+    return {"rows": rows, "sources": src_opts}
 
 
 def _match_worker(db: Session, rec: QcRecord):
-    """回单人 → 装维端账号。**必须同区县同名**，否则视为没账号。
+    """责任人 → 装维端账号。**必须同区县同名**，否则视为没账号。
 
     为什么不能跨区县按名字兜底：重名是常态 —— 洪湖有「彭伟」「陈远清」，
     江陵也有一件「彭伟」的 FTTR 不合格、石首有一件「陈远清」的投诉不合格。
@@ -89,16 +104,21 @@ def _match_worker(db: Session, rec: QcRecord):
     return None
 
 
+def _base_date(db: Session, date: str, ds: list) -> str:
+    if not date:
+        date = ds[0]["date"] if ds else ""
+    return date
+
+
 @router.get("/overview")
 def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
              user=Depends(get_current_user)):
     ds = _dates(db)
+    date = _base_date(db, date, ds)
     if not date:
-        date = ds[0]["date"] if ds else ""
-    if not date:
-        return {"date": "", "has_data": False, "dates": ds}
+        return {"date": "", "has_data": False, "dates": ds, "sources": []}
 
-    all_rows = db.query(QcRecord).filter(QcRecord.date == date).all()
+    all_rows = db.query(QcRecord).filter(QcRecord.report_date == date).all()
     rows = [r for r in all_rows if not district or district == "全部" or r.district == district]
 
     scanned = len(rows)
@@ -106,6 +126,32 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
     passed = scanned - len(ng_rows)
     penalty = sum(float(r.penalty or 0) for r in ng_rows)
     no_settle = sum(float(r.no_settle or 0) for r in ng_rows)
+
+    # ---------- 卡片区：五个通报来源各一张（卡片区通报） ----------
+    sources = []
+    for src in QC_SOURCE_ORDER:
+        sub = [r for r in rows if r.source == src]
+        if not sub:
+            continue
+        s_ng = [r for r in sub if not r.is_pass]
+        rate = _r1((len(sub) - len(s_ng)) * 100.0 / len(sub))
+        thr = QC_SOURCE_TYPES.get(src) or []
+        ok = [QC_THRESHOLD.get(t) for t in thr]
+        ok = [t for t in ok if t is not None]
+        # 该来源有自己的达标线才判达标，否则留空（改约只通报「虚假占比」，没有达标线）
+        thr_val = min(ok) if ok else None
+        people = len({r.handler for r in s_ng if r.handler})
+        sources.append({
+            "source": src, "label": QC_SOURCE_LABEL.get(src, src),
+            "scanned": len(sub), "passed": len(sub) - len(s_ng), "ng": len(s_ng),
+            "rate": rate, "ok": (rate >= thr_val) if thr_val is not None else None,
+            "threshold": _r1(thr_val) if thr_val is not None else None,
+            "people": people,
+            "penalty": round(sum(float(r.penalty or 0) for r in s_ng), 2),
+            "no_settle": round(sum(float(r.no_settle or 0) for r in s_ng), 2),
+            "todo": sum(1 for r in s_ng if not r.push_at),
+            "types": sorted({r.category for r in sub}),
+        })
 
     # ---------- 类型维度（区县×类型 的通报口径） ----------
     types = []
@@ -115,11 +161,13 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
             continue
         ok_n = sum(1 for r in sub if r.is_pass)
         rate = _r1(ok_n * 100.0 / len(sub))
-        thr = QC_THRESHOLD.get(cat, 100.0)
+        thr = QC_THRESHOLD.get(cat)
         types.append({
             "category": cat, "scanned": len(sub), "passed": ok_n,
-            "ng": len(sub) - ok_n, "rate": rate, "threshold": thr,
-            "ok": rate >= thr,
+            "ng": len(sub) - ok_n, "rate": rate,
+            "threshold": None if thr is None else _r1(thr),
+            "ok": None if thr is None else rate >= thr,
+            "source": next((r.source for r in sub if r.source), ""),
             "penalty": round(sum(float(r.penalty or 0) for r in sub if not r.is_pass), 2),
             "no_settle": round(sum(float(r.no_settle or 0) for r in sub if not r.is_pass), 2),
         })
@@ -135,8 +183,11 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
             s2 = [r for r in sub if r.category == cat]
             if not s2:
                 continue
+            thr = QC_THRESHOLD.get(cat)
+            if thr is None:
+                continue
             r2 = (sum(1 for r in s2 if r.is_pass)) * 100.0 / len(s2)
-            if r2 < QC_THRESHOLD.get(cat, 100.0):
+            if r2 < thr:
                 weak.append(f"{cat}{_r1(r2)}%")
         districts.append({
             "district": dname, "scanned": len(sub), "passed": len(sub) - len(sub_ng),
@@ -155,13 +206,12 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
     reasons = [{"item": k, "count": v} for k, v in
                sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))][:12]
 
-    # ---------- 推送/整改状态 ----------
+    # ---------- 推送 / 整改状态 ----------
     fixed = sum(1 for r in ng_rows if r.fix_status == "fixed")
     pushed = sum(1 for r in ng_rows if r.push_at)
     push = {"ng_total": len(ng_rows), "pushed": pushed, "fixed": fixed,
             "todo": len(ng_rows) - pushed, "fixing": pushed - fixed}
 
-    # 明细里哪些人还没有装维端账号（推送会跳过）—— 只算未推送的，避免每次重算全表
     unmatched_people = []
     seen = set()
     for r in ng_rows:
@@ -169,7 +219,8 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
             continue
         seen.add(r.handler)
         if not _match_worker(db, r):
-            unmatched_people.append({"handler": r.handler, "district": r.district})
+            unmatched_people.append({"handler": r.handler, "district": r.district,
+                                     "source": r.source})
     push["unmatched_people"] = unmatched_people
 
     return {
@@ -180,24 +231,28 @@ def overview(date: str = "", district: str = "", db: Session = Depends(get_db),
             "penalty": round(penalty, 2), "no_settle": round(no_settle, 2),
             "districts": len({r.district for r in rows if r.district and not r.is_pass}),
             "people": len({r.handler for r in rows if r.handler}),
-            "types": len(types),
+            "types": len(types), "sources": len(sources),
+            "data_dates": sorted({r.date for r in rows if r.date}),
         },
-        "types": types, "districts": districts, "reasons": reasons, "push": push,
+        "types": types, "districts": districts, "reasons": reasons,
+        "sources": sources, "push": push,
     }
 
 
 @router.get("/records")
-def records(date: str = "", district: str = "", category: str = "", result: str = "",
-            keyword: str = "", push_status: str = "", page: int = 1, size: int = 50,
+def records(date: str = "", district: str = "", category: str = "", source: str = "",
+            result: str = "", keyword: str = "", push_status: str = "",
+            page: int = 1, size: int = 50,
             db: Session = Depends(get_db), user=Depends(get_current_user)):
     ds = _dates(db)
-    if not date:
-        date = ds[0]["date"] if ds else ""
-    q = db.query(QcRecord).filter(QcRecord.date == date)
+    date = _base_date(db, date, ds)
+    q = db.query(QcRecord).filter(QcRecord.report_date == date)
     if district and district != "全部":
         q = q.filter(QcRecord.district == district)
     if category:
         q = q.filter(QcRecord.category == category)
+    if source:
+        q = q.filter(QcRecord.source == source)
     if result == "ng":
         q = q.filter(QcRecord.is_pass.is_(False))
     elif result == "ok":
@@ -217,10 +272,11 @@ def records(date: str = "", district: str = "", category: str = "", result: str 
             .offset(max(0, (page - 1) * size)).limit(size).all())
     return {"date": date, "total": total, "page": page, "size": size,
             "rows": [{
-                "id": r.id, "date": r.date, "district": r.district, "grid": r.grid,
-                "category": r.category, "order_no": r.order_no, "service_no": r.service_no,
-                "subject": r.subject, "handler": r.handler, "handler_no": r.handler_no,
-                "qc_person": r.qc_person, "result": r.result, "is_pass": bool(r.is_pass),
+                "id": r.id, "date": r.date, "report_date": r.report_date, "source": r.source,
+                "district": r.district, "grid": r.grid, "category": r.category,
+                "order_no": r.order_no, "service_no": r.service_no, "subject": r.subject,
+                "handler": r.handler, "handler_no": r.handler_no, "qc_person": r.qc_person,
+                "result": r.result, "is_pass": bool(r.is_pass),
                 "ng_item": r.ng_item, "ng_detail": r.ng_detail,
                 "penalty": float(r.penalty or 0), "no_settle": float(r.no_settle or 0),
                 "finish_time": r.finish_time,
@@ -233,8 +289,8 @@ def records(date: str = "", district: str = "", category: str = "", result: str 
 def push(body: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """把「不通过」记录推到对应装维人员的装维端。
 
-    body: {ids: [], date: '', district: '', category: '', only_unpushed: true}
-    ids 为空时按 date/district/category 范围推送（只推不通过、未推送、未整改的）。
+    body: {ids: [], date: '', district: '', category: '', source: '', only_unpushed: true}
+    ids 为空时按 date/district/category/source 范围推送（只推不通过、未推送、未整改的）。
     """
     ids = [int(x) for x in (body.get("ids") or [])]
     only_unpushed = body.get("only_unpushed", True)
@@ -242,17 +298,20 @@ def push(body: dict, db: Session = Depends(get_db), user=Depends(get_current_use
     if ids:
         q = q.filter(QcRecord.id.in_(ids))
     else:
-        date = (body.get("date") or "").strip()
+        ds = _dates(db)
+        date = _base_date(db, (body.get("date") or "").strip(), ds)
         if not date:
-            ds = _dates(db)
-            date = ds[0]["date"] if ds else ""
-        q = q.filter(QcRecord.date == date)
+            raise HTTPException(status_code=400, detail="没有可推送的通报批次")
+        q = q.filter(QcRecord.report_date == date)
         district = (body.get("district") or "").strip()
         if district and district != "全部":
             q = q.filter(QcRecord.district == district)
         category = (body.get("category") or "").strip()
         if category:
             q = q.filter(QcRecord.category == category)
+        source = (body.get("source") or "").strip()
+        if source:
+            q = q.filter(QcRecord.source == source)
     rows = q.filter(QcRecord.is_pass.is_(False)).all()
     if not rows:
         raise HTTPException(status_code=400, detail="没有可推送的不合格记录")

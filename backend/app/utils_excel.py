@@ -137,6 +137,65 @@ async def parse_upload_raw(request, sheet_names=None) -> tuple[str, dict[str, li
     return filename, {"": [tuple(r) for r in reader]}
 
 
+
+async def parse_upload_multi_raw(request, sheet_names=None) -> list[tuple[str, dict[str, list[tuple]]]]:
+    """解析 multipart 请求中的 **多个** xlsx，返回 [(文件名, {sheet名: 原始行元组列表}), ...]。
+
+    质检通报每日 5 个附件，一次多选上传比逐个传 5 次合理；同时兼容旧的单文件
+    （字段名 file）调用。sheet 白名单对所有文件共用一份。
+    """
+    import openpyxl
+
+    ctype = request.headers.get("content-type", "")
+    uploads = []
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        for up in form.getlist("files"):
+            if up is not None:
+                uploads.append(up)
+        single = form.get("file")
+        if single is not None and getattr(single, "filename", None):
+            uploads.append(single)
+    else:
+        uploads.append(None)
+    if not uploads:
+        raise ValueError("缺少 file / files 字段")
+
+    out: list[tuple[str, dict[str, list[tuple]]]] = []
+    for upload in uploads:
+        if upload is None:
+            filename, data = "raw.csv", await request.body()
+        else:
+            filename = upload.filename or "upload"
+            data = await upload.read()
+        if not data:
+            continue
+        if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+            wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+            wanted = {str(s).strip() for s in sheet_names} if sheet_names else None
+            sheets: dict[str, list[tuple]] = {}
+            for ws in wb.worksheets:
+                if wanted is not None and ws.title.strip() not in wanted:
+                    continue
+                # 同 parse_upload_raw：不信导出系统写出的失实 dimension 声明
+                ws.reset_dimensions()
+                rows = []
+                try:
+                    for r in ws.iter_rows(values_only=True):
+                        rows.append(tuple(r))
+                except ValueError:
+                    # openpyxl 解析表尾 autoFilter 的已知缺陷：数据已全部输出后才抛
+                    pass
+                sheets[ws.title] = rows
+            wb.close()
+            out.append((filename, sheets))
+        else:
+            import csv
+            text = data.decode("utf-8-sig", errors="replace")
+            out.append((filename, {"": [tuple(r) for r in csv.reader(io.StringIO(text))]}))
+    return out
+
+
 async def parse_upload(request) -> tuple[str, list[dict]]:
     """从 multipart 请求解析 xlsx / csv（全部 sheet 合并），返回 (文件名, 行列表[dict])"""
     filename, sheets = await parse_upload_sheets(request)
