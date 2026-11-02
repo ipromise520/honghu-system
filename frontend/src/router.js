@@ -19,6 +19,7 @@ const routes = [
       { path: 'h5-rate', component: () => import('./views/H5Rate.vue'), meta: { title: 'H5参与率通报' } },
       { path: 'alerts', component: () => import('./views/AlertCenter.vue'), meta: { title: '预警中心' } },
       { path: 'work-orders', component: () => import('./views/WorkOrders.vue'), meta: { title: '工单管理' } },
+      { path: 'territory', component: () => import('./views/Territory.vue'), meta: { title: '责任田对应责任人' } },
       { path: 'tasks', component: () => import('./views/Tasks.vue'), meta: { title: '任务分派' } },
       { path: 'my-tasks', component: () => import('./views/MyTasks.vue'), meta: { title: '我的任务' } },
       { path: 'notices', component: () => import('./views/Notices.vue'), meta: { title: '通知管理' } },

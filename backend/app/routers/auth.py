@@ -86,7 +86,17 @@ def login(form: dict, request: Request, db: Session = Depends(get_db)):
     password = form.get("password") or ""
     if not username or not password:
         raise HTTPException(status_code=400, detail="用户名或密码错误")
+    # 账号口径：用户名 = 本人联系电话。为兼容老习惯（用工号 / 姓名登录）与改名前
+    # 的旧账号，按 用户名 → 手机号 → 工号 → 唯一姓名 依次匹配；任一路径命中即同一账号。
     user = db.query(User).filter(User.username == username).first()
+    if not user:
+        user = db.query(User).filter(User.phone == username).first()
+    if not user:
+        user = db.query(User).filter(User.staff_no == username).first()
+    if not user:
+        same = db.query(User).filter(User.real_name == username).all()
+        if len(same) == 1:                     # 重名不猜，避免登进别人的号
+            user = same[0]
 
     # ① 先判锁定（不消耗计数）：锁定期内直接告知剩余时间，不再累计失败
     if user:

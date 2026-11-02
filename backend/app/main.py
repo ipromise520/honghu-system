@@ -17,7 +17,7 @@ from app.config import CORS_ORIGINS, DOCS_ENABLED, MOBILE_DIST
 from app.database import engine, SessionLocal, Base
 from app.seed import seed
 from app.routers import (auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users,
-                          alerts, honghu, mp, qc)
+                          alerts, honghu, mp, qc, territory)
 
 app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.3.0",
               docs_url="/docs" if DOCS_ENABLED else None,
@@ -70,7 +70,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 for r in [auth.router, dashboard.router, metrics.router, h5.router, work_orders.router,
           tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router,
-          mp.router, qc.router]:
+          mp.router, qc.router, territory.router]:
     app.include_router(r, prefix="/api/v1")
 
 # 装维人员端 H5 专用 API 前缀 /m/api（由 8011 独立承载，与桌面端 /api/v1 隔离，避免跨实例 token 问题）
@@ -87,6 +87,18 @@ FRONTEND_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.
 
 # 历史补列
 _ADD_COLUMNS = {
+    # 责任田对应责任人（v1.9.0）：首版把「实际责任田」当成自由文本，
+    # 看到真实在线表后拆成 区县 / 小区编码 / 网格编码 / 用户数 四列，老库补列不丢数
+    "territory_responsible": [("district", "VARCHAR(32) DEFAULT ''"),
+                              ("territory_code", "VARCHAR(64) DEFAULT ''"),
+                              ("grid_code", "VARCHAR(32) DEFAULT ''"),
+                              ("user_count", "INTEGER DEFAULT 0"),
+                              ("complaint_person", "VARCHAR(64) DEFAULT ''"),
+                              ("compliance", "VARCHAR(32) DEFAULT ''"),
+                              ("installer_name", "VARCHAR(64) DEFAULT ''"),
+                              ("installer_no", "VARCHAR(32) DEFAULT ''"),
+                              ("installer_phone", "VARCHAR(32) DEFAULT ''"),
+                              ("installer_source", "VARCHAR(16) DEFAULT ''")],
     # 登录失败锁定（v1.6.4）：原来只存进程内存，管理端看不到也解不了，改为落库
     "users": [("failed_attempts", "INTEGER DEFAULT 0"),
               ("locked_until", "VARCHAR(32) DEFAULT ''"),

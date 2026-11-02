@@ -116,6 +116,7 @@ const allMenus = [
   { path: '/h5-rate', title: 'H5参与率通报', icon: 'DataAnalysis' },
   { path: '/alerts', title: '预警中心', icon: 'Bell' },
   { path: '/work-orders', title: '工单管理', icon: 'Tickets' },
+  { path: '/territory', title: '责任田对应责任人', icon: 'MapLocation' },
   { path: '/tasks', title: '任务分派', icon: 'List', admin: true },
   { path: '/my-tasks', title: '我的任务', icon: 'Finished', worker: true },
   { path: '/notices', title: '通知管理', icon: 'Promotion', admin: true },

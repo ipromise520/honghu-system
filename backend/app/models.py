@@ -769,3 +769,74 @@ class QcRecord(Base):
     fix_status: Mapped[str] = mapped_column(String(16), default="")    # '' 未推送 / pushed 待整改 / fixed 已整改
     fix_at: Mapped[str] = mapped_column(String(20), default="")
     fix_note: Mapped[str] = mapped_column(String(255), default="")
+
+
+class TerritoryResponsible(Base):
+    """责任田 ↔ 责任人 对应关系（v1.9.0）
+
+    数据来源：金山文档在线表「责任田调整【模版】」，由管理端页面手动点
+    「同步责任田在线表」拉取入库（不做定时任务 —— 责任田调整是低频人工动作，
+    自动跑只会把别人改到一半的表同步进来）。
+
+    口径说明（对应在线表列）：
+      · territory     实际责任田（在线表核心列，一个责任人可带多块责任田）
+      · grid          标准网格（与竣工率「标准网格对比」同名，用于指标下钻匹配）
+      · team          班组（片区队，考核归口）
+      · person_name   责任人姓名（与 users.real_name / qc_records.handler 同名比对）
+      · person_no     工号（优先用工号匹配，避免同名不同人）
+
+    匹配优先级（被 work_orders / qc_records / install_orders 复用）：
+      1. 工号精确匹配  2. 责任人姓名精确匹配  3. 责任田/小区名称包含匹配
+    """
+    __tablename__ = "territory_responsible"
+    __table_args__ = (
+        Index("ix_terr_grid", "grid"),
+        Index("ix_terr_person", "person_name"),
+        Index("ix_terr_no", "person_no"),
+        Index("ix_terr_batch", "batch"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)               # 在线表原行号（保留排序）
+    district: Mapped[str] = mapped_column(String(32), default="")      # 区县
+    territory: Mapped[str] = mapped_column(String(128), default="")    # 实际责任田（在线表=小区名称）
+    territory_type: Mapped[str] = mapped_column(String(32), default="")# 责任田类型（城区/乡镇/小区…）
+    territory_code: Mapped[str] = mapped_column(String(64), default="")# 小区编码（在线表「小区编码」）
+    community: Mapped[str] = mapped_column(String(128), default="")    # 小区/片区
+    grid: Mapped[str] = mapped_column(String(64), default="")          # 标准网格（在线表=市场网格名称）
+    grid_code: Mapped[str] = mapped_column(String(32), default="")     # 市场网格编码
+    team: Mapped[str] = mapped_column(String(64), default="")          # 班组（无班组列时回填为网格名）
+    person_name: Mapped[str] = mapped_column(String(64), default="")   # 责任人（在线表「责任人」列）
+    person_no: Mapped[str] = mapped_column(String(32), default="")     # 责任人工号（来自责任人本人档案）
+    person_phone: Mapped[str] = mapped_column(String(32), default="")  # 责任人电话（同上）
+    # 装维施工人（在线表「装机人员清单」里的人，通常与责任人不是同一人）。
+    # 单独存：原来把装机人的工号/电话写进责任人字段，导致同一责任人出现 5 个工号。
+    installer_name: Mapped[str] = mapped_column(String(64), default="")
+    installer_no: Mapped[str] = mapped_column(String(32), default="")
+    installer_phone: Mapped[str] = mapped_column(String(32), default="")
+    # 装机人来源：'' = 在线表原始值；'owner' = 在线表写「未找到/#NAME?」时按责任人本人回填
+    installer_source: Mapped[str] = mapped_column(String(16), default="")
+    complaint_person: Mapped[str] = mapped_column(String(64), default="")  # 投诉责任人（在线表「投诉人员清单」）
+    compliance: Mapped[str] = mapped_column(String(32), default="")    # 是否达标（用户数不达标 / 达标）
+    backup_name: Mapped[str] = mapped_column(String(64), default="")   # 备份/协同责任人
+    user_count: Mapped[int] = mapped_column(Integer, default=0)        # 用户数（责任田权重，用于均衡度）
+    remark: Mapped[str] = mapped_column(String(255), default="")
+    raw_json: Mapped[str] = mapped_column(Text, default="")            # 原始整行（未映射列兜底）
+    batch: Mapped[str] = mapped_column(String(32), default="")         # 同步批次号
+    active: Mapped[bool] = mapped_column(Boolean, default=True)        # 本轮同步未出现 → 置 False（软删除）
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_cn, onupdate=now_cn)
+
+
+class TerritorySyncLog(Base):
+    """责任田在线表同步记录（页面「上次同步时间 / 结果」取最新一条）"""
+    __tablename__ = "territory_sync_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch: Mapped[str] = mapped_column(String(32), default="")
+    source: Mapped[str] = mapped_column(String(255), default="")       # 数据来源（在线表 URL / 文件名）
+    status: Mapped[str] = mapped_column(String(16), default="")        # success / failed
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    inserted: Mapped[int] = mapped_column(Integer, default=0)
+    updated: Mapped[int] = mapped_column(Integer, default=0)
+    deactivated: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(String(500), default="")
+    operator: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_cn)
