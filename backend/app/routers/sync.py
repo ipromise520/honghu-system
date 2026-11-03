@@ -83,6 +83,62 @@ SYNC_MODULES = {
 }
 
 
+def _list_sheets(data: bytes, filename: str) -> list:
+    """仅读取 sheet 名（不解析行），用于批量上传的自动识别。csv 返回 ['']。"""
+    import io
+    import openpyxl
+    if not filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
+        return [""]
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        names = list(wb.sheetnames)
+        wb.close()
+        return names
+    except Exception:
+        return []
+
+
+def _detect_metric(filename: str, sheets: list) -> str | None:
+    """按 sheet 构成 + 文件名关键字识别文件归属的指标。
+
+    质检五项优先（专属 sheet 精确匹配，避免 extension「当月明细」被误判）；
+    其余指标按 sheet 签名(权重2) + 文件名关键字(权重1) 打分取最高，0 分返回 None。
+    装机宽表/投诉宽表 仅 sheet 名都是「数据1」，靠文件名是否含「投诉」消歧。
+    """
+    names = {str(s).strip() for s in (sheets or [])}
+    fn = filename or ""
+    fnl = fn.lower()
+    # 1) 质检五项：专属 sheet 精确匹配（注意 extension 的「当月明细」含「明细」子串，不能用子串）
+    qc_sig = {"人工质检明细", "FTTR质检数据", "装机新增", "投诉新增", "明细",
+              "FTTR质检工单汇总表", "集团智能质检结果", "装、维改约质检通报", "企宽装机质检统计"}
+    if (qc_sig & names) or ({"清单", "分公司"} <= names) or ({"公式", "清单"} <= names) \
+            or ("质检" in fn) or ("智能质检" in fn):
+        return "qc"
+    # 2) 其余指标：sheet 签名(权重2) + 文件名关键字(权重1) 打分
+    sig = {
+        "completion_rate": (["激励明细"], ["竣工率", "激励预通报", "激励预约", "激励"]),
+        "extension": (["当月明细", "人员明细"], ["延伸服务"]),
+        "install_wide": (["数据1"], ["装机宽表", "宽表查询", "装机"]),
+        "complaint_wide": (["数据1"], ["投诉宽表", "宽表查询-投诉", "投诉宽", "投诉"]),
+        "install_query": (["导出信息"], ["装机综合查询", "导出信息", "综合查询"]),
+        "complaint_query": (["家宽投诉综合工单列表"], ["投诉综合查询", "家宽投诉综合工单列表"]),
+        "h5_survey": (["H5数据统计", "装机参与率", "投诉参与率", "装机回单", "投诉回单", "累计装机低分核实"],
+                      ["H5满意度", "装维H5", "满意度", "大音", "H5"]),
+        "ai_visit": (["当月装机即访清单", "当月投诉即访清单", "装后即访-通报表", "投诉即访-通报表"],
+                     ["AI装维即访", "即访", "AI装维"]),
+    }
+    # 装机宽表/综合查询 vs 投诉宽表/综合查询：仅 sheet 同名，靠文件名「投诉」区分
+    penalty_install = "投诉" in fnl
+    best, best_score = None, 0
+    for m, (ss, ks) in sig.items():
+        score = 2 * len(set(ss) & names) + sum(1 for k in ks if k.lower() in fnl)
+        if m in ("install_wide", "install_query") and penalty_install:
+            score = -1
+        if score > best_score:
+            best, best_score = m, score
+    return best if best_score > 0 else None
+
+
 def _to_num(v, as_int=True):
     """通报表数值容错转换（'8'/'8.0'/8 都接受；NaN/空 → 0）"""
     try:
@@ -1675,14 +1731,41 @@ def sync_template(metric: str, user=Depends(require_admin)):
 
 @router.post("/upload/{metric}")
 async def upload(metric: str, request: Request, user=Depends(require_admin), db: Session = Depends(get_db)):
-    """上传解析预览（不入库，铁律 1）"""
+    """上传解析预览（不入库，铁律 1）。单文件入口：从 request 读出字节后交给 _process_metric。"""
     if metric not in SYNC_MODULES:
         raise HTTPException(status_code=404, detail="模块不存在")
+    ctype = request.headers.get("content-type", "")
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        up = form.get("file")
+        if up is None:
+            raise HTTPException(status_code=400, detail="缺少 file 字段")
+        fn = up.filename or "upload"
+        data = await up.read()
+    else:
+        fn = "raw.csv"
+        data = await request.body()
+    month = request.query_params.get("month")
+    return await _process_metric(metric, [(fn, data)], db, month=month)
+
+
+async def _process_metric(metric: str, files: list, db: Session, month: str = None) -> dict:
+    """按指标解析一组文件（files: list[(filename, bytes)]）。
+
+    - 非 qc 指标：取 files[0] 单文件解析；
+    - qc 指标：files 内所有质检通报按 sheet 构成识别来源后合并为一个批次。
+    返回 response dict（含 batch_id 等）。解析失败抛出 HTTPException——
+    单文件入口 /upload/{metric} 原样透传 400，批量入口 /upload-batch 在内部捕获并转为带 error 的结果。
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="未收到文件")
     extra: dict = {}
     col_override = None
     if metric == "extension":
         # 手册 10.2：白名单只取「当月明细」「人员明细」，避免全年明细/日明细等 sheet 混入
-        filename, sheets = await parse_upload_sheets(request, ["当月明细", "人员明细"])
+        # 手册 10.2：白名单只取「当月明细」「人员明细」，避免全年明细/日明细等 sheet 混入
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0],
+                                                     sheet_names=["当月明细", "人员明细"])
         rows = _normalize_extension(sheets)
         orders = [r for r in rows if r["_kind"] == "order"]
         members = [r for r in rows if r["_kind"] == "member"]
@@ -1693,21 +1776,31 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
                  "months": sorted({r["month"] for r in orders if r["month"]})}
         preview = orders[:100]
     elif metric == "completion_rate":
-        # 竣工率激励通报：白名单只取「激励明细」；月份由前端明示（通报表内无时间列，铁律 2 禁止硬编码）
-        month = request.query_params.get("month") or datetime.now().strftime("%Y-%m")
-        if not re.match(r"^\d{4}-\d{2}$", month):
+        # 竣工率激励通报：白名单只取「激励明细」；月份优先用调用方传入（批量时按文件名推导），
+        # 否则缺省当月（通报表内无时间列，铁律 2 禁止硬编码）
+        mm = re.search(r"(\d{1,2})月", files[0][0] or "")
+        comp_month = month
+        if not comp_month:
+            if mm:
+                y = datetime.now().year
+                mo = int(mm.group(1))
+                yr = y - 1 if mo > datetime.now().month else y  # 跨年（如 12 月文件在 1 月上传）
+                comp_month = f"{yr}-{mo:02d}"
+            else:
+                comp_month = datetime.now().strftime("%Y-%m")
+        if not re.match(r"^\d{4}-\d{2}$", comp_month):
             raise HTTPException(status_code=400, detail="month 格式应为 YYYY-MM")
-        filename, sheets = await parse_upload_sheets(request, ["激励明细"])
-        rows = _normalize_completion(sheets, month)
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0], sheet_names=["激励明细"])
+        rows = _normalize_completion(sheets, comp_month)
         if not rows:
             raise HTTPException(status_code=400,
                                 detail="「激励明细」sheet 未解析到数据行，请确认上传的是竣工率激励预通报表")
-        extra = {"people": len(rows), "months": [month],
+        extra = {"people": len(rows), "months": [comp_month],
                  "incentive_total": round(sum(r["incentive"] for r in rows), 2)}
         preview = rows[:100]
     elif metric == "install_wide":
         # 装机宽表：白名单「数据1」；month 从受理时间推导
-        filename, sheets = await parse_upload_sheets(request, ["数据1"])
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0], sheet_names=["数据1"])
         rows = _normalize_install_wide(sheets)
         if not rows:
             raise HTTPException(status_code=400,
@@ -1719,7 +1812,7 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         preview = rows[:100]
     elif metric == "complaint_wide":
         # 投诉宽表：白名单「数据1」；month 从投诉时间推导
-        filename, sheets = await parse_upload_sheets(request, ["数据1"])
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0], sheet_names=["数据1"])
         rows = _normalize_complaint_wide(sheets)
         if not rows:
             raise HTTPException(status_code=400,
@@ -1729,7 +1822,7 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         extra = {"orders": len(rows), "months": months, "solved": solved}
         preview = rows[:100]
     elif metric == "install_query":
-        filename, sheets = await parse_upload_sheets(request, ["导出信息"])
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0], sheet_names=["导出信息"])
         rows = _normalize_install_query(sheets)
         if not rows:
             raise HTTPException(status_code=400,
@@ -1740,7 +1833,8 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         extra = {"orders": len(rows), "months": months, "done": done, "refund": refund}
         preview = rows[:100]
     elif metric == "complaint_query":
-        filename, sheets = await parse_upload_sheets(request, ["家宽投诉综合工单列表"])
+        filename, sheets = await parse_upload_sheets(data=files[0][1], filename=files[0][0],
+                                                    sheet_names=["家宽投诉综合工单列表"])
         rows = _normalize_complaint_query(sheets)
         if not rows:
             raise HTTPException(status_code=400,
@@ -1757,9 +1851,9 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         # 旧版导出：「H5数据统计」「装机/投诉H5回复详单」「累计装机/投诉低分核实」
         # 表头大都在第 2 行（跳 1 行标题）；新版「装机/投诉回单」表头就在第 1 行（按 sheet 指定跳行）
         filename, sheets = await parse_upload_sheets(
-            request,
-            ["H5数据统计", "装机H5回复详单", "投诉H5回复详单", "累计装机低分核实", "累计投诉低分核实",
-             "装机参与率", "投诉参与率", "装机回单", "投诉回单"],
+            data=files[0][1], filename=files[0][0],
+            sheet_names=["H5数据统计", "装机H5回复详单", "投诉H5回复详单", "累计装机低分核实", "累计投诉低分核实",
+                         "装机参与率", "投诉参与率", "装机回单", "投诉回单"],
             skip_rows={"装机回单": 0, "投诉回单": 0})
         mm = re.search(r"(\d{1,2})月(\d{1,2})日", filename or "")
         data_date = f"{datetime.now().year}-{int(mm.group(1)):02d}-{int(mm.group(2)):02d}" if mm else ""
@@ -1793,7 +1887,8 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         # AI装维即访：白名单「装后即访-通报表」「投诉即访-通报表」（多行表头 → 原始矩阵解析）
         # +「当月装机即访清单」「当月投诉即访清单」（不规范明细）
         filename, raw = await parse_upload_raw(
-            request, ["装后即访-通报表", "投诉即访-通报表", "当月装机即访清单", "当月投诉即访清单"])
+            data=files[0][1], filename=files[0][0],
+            sheet_names=["装后即访-通报表", "投诉即访-通报表", "当月装机即访清单", "当月投诉即访清单"])
         det = {"当月装机即访清单": _raw_to_dicts(raw.get("当月装机即访清单") or []),
                "当月投诉即访清单": _raw_to_dicts(raw.get("当月投诉即访清单") or [])}
         scanned = len(det["当月装机即访清单"]) + len(det["当月投诉即访清单"])
@@ -1828,11 +1923,14 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
     elif metric == "qc":
         # 质检规范：市公司每天 5 个通报表项，支持一次多选全部上传；也允许只传其中一个。
         # 每个文件按 sheet 构成识别来源后独立解析，再合并成一个通报批次。
-        files = await parse_upload_multi_raw(request)
-        parsed_pairs: list[tuple[str, list[dict]]] = []
+        raw_files = []
+        for _fn, _data in files:
+            _, _raw = await parse_upload_raw(data=_data, filename=_fn)
+            raw_files.append((_fn, _raw))
+        parsed_pairs: list = []
         sheets_map: dict = {}
         per_file: list[dict] = []
-        for fname, raw in files:
+        for fname, raw in raw_files:
             src = _qc_detect_source(raw, fname)
             if src not in QC_SRC_SHEETS:
                 per_file.append({"file": fname, "source": "无法识别", "rows": 0, "ng": 0})
@@ -1882,7 +1980,7 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
                  "note": "五个通报表项已合并；请核对不合格件数、考核与不结算金额是否与各通报「分析汇总」合计行一致"}
         preview = rows[:150]
     else:
-        filename, rows = await parse_upload(request)
+        filename, rows = await parse_upload(data=files[0][1], filename=files[0][0])
         if not rows:
             raise HTTPException(status_code=400, detail="解析不到任何数据行")
         preview = rows[:100]
@@ -1893,6 +1991,69 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
     return {"batch_id": batch_id, "filename": filename, "total_rows": len(rows),
             "columns": col_override or (list(rows[0].keys()) if rows else []),
             "preview": preview, **extra}
+
+
+@router.post("/upload-batch")
+async def upload_batch(request: Request, user=Depends(require_admin), db: Session = Depends(get_db)):
+    """批量上传：一次接收多个文件，按 sheet 名 + 文件名自动识别指标后分别解析预览（不入库）。
+
+    字段名 files[]（multipart）。每个文件先识别指标（质检五项按专属 sheet 先行识别，
+    其余按 sheet 签名 + 文件名关键字打分），同指标文件归入一组；qc 多项通报自动合并为一个批次。
+    返回按 SYNC_MODULES 顺序排好的识别结果列表，每项含 batch_id（确认入库复用 /sync/confirm）。
+    """
+    ctype = request.headers.get("content-type", "")
+    if "multipart/form-data" not in ctype:
+        raise HTTPException(status_code=400, detail="请使用 multipart/form-data 上传（字段名 files[]）")
+    form = await request.form()
+    uploads = form.getlist("files")
+    if not uploads:
+        raise HTTPException(status_code=400, detail="未收到文件，请使用字段名 files 上传多个文件")
+    loaded = []
+    for up in uploads:
+        if up is None:
+            continue
+        fn = up.filename or "upload"
+        data = await up.read()
+        if not data:
+            continue
+        loaded.append((fn, data))
+    if not loaded:
+        raise HTTPException(status_code=400, detail="文件均为空")
+
+    # 识别 + 分组：qc 多项并入同组，其余每文件独立一组
+    groups: dict = {}
+    unrecognized = []
+    for fn, data in loaded:
+        try:
+            sheets = _list_sheets(data, fn)
+        except Exception:
+            sheets = []
+        m = _detect_metric(fn, sheets)
+        if m:
+            groups.setdefault(m, []).append((fn, data))
+        else:
+            unrecognized.append({"filename": fn, "sheets": sheets})
+
+    results = []
+    for m, items in groups.items():
+        try:
+            res = await _process_metric(m, items, db)
+        except HTTPException as e:
+            res = {"metric": m, "error": e.detail}
+        except Exception as e:  # 解析/归一化异常：转为带 error 的结果，不中断其它文件
+            res = {"metric": m, "error": str(e)[:300]}
+        res["metric"] = m
+        res["name"] = SYNC_MODULES[m]["name"]
+        res["files"] = [i[0] for i in items]
+        results.append(res)
+    for u in unrecognized:
+        results.append({"metric": None, "name": "未能自动识别", "files": [u["filename"]],
+                        "error": "无法根据文件名 / sheet 自动识别指标，请在结果区手动指定",
+                        "sheets": u["sheets"]})
+
+    order = list(SYNC_MODULES.keys())
+    results.sort(key=lambda r: order.index(r["metric"]) if r["metric"] in order else 999)
+    return {"total": len(loaded), "recognized": len(loaded) - len(unrecognized), "results": results}
 
 
 @router.post("/confirm/{batch_id}")

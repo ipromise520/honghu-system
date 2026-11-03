@@ -1,53 +1,50 @@
 """Excel / CSV 上传解析工具"""
-import csv
-import io
 
 
-async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[str, dict[str, list[dict]]]:
-    """解析 multipart 请求中的 xlsx / csv。
+async def parse_upload_sheets(request=None, sheet_names=None, skip_rows=0, data=None, filename=None):
+    """解析 xlsx / xls / csv。
 
-    sheet_names 为白名单（手册 10.2：只读取需要的 sheet，如「当月明细」），
-    None 表示读取全部 sheet。skip_rows 为每个 sheet 表头前的标题行数
-    （如 H5 通报表首行为标题、次行才是列名则传 1）；也可传 dict {sheet名: 跳行数}
-    按 sheet 分别指定（未列出的 sheet 用默认跳行数，dict 模式下默认为 1），
-    用于同一文件内表头行不一致的场景（如 H5 新格式：「装机回单」表头在第 1 行、其余在第 2 行）。
+    - 不传 data：从 request（multipart 的 file 字段 / raw body）读取（旧行为，单文件上传用）。
+    - 传 data + filename：直接解析给定字节（批量上传复用，避免重复读 request）。
     返回 (文件名, {sheet名: 行列表[dict]})；csv 返回 {"": 行列表}。
+    sheet_names 为白名单（手册 10.2）；None 读取全部 sheet。
+    skip_rows 为表头前标题行数（int 全体一致，或 dict 按 sheet 分别指定）。
     """
+    if data is None:
+        if request is None:
+            raise ValueError("需要 request 或 data")
+        ctype = request.headers.get("content-type", "")
+        if "multipart/form-data" in ctype:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None:
+                raise ValueError("缺少 file 字段")
+            filename = upload.filename or "upload"
+            data = await upload.read()
+        else:
+            filename = "raw.csv"
+            data = await request.body()
+    return _bytes_to_sheets(data, filename, sheet_names, skip_rows)
+
+
+def _bytes_to_sheets(data, filename, sheet_names, skip_rows):
+    import io
     import openpyxl
 
-    ctype = request.headers.get("content-type", "")
-    if "multipart/form-data" in ctype:
-        form = await request.form()
-        upload = form.get("file")
-        if upload is None:
-            raise ValueError("缺少 file 字段")
-        filename = upload.filename or "upload"
-        data = await upload.read()
-    else:
-        filename = "raw.csv"
-        data = await request.body()
-
-    # skip_rows 归一化：dict 模式（按 sheet 指定，默认 1）或 int 模式（全体同一跳行数）
     skip_map = skip_rows if isinstance(skip_rows, dict) else {}
     default_skip = skip_rows if isinstance(skip_rows, int) else 1
 
-    # .xls 后缀但实际为 xlsx 格式（导出系统常见），统一用 openpyxl 尝试
     if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
-        # read_only=True：流式读取，避免报表 sheet 声明整表尺寸（如 1048576 行）时
-        # 非流式模式构建海量空单元格导致解析极慢/超时（大体积通报表常见）
+        # read_only=True：流式读取，避免报表 sheet 声明整表尺寸（如 1048576 行）时解析极慢/超时
         wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
         wanted = {str(s).strip() for s in sheet_names} if sheet_names else None
-        out: dict[str, list[dict]] = {}
+        out: dict = {}
         for ws in wb.worksheets:
             if wanted is not None and ws.title.strip() not in wanted:
                 continue
-            # 不信任 sheet XML 里的 <dimension> 声明：部分导出系统（SheetJS 系，如
-            # 装机/投诉综合查询导出件）会写入失实声明（<dimension ref="A1"/>），
-            # read_only 模式下 openpyxl 以 dimension 作为迭代行/列上界，导致只读出
-            # 首行首列、真实数据全部丢失（表现为上传后无预览、400「sheet 未解析到
-            # 数据行」）。reset_dimensions() 是 openpyxl 针对该场景的官方处理：清空
-            # 失实尺寸，按 XML 实际内容流式输出；对 dimension 声明过大（如 1048576
-            # 行）的文件同样受益——不再填充海量空行。
+            # 不信任 sheet XML 里的 <dimension> 声明：部分导出系统（SheetJS 系）会写入失实声明
+            # （<dimension ref="A1"/>），read_only 模式以 dimension 作为迭代上界导致只读出首行、
+            # 真实数据全部丢失。reset_dimensions() 是 openpyxl 针对该场景的官方处理。
             ws.reset_dimensions()
             n_skip = max(0, int(skip_map.get(ws.title.strip(), default_skip)))
             it = ws.iter_rows(values_only=True)
@@ -75,14 +72,14 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
                         continue
                     rows.append({header[i]: r[i] for i in range(min(len(header), len(r)))})
             except ValueError:
-                # 规避 openpyxl 解析表尾 autoFilter（自动筛选）的已知缺陷：
-                # 筛选值非法时在数据行全部输出后抛 ValueError，数据不受影响
+                # 规避 openpyxl 解析表尾 autoFilter 的已知缺陷
                 pass
             out[ws.title] = rows
         wb.close()
         return filename, out
 
     text = data.decode("utf-8-sig", errors="replace")
+    import csv
     reader = csv.reader(io.StringIO(text))
     all_rows = list(reader)
     if not all_rows:
@@ -92,58 +89,55 @@ async def parse_upload_sheets(request, sheet_names=None, skip_rows=0) -> tuple[s
                            for row in all_rows[1:] if any(str(c).strip() for c in row)]}
 
 
-async def parse_upload_raw(request, sheet_names=None) -> tuple[str, dict[str, list[tuple]]]:
-    """解析 multipart 请求中的 xlsx，返回 (文件名, {sheet名: 原始行元组列表})。
+async def parse_upload_raw(request=None, sheet_names=None, data=None, filename=None):
+    """解析 xlsx，返回 (文件名, {sheet名: 原始行元组列表})（不设表头、不跳行，保留完整矩阵）。
 
-    与 parse_upload_sheets 不同：不设表头、不跳行，保留完整矩阵，
-    供多行（合并）表头的通报表解析使用（如 AI装维即访 的「装后即访-通报表」）。
+    data + filename 优先（批量上传用），否则从 request 读取（旧行为）。
     """
+    if data is None:
+        if request is None:
+            raise ValueError("需要 request 或 data")
+        ctype = request.headers.get("content-type", "")
+        if "multipart/form-data" in ctype:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None:
+                raise ValueError("缺少 file 字段")
+            filename = upload.filename or "upload"
+            data = await upload.read()
+        else:
+            filename = "raw.csv"
+            data = await request.body()
+    return _bytes_to_raw(data, filename, sheet_names)
+
+
+def _bytes_to_raw(data, filename, sheet_names):
+    import io
     import openpyxl
 
-    ctype = request.headers.get("content-type", "")
-    if "multipart/form-data" in ctype:
-        form = await request.form()
-        upload = form.get("file")
-        if upload is None:
-            raise ValueError("缺少 file 字段")
-        filename = upload.filename or "upload"
-        data = await upload.read()
-    else:
-        filename = "raw.csv"
-        data = await request.body()
-
     if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
-        # 同 parse_upload_sheets：流式读取，规避大尺寸报表 sheet 的解析卡顿
         wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
         wanted = {str(s).strip() for s in sheet_names} if sheet_names else None
-        out: dict[str, list[tuple]] = {}
+        out: dict = {}
         for ws in wb.worksheets:
             if wanted is not None and ws.title.strip() not in wanted:
                 continue
-            # 不信任 sheet XML 里的 <dimension> 声明：部分导出系统（SheetJS 系，如
-            # 装机/投诉综合查询导出件）会写入失实声明（<dimension ref="A1"/>），
-            # read_only 模式下 openpyxl 以 dimension 作为迭代行/列上界，导致只读出
-            # 首行首列、真实数据全部丢失（表现为上传后无预览、400「sheet 未解析到
-            # 数据行」）。reset_dimensions() 是 openpyxl 针对该场景的官方处理：清空
-            # 失实尺寸，按 XML 实际内容流式输出；对 dimension 声明过大（如 1048576
-            # 行）的文件同样受益——不再填充海量空行。
             ws.reset_dimensions()
             out[ws.title] = [tuple(r) for r in ws.iter_rows(values_only=True)]
         wb.close()
         return filename, out
-
+    import csv
     text = data.decode("utf-8-sig", errors="replace")
-    reader = csv.reader(io.StringIO(text))
-    return filename, {"": [tuple(r) for r in reader]}
+    return filename, {"": [tuple(r) for r in csv.reader(io.StringIO(text))]}
 
 
-
-async def parse_upload_multi_raw(request, sheet_names=None) -> list[tuple[str, dict[str, list[tuple]]]]:
+async def parse_upload_multi_raw(request, sheet_names=None):
     """解析 multipart 请求中的 **多个** xlsx，返回 [(文件名, {sheet名: 原始行元组列表}), ...]。
 
     质检通报每日 5 个附件，一次多选上传比逐个传 5 次合理；同时兼容旧的单文件
     （字段名 file）调用。sheet 白名单对所有文件共用一份。
     """
+    import io
     import openpyxl
 
     ctype = request.headers.get("content-type", "")
@@ -161,7 +155,7 @@ async def parse_upload_multi_raw(request, sheet_names=None) -> list[tuple[str, d
     if not uploads:
         raise ValueError("缺少 file / files 字段")
 
-    out: list[tuple[str, dict[str, list[tuple]]]] = []
+    out: list = []
     for upload in uploads:
         if upload is None:
             filename, data = "raw.csv", await request.body()
@@ -173,18 +167,16 @@ async def parse_upload_multi_raw(request, sheet_names=None) -> list[tuple[str, d
         if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
             wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
             wanted = {str(s).strip() for s in sheet_names} if sheet_names else None
-            sheets: dict[str, list[tuple]] = {}
+            sheets: dict = {}
             for ws in wb.worksheets:
                 if wanted is not None and ws.title.strip() not in wanted:
                     continue
-                # 同 parse_upload_raw：不信导出系统写出的失实 dimension 声明
                 ws.reset_dimensions()
                 rows = []
                 try:
                     for r in ws.iter_rows(values_only=True):
                         rows.append(tuple(r))
                 except ValueError:
-                    # openpyxl 解析表尾 autoFilter 的已知缺陷：数据已全部输出后才抛
                     pass
                 sheets[ws.title] = rows
             wb.close()
@@ -196,10 +188,13 @@ async def parse_upload_multi_raw(request, sheet_names=None) -> list[tuple[str, d
     return out
 
 
-async def parse_upload(request) -> tuple[str, list[dict]]:
-    """从 multipart 请求解析 xlsx / csv（全部 sheet 合并），返回 (文件名, 行列表[dict])"""
-    filename, sheets = await parse_upload_sheets(request)
-    rows: list[dict] = []
+async def parse_upload(request=None, data=None, filename=None):
+    """从 request 或给定字节解析 xlsx / csv（全部 sheet 合并），返回 (文件名, 行列表[dict])"""
+    if data is None:
+        filename, sheets = await parse_upload_sheets(request)
+    else:
+        filename, sheets = await parse_upload_sheets(data=data, filename=filename)
+    rows: list = []
     for rs in sheets.values():
         rows.extend(rs)
     return filename, rows

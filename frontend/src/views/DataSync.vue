@@ -1,5 +1,33 @@
 <template>
   <div>
+    <!-- 批量上传：一次选多个文件，自动识别指标 -->
+    <el-card class="page-card">
+      <template #header>
+        <div class="card-header">
+          <span class="title">📦 批量上传（一次选多个文件，自动识别指标）</span>
+        </div>
+      </template>
+      <el-upload drag multiple accept=".xlsx,.xls,.csv" :auto-upload="false"
+                 :show-file-list="true" :file-list="batchFileList" :on-change="onBatchChange"
+                 :on-remove="onBatchRemove">
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div class="el-upload__text">把当日所有通报文件拖到这里，或 <em>点击选择</em></div>
+        <template #tip>
+          <div class="el-upload__tip">
+            系统按「文件名 + sheet 名」自动判断归属指标（竣工率 / 延伸服务 / 装机·投诉宽表 / 装机·投诉综合查询 / H5满意度 / AI装维即访 / 质检五项），
+            无需逐个选择标签页。质检五项可一次多选全部附件自动合并。
+          </div>
+        </template>
+      </el-upload>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+        <el-button type="success" :loading="batchLoading" :disabled="batchFileList.length === 0"
+                   @click="batchUpload">
+          <el-icon><MagicStick /></el-icon>&nbsp;自动识别并解析预览
+        </el-button>
+        <span style="color:#909399">已选 {{ batchFileList.length }} 个文件</span>
+      </div>
+    </el-card>
+
     <el-card class="page-card">
       <template #header><div class="card-header"><span class="title">数据同步（上传 → 预览 → 确认入库）</span></div></template>
       <el-alert type="warning" :closable="false" show-icon style="margin-bottom:14px"
@@ -43,6 +71,41 @@
       </el-table>
     </el-card>
 
+    <!-- 批量识别结果：按指标分组，各自预览 + 确认入库 -->
+    <el-card v-if="batchResults.length" class="page-card">
+      <template #header>
+        <div class="card-header">
+          <span class="title">批量识别结果（{{ batchResults.length }} 项 · 已识别 {{ batchStats.recognized }}/{{ batchStats.total }} 个文件）</span>
+          <el-button size="small" @click="batchResults = []">清空</el-button>
+        </div>
+      </template>
+      <div v-for="(r, idx) in batchResults" :key="idx" class="batch-group" :class="{ 'batch-err': r.error }">
+        <div class="batch-group-head">
+          <el-tag :type="r.error ? 'danger' : 'primary'" size="small">{{ r.name }}</el-tag>
+          <span class="batch-files" :title="(r.files || []).join('，')">{{ (r.files || []).join('，') }}</span>
+          <span v-if="r.total_rows != null" class="batch-rows">{{ r.total_rows }} 行</span>
+          <template v-if="r.error">
+            <span class="batch-warn">⚠ {{ r.error }}</span>
+            <el-select v-if="r.metric == null" size="small" placeholder="手动指定指标" style="width:180px"
+                       @change="m => onManual(r, m)">
+              <el-option v-for="(m, k) in modules" :key="k" :label="m.name" :value="k" />
+            </el-select>
+          </template>
+          <el-button v-else type="success" size="small" :loading="confirmingBatch"
+                     :disabled="r.confirmed" @click="confirmBatch(r)">
+            {{ r.confirmed ? '已入库' : '确认入库' }}
+          </el-button>
+        </div>
+        <el-alert v-if="r.warn" :title="r.warn" type="warning" :closable="false" show-icon style="margin:8px 0" />
+        <el-alert v-if="r.dup_warning" :title="r.dup_warning" type="warning" :closable="false"
+                  show-icon style="margin:8px 0" />
+        <el-table v-if="r.preview && r.preview.length" :data="r.preview" size="small" max-height="320"
+                  style="margin-top:6px">
+          <el-table-column v-for="c in r.columns" :key="c" :prop="c" :label="c" min-width="120" show-overflow-tooltip />
+        </el-table>
+      </div>
+    </el-card>
+
     <el-card class="page-card">
       <template #header><div class="card-header"><span class="title">同步历史</span></div></template>
       <el-table :data="history" size="small" max-height="360">
@@ -65,8 +128,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Upload, UploadFilled, MagicStick } from '@element-plus/icons-vue'
 import api from '../api'
 
 const modules = {
@@ -134,6 +198,23 @@ const history = ref([])
 const uploading = ref(false)
 const confirming = ref(false)
 
+// 批量上传状态
+const batchFileList = ref([])            // el-upload 文件列表（含 raw）
+const batchRaw = ref({})                 // 文件名 -> File 原对象（手动重路由用）
+const batchResults = ref([])
+const batchLoading = ref(false)
+const confirmingBatch = ref(false)
+const batchStats = reactive({ total: 0, recognized: 0 })
+
+function onBatchChange(file, fileList) {
+  batchFileList.value = fileList
+  if (file.raw) batchRaw.value[file.name] = file.raw
+}
+function onBatchRemove(file, fileList) {
+  batchFileList.value = fileList
+  delete batchRaw.value[file.name]
+}
+
 async function upload(k, file) {
   uploading.value = true
   try {
@@ -143,6 +224,39 @@ async function upload(k, file) {
     ElMessage.success(`解析成功 ${preview.value.total_rows} 行，请核对后确认入库`)
   } catch (e) { /* 拦截器已提示 */ }
   finally { uploading.value = false }
+}
+
+async function batchUpload() {
+  if (!batchFileList.value.length) return
+  batchLoading.value = true
+  try {
+    const fd = new FormData()
+    for (const f of batchFileList.value) {
+      if (f.raw) fd.append('files', f.raw)
+    }
+    const res = await api.post('/sync/upload-batch', fd, { timeout: 600000 })
+    batchResults.value = res.results || []
+    batchStats.total = res.total || 0
+    batchStats.recognized = res.recognized || 0
+    const ok = batchResults.value.filter(r => !r.error).length
+    const bad = batchResults.value.length - ok
+    ElMessage.success(`识别完成：成功 ${ok} 项${bad ? `，未识别/失败 ${bad} 项` : ''}（请逐项核对后确认入库）`)
+  } catch (e) { /* 拦截器已提示 */ }
+  finally { batchLoading.value = false }
+}
+
+// 未识别文件：手动指定指标后，按单文件接口重新解析
+async function onManual(r, m) {
+  const name = (r.files || [])[0]
+  const raw = batchRaw.value[name]
+  if (!raw) return
+  try {
+    const fd = new FormData()
+    fd.append('file', raw)
+    const res = await api.post(`/sync/upload/${m}`, fd, { timeout: 180000 })
+    Object.assign(r, res, { metric: m, name: modules[m].name, files: [name], confirmed: false })
+    ElMessage.success(`已按「${modules[m].name}」识别并解析`)
+  } catch (e) { /* 拦截器已提示 */ }
 }
 
 async function confirm() {
@@ -157,9 +271,30 @@ async function confirm() {
   finally { confirming.value = false }
 }
 
+async function confirmBatch(r) {
+  await ElMessageBox.confirm('确认将预览数据入库？入库后指标将自动重算。', '确认入库', { type: 'warning' })
+  confirmingBatch.value = true
+  try {
+    const res = await api.post(`/sync/confirm/${r.batch_id}`, null, { timeout: 180000 })
+    ElMessage.success(res.msg)
+    r.confirmed = true
+    loadHistory()
+  } catch (e) { /* handled */ }
+  finally { confirmingBatch.value = false }
+}
+
 async function loadHistory() {
   history.value = await api.get('/sync/history')
 }
 
 onMounted(loadHistory)
 </script>
+
+<style scoped>
+.batch-group { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+.batch-group.batch-err { border-color: var(--el-color-danger-light-5); background: var(--el-color-danger-light-9); }
+.batch-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.batch-files { color: #606266; font-size: 13px; flex: 1; min-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-rows { color: #909399; font-size: 13px; }
+.batch-warn { color: var(--el-color-danger); font-size: 13px; }
+</style>
