@@ -15,7 +15,7 @@
           <el-icon><Upload /></el-icon>&nbsp;上传质检明细
         </el-button>
         <el-button type="primary" :loading="pushing" :disabled="!ov.push.todo" @click="pushAll">
-          <el-icon><Promotion /></el-icon>&nbsp;推送待整改（{{ ov.push.todo }}）
+          <el-icon><Promotion /></el-icon>&nbsp;推送待帮扶（{{ ov.push.todo }}）
         </el-button>
         <el-tag v-if="noAccount" size="small" type="warning" effect="plain"
                 style="white-space:nowrap">
@@ -138,6 +138,11 @@
               <el-radio-button value="ng">仅不合格</el-radio-button>
               <el-radio-button value="">全部</el-radio-button>
             </el-radio-group>
+            <el-select v-model="filters.district" size="small" style="width:140px" clearable
+                       placeholder="全部区县" @change="loadRecords">
+              <el-option label="全部区县" value="" />
+              <el-option v-for="d in districtOptions" :key="d" :label="d" :value="d" />
+            </el-select>
             <el-select v-model="filters.category" size="small" style="width:140px" clearable
                        placeholder="全部类型" @change="loadRecords">
               <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
@@ -145,7 +150,7 @@
             <el-select v-model="filters.push_status" size="small" style="width:130px" clearable
                        placeholder="推送状态" @change="loadRecords">
               <el-option label="未推送" value="todo" />
-              <el-option label="待整改" value="pushed" />
+              <el-option label="待帮扶" value="pushed" />
               <el-option label="已整改" value="fixed" />
             </el-select>
             <el-input v-model="filters.keyword" size="small" style="width:200px" clearable
@@ -153,6 +158,9 @@
             <el-button size="small" @click="loadRecords">查询</el-button>
             <el-button size="small" type="primary" :disabled="!selected.length" :loading="pushing"
                        @click="pushSelected">推送选中（{{ selected.length }}）</el-button>
+            <el-button size="small" :loading="capturing" @click="captureLongImage">
+              <el-icon><Camera /></el-icon>&nbsp;一键截图
+            </el-button>
             <span class="tip">共 {{ recTotal }} 条 · 点击行可展开不合格详情</span>
           </div>
 
@@ -198,7 +206,7 @@
                 <template v-if="row.is_pass"><span class="muted">—</span></template>
                 <el-tag v-else-if="row.fix_status === 'fixed'" size="small" type="success">已整改</el-tag>
                 <el-tag v-else-if="row.push_at" size="small" type="warning">
-                  待整改 · {{ row.push_to_name }}
+                  待帮扶 · {{ row.push_to_name }}
                 </el-tag>
                 <span v-else class="muted">未推送</span>
               </template>
@@ -242,14 +250,48 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 一键截图：离屏渲染全部不合格明细，供 html2canvas 生成长图（不影响当前视图） -->
+    <div ref="captureRef" class="qc-capture">
+      <h2 class="qc-capture-title">质检不规范清单 · {{ date }} · 共 {{ captureRows.length }} 条不合格</h2>
+      <table class="qc-capture-table">
+        <thead>
+          <tr>
+            <th style="width:48px">#</th>
+            <th style="width:90px">区县</th>
+            <th style="width:110px">责任人</th>
+            <th style="width:100px">类型</th>
+            <th style="width:200px">定单编码</th>
+            <th>不合格项</th>
+            <th style="width:80px">考核</th>
+            <th style="width:90px">不结算</th>
+            <th style="width:150px">推送状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, i) in captureRows" :key="r.id">
+            <td>{{ i + 1 }}</td>
+            <td>{{ r.district }}</td>
+            <td>{{ r.handler || '—' }}</td>
+            <td>{{ r.category }}</td>
+            <td>{{ r.order_no }}</td>
+            <td>{{ r.is_pass ? '合格' : (r.ng_item || '—') }}</td>
+            <td>{{ r.penalty ? fmt(r.penalty) : '—' }}</td>
+            <td>{{ r.no_settle ? fmt(r.no_settle) : '—' }}</td>
+            <td>{{ r.is_pass ? '—' : (r.fix_status === 'fixed' ? '已整改' : (r.push_at ? '待帮扶·' + r.push_to_name : '未推送')) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Promotion } from '@element-plus/icons-vue'
+import { Upload, Promotion, Camera } from '@element-plus/icons-vue'
 import api from '../api'
+import html2canvas from 'html2canvas'
 import { useUserStore } from '../store'
 
 const store = useUserStore()
@@ -272,12 +314,17 @@ const recTotal = ref(0)
 const page = ref(1)
 const size = ref(50)
 const selected = ref([])
-const filters = reactive({ result: 'ng', category: '', push_status: '', keyword: '' })
+const filters = reactive({ result: 'ng', district: '', category: '', push_status: '', keyword: '' })
 
 const dlg = ref(false)
 const parsed = ref(null)
 const uploading = ref(false)
 const importing = ref(false)
+
+// 一键截图：把不合格明细截成长图
+const captureRef = ref(null)
+const captureRows = ref([])
+const capturing = ref(false)
 
 const districtOptions = computed(() => {
   const s = new Set(DISTRICTS)
@@ -332,12 +379,14 @@ async function loadOverview() {
 }
 
 async function loadRecords() {
+  const district = filters.district
+    || (districtSel.value && districtSel.value !== '全部' ? districtSel.value : '')
   const q = {
     date: date.value, page: page.value, size: size.value,
     result: filters.result, category: filters.category,
     push_status: filters.push_status, keyword: filters.keyword,
+    district,
   }
-  if (districtSel.value && districtSel.value !== '全部') q.district = districtSel.value
   const d = await api.get('/qc/records', { params: q })
   records.value = d.rows || []
   recTotal.value = d.total || 0
@@ -385,6 +434,39 @@ async function pushSelected() {
     await loadOverview()
     await loadRecords()
   } finally { pushing.value = false }
+}
+
+async function captureLongImage() {
+  if (capturing.value) return
+  capturing.value = true
+  try {
+    const district = filters.district
+      || (districtSel.value && districtSel.value !== '全部' ? districtSel.value : '')
+    const d = await api.get('/qc/records', {
+      params: {
+        date: date.value, result: 'ng',
+        category: filters.category, push_status: filters.push_status,
+        keyword: filters.keyword, district, page: 1, size: 100000,
+      },
+    })
+    captureRows.value = d.rows || []
+    if (!captureRows.value.length) {
+      ElMessage.warning('当前筛选下没有不合格明细可截图')
+      return
+    }
+    await nextTick()
+    const canvas = await html2canvas(captureRef.value, { scale: 2, backgroundColor: '#ffffff' })
+    const link = document.createElement('a')
+    link.download = `不合格明细_${date.value}_${captureRows.value.length}条.png`
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+    ElMessage.success(`已生成长图（${captureRows.value.length} 条不合格明细）`)
+  } catch (e) {
+    ElMessage.error('截图失败：' + (e?.message || e))
+  } finally {
+    capturing.value = false
+    captureRows.value = []
+  }
 }
 
 function openUpload() { parsed.value = null; dlg.value = true }
@@ -446,6 +528,13 @@ onMounted(async () => {
 .reason-inner { height: 100%; background: linear-gradient(90deg, #f89898, #f56c6c); border-radius: 4px; }
 .expand-box { padding: 6px 16px; font-size: 13px; line-height: 1.9; color: #606266; }
 .pager { display: flex; justify-content: flex-end; margin-top: 10px; }
+/* 一键截图：离屏容器，不参与布局，仅供 html2canvas 渲染长图 */
+.qc-capture { position: fixed; left: -10000px; top: 0; width: 1180px; background: #fff; padding: 16px; box-sizing: border-box; }
+.qc-capture-title { font-size: 18px; margin: 0 0 12px; color: #303133; font-weight: 600; }
+.qc-capture-table { width: 100%; border-collapse: collapse; font-size: 13px; color: #303133; table-layout: fixed; }
+.qc-capture-table th, .qc-capture-table td { border: 1px solid #ebeef5; padding: 6px 8px; text-align: left; word-break: break-all; line-height: 1.5; }
+.qc-capture-table thead th { background: #f5f7fa; font-weight: 600; }
+.qc-capture-table tbody tr:nth-child(even) { background: #fafafa; }
 @media (max-width: 768px) {
   .stat-value { font-size: 18px; }
   .page-card :deep(.el-card__body) { padding: 12px; }
