@@ -132,6 +132,7 @@
               </div>
               <div class="row-kv"><span><span class="k">小区</span> {{ r.community || '—' }}</span></div>
               <div class="row-kv"><span><span class="k">服务号码</span> {{ r.number || '—' }}</span></div>
+              <div class="row-kv"><span><span class="k">用户联系电话</span> {{ r.user_phone || '—' }}</span></div>
               <div class="row-kv"><span><span class="k">回单时间</span> {{ r.back || '—' }}</span></div>
             </div>
           </template>

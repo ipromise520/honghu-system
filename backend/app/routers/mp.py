@@ -632,7 +632,8 @@ COLS_ORDER = {
     # H5回收（v1.6.9）：本人名下已发短信但客户未参评的单，按「已等多久」排序
     # 状态固定是「已施工」（应发前提就是完工），不重复占一列；「已等」才是要盯的东西
     "h5_recover": [("no", "工单号", 1), ("kind_name", "类型", 0), ("community", "小区", 0),
-                   ("number", "服务号码", 1), ("back", "回单时间", 0), ("wait", "已等", 0)],
+                   ("number", "服务号码", 1), ("user_phone", "用户联系电话", 0),
+                   ("back", "回单时间", 0), ("wait", "已等", 0)],
 }
 
 
@@ -679,6 +680,7 @@ def orders(kind: str = Query("pending_install"), scope: str = Query("mine"),
                  "kind_name": "装机" if it.get("kind") == "install" else "投诉",
                  "community": it.get("community_name", ""),
                  "number": it.get("service_number") or it.get("fault_number", ""),
+                 "user_phone": it.get("user_phone", ""),
                  "back": (it.get("back_time") or "")[:16],
                  "wait": _age_text(it.get("age_h")),
                  "wait_days": int((it.get("age_h") or 0) // 24),

@@ -198,6 +198,8 @@ def _derive_install(db: Session, start, end, district, hide_unfinished, name_sco
             "contact_person": _clean(o.handler),
             "fault_number": _clean(o.service_number),
             "service_number": _clean(o.service_number),
+            # 用户联系电话：装机宽表无独立联系电话字段，以服务号码兜底（家宽账号即客户可联系号码）
+            "user_phone": _clean(o.service_number),
         })
     return out
 
@@ -239,6 +241,8 @@ def _derive_complaint(db: Session, start, end, district, hide_unfinished, name_s
             "community_name": _clean(c.community_name),
             "contact_person": _clean(c.contact_person),
             "fault_number": _clean(c.fault_number),
+            # 用户联系电话：投诉宽表 contact_person 即「受理电话号码」（客户联系电话）
+            "user_phone": _clean(c.contact_person),
         })
     return out
 
@@ -313,6 +317,9 @@ def mine_pending(db: Session, name: str, district: str, month: str = "") -> list
     out = [it for it in items if not _is_received(it, rmap)]
     for it in out:
         it["age_h"] = _age_hours(it.get("back_time"))
+    # v1.6.10：装维端 H5回收只看「回单 24 小时内」的单；超过 24 小时的不在此处展示，
+    # 避免列表被历史遗留单占满（已参评的上面已过滤）。网格长端的 /h5/pending 不受影响。
+    out = [it for it in out if (it.get("age_h") or 0) <= 24]
     out.sort(key=lambda x: x.get("age_h") or 0, reverse=True)
     return out
 
