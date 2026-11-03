@@ -53,13 +53,13 @@
     <el-card class="page-card" v-if="hasWide">
       <template #header><div class="card-header"><span class="title">投诉概况（{{ month }}）</span></div></template>
       <el-row :gutter="16">
-        <el-col :xs="24" :md="8">
+        <el-col :xs="24" :md="10">
           <div ref="catRef" class="chart-mid" />
         </el-col>
-        <el-col :xs="24" :md="8">
+        <el-col :xs="24" :md="7">
           <div ref="cDistRef" class="chart-mid" />
         </el-col>
-        <el-col :xs="24" :md="8">
+        <el-col :xs="24" :md="7">
           <el-table :data="complaintDistricts" size="small">
             <el-table-column prop="district" label="区县" width="150" />
             <el-table-column prop="count" label="投诉量" width="90" align="right" />
@@ -1018,17 +1018,21 @@ function renderComplaintCharts(wide) {
     catChart.setOption({
       title: { text: '投诉分类 TOP6', left: 'center', textStyle: { fontSize: 13 } },
       tooltip: { trigger: 'item' },
-      series: [{ type: 'pie', radius: ['40%', '65%'], data: topCat.map(x => ({ name: x.category.slice(-8), value: x.count })) }],
+      series: [{ type: 'pie', radius: ['38%', '60%'], avoidLabelOverlap: true,
+        data: topCat.map(x => ({ name: x.category, value: x.count })),
+        label: { fontSize: 11, color: '#333' },
+        labelLine: { length: 6, length2: 8 } }],
     })
     if (!cDistChart) cDistChart = echarts.init(cDistRef.value)
     const topD = c.by_district.slice(0, 8)
     cDistChart.setOption({
       title: { text: '区县投诉分布', left: 'center', textStyle: { fontSize: 13 } },
       tooltip: { trigger: 'axis' },
-      grid: { left: 80, right: 20, top: 40, bottom: 20 },
+      grid: { left: 80, right: 48, top: 40, bottom: 20 },
       xAxis: { type: 'value' },
       yAxis: { type: 'category', data: topD.map(d => d.district).reverse() },
-      series: [{ type: 'bar', data: topD.map(d => d.count).reverse(), itemStyle: { color: '#9b59b6' } }],
+      series: [{ type: 'bar', data: topD.map(d => d.count).reverse(), itemStyle: { color: '#9b59b6' },
+        label: { show: true, position: 'right', fontSize: 11, color: '#333', formatter: '{c}' } }],
     })
   })
 }
