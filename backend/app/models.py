@@ -605,6 +605,7 @@ class H5SurveyRecord(Base):
     q2: Mapped[str] = mapped_column(String(16), default="")                 # 得分(服务/问题解决)
     q3: Mapped[str] = mapped_column(String(16), default="")                 # 得分(安装效果,仅装机)
     remark: Mapped[str] = mapped_column(String(255), default="")            # 不满意原因/留言
+    tag: Mapped[str] = mapped_column(String(64), default="")               # 业务标签(千兆/FTTR 等，来源详单)
 
 
 class H5LowScore(Base):

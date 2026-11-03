@@ -668,9 +668,33 @@ def _up_wide_install(db, filename, sheets):
 _H5_RATE_DISTRICTS = ["沙市区", "荆州区", "荆州开发区", "洪湖市", "监利市", "江陵县", "公安县", "松滋市", "石首市"]
 
 # ---------------- 参与率奖励规则（以下数值为可修改变量，按考核办法调整） ----------------
-REWARD_RATE_MIN = 0.5        # 参与率门槛：达到按件计奖，未达到按欠产扣罚
-REWARD_INSTALL_UNIT = 20     # 装机参与奖励单价（元/件）
-REWARD_COMPLAINT_UNIT = 30   # 故障（投诉）参与奖励单价（元/件）
+# 模块常量仅作「默认值 / 回退值」，运行时由 settings 表 key=h5_rate_reward（JSON）覆盖，
+# 页面「奖励规则设置」对话框可逐月修改并持久化，无需改代码重启。
+REWARD_RATE_MIN = 0.5        # 参与率门槛（默认值）：达到按件计奖，未达到按欠产扣罚
+REWARD_INSTALL_UNIT = 20     # 装机参与奖励单价（元/件，默认）
+REWARD_COMPLAINT_UNIT = 30   # 故障（投诉）参与奖励单价（元/件，默认）
+
+# 运行期参与率门槛：由 /h5/rate 每次请求时按 settings 覆盖（避免全局可变状态并发竞态，单请求内稳定）
+REWARD_CFG = {"rate_min": REWARD_RATE_MIN}
+
+
+def _reward_config(db) -> dict:
+    """读取参与率奖励规则：优先 settings 表 h5_rate_reward（JSON，可后台编辑），
+    缺失/解析失败则回退到模块常量。"""
+    default = {"rate_min": REWARD_RATE_MIN, "install_unit": REWARD_INSTALL_UNIT,
+               "complaint_unit": REWARD_COMPLAINT_UNIT}
+    s = db.query(Setting).filter(Setting.key == "h5_rate_reward").first()
+    if not s or not s.value:
+        return default
+    try:
+        v = json.loads(s.value)
+        return {
+            "rate_min": float(v.get("rate_min", REWARD_RATE_MIN)),
+            "install_unit": int(v.get("install_unit", REWARD_INSTALL_UNIT)),
+            "complaint_unit": int(v.get("complaint_unit", REWARD_COMPLAINT_UNIT)),
+        }
+    except Exception:
+        return default
 
 # 洪湖市 网格→班组长 补齐映射：延伸花名册（extension_members）只覆盖 7 个主网格，
 # 子网格（燕窝/万全/小港等）与主网格同班长，此处按 10月18日 通报快照补齐；
@@ -696,10 +720,11 @@ def _xround(v: float) -> int:
 
 def _reward(rate, eval_cnt: int, back_cnt: int, short_cnt, unit: int) -> int:
     """预计奖励（元）：参与率达到门槛 → 已测评件数×单价；未达到 → 50%参与率欠产数×单价（欠产为负即扣罚）。
-    无回单不计奖；short_cnt 为已按 Excel 口径算好的欠产数（fig1 传库存值，fig2 传 None 现算）。"""
+    无回单不计奖；short_cnt 为已按 Excel 口径算好的欠产数（fig1 传库存值，fig2 传 None 现算）。
+    门槛取运行期 REWARD_CFG['rate_min']（由 settings 表 h5_rate_reward 覆盖，逐月可配）。"""
     if not back_cnt:
         return 0
-    if rate is not None and rate >= REWARD_RATE_MIN:
+    if rate is not None and rate >= REWARD_CFG["rate_min"]:
         return int(eval_cnt * unit)
     short = short_cnt if short_cnt is not None else _xround(eval_cnt - 0.5 * back_cnt)
     return int(short * unit)
@@ -718,11 +743,11 @@ def _h5_rate_meta(db, district: str) -> dict:
     return {"source": job.filename if job else "", "day_label": day_label, "month_label": month_label,
             "fig1_title": "(集团大音平台) 装维H5满意度", "fig1_subtitle": district,
             "data_date": dd.value if dd else "",
-            # 奖励规则（可修改变量，同步给前端标题旁说明与底部口径注）
-            "reward": {"rate_min": REWARD_RATE_MIN, "install_unit": REWARD_INSTALL_UNIT,
-                       "complaint_unit": REWARD_COMPLAINT_UNIT},
-            "reward_note": (f"参与率（{int(REWARD_RATE_MIN * 100)}%）奖励装机参与（{REWARD_INSTALL_UNIT}）/件；"
-                            f"故障参与（{REWARD_COMPLAINT_UNIT}）元/件。")}
+            # 奖励规则（优先 settings 表 h5_rate_reward，缺失回退模块常量；可后台「奖励规则设置」逐月修改）
+            "reward": _reward_config(db),
+            "reward_note": (f"参与率（{int(_reward_config(db)['rate_min'] * 100)}%）奖励装机参与"
+                            f"（{_reward_config(db)['install_unit']}）/件；"
+                            f"故障参与（{_reward_config(db)['complaint_unit']}）元/件。")}
 
 
 @router.get("/rate")
@@ -733,6 +758,9 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
     dists = db.query(H5SurveyDistrict).all()
     staff_rows = db.query(H5SurveyStaff).all()
     meta = _h5_rate_meta(db, district)
+    # 奖励规则：从 settings 表读取（逐月可配），并覆盖运行期门槛，供下方 _reward 使用
+    cfg = _reward_config(db)
+    REWARD_CFG["rate_min"] = cfg["rate_min"]
 
     # ---- 图1：人员明细（班组长 = extension_members 网格长 + 子网格补齐映射，按网格名关联） ----
     leaders: dict = {}
@@ -765,8 +793,8 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
             continue
         i_rate_v = (s.i_eval / s.i_back) if s.i_back else None
         c_rate_v = (s.c_eval / s.c_back) if s.c_back else None
-        i_rw = _reward(i_rate_v, s.i_eval, s.i_back, s.i_short, REWARD_INSTALL_UNIT)
-        c_rw = _reward(c_rate_v, s.c_eval, s.c_back, s.c_short, REWARD_COMPLAINT_UNIT)
+        i_rw = _reward(i_rate_v, s.i_eval, s.i_back, s.i_short, cfg["install_unit"])
+        c_rw = _reward(c_rate_v, s.c_eval, s.c_back, s.c_short, cfg["complaint_unit"])
         fig1_rows.append({
             "grid": s.grid, "leader": _leader_of(s.grid, s.name), "name": s.name,
             "i_back": s.i_back, "i_eval": s.i_eval,
@@ -792,9 +820,9 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
     t_cb = sum(r["c_back"] for r in fig1_rows)
     t_ce = sum(r["c_eval"] for r in fig1_rows)
     t_i_rw = _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib,
-                     sum(r["i_short"] for r in fig1_rows), REWARD_INSTALL_UNIT)
+                     sum(r["i_short"] for r in fig1_rows), cfg["install_unit"])
     t_c_rw = _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb,
-                     sum(r["c_short"] for r in fig1_rows), REWARD_COMPLAINT_UNIT)
+                     sum(r["c_short"] for r in fig1_rows), cfg["complaint_unit"])
     fig1 = {"rows": fig1_rows,
             "totals": {"i_back": t_ib, "i_eval": t_ie,
                        "i_short": sum(r["i_short"] for r in fig1_rows),
@@ -825,7 +853,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                 "i_rate": (i.survey_cnt / i.back_cnt) if i and i.back_cnt else None,
                 "i_reward": _reward((i.survey_cnt / i.back_cnt) if i and i.back_cnt else None,
                                     i.survey_cnt if i else 0, i.back_cnt if i else 0,
-                                    None, REWARD_INSTALL_UNIT),
+                                    None, cfg["install_unit"]),
                 "i_affect": i.affect_cnt if i else 0,
                 "i_affect_rate": (i.affect_ratio / 100) if i else None,
                 "i_diff": i.diff_cnt if i else 0,
@@ -838,7 +866,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                 "c_rate": (c.survey_cnt / c.back_cnt) if c and c.back_cnt else None,
                 "c_reward": _reward((c.survey_cnt / c.back_cnt) if c and c.back_cnt else None,
                                     c.survey_cnt if c else 0, c.back_cnt if c else 0,
-                                    None, REWARD_COMPLAINT_UNIT),
+                                    None, cfg["complaint_unit"]),
                 "c_affect": c.affect_cnt if c else 0,
                 "c_affect_rate": (c.affect_ratio / 100) if c else None,
                 "c_diff": c.diff_cnt if c else 0,
@@ -854,7 +882,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                   "i_sat": round(0.4 * (q24 or 0) + 0.2 * (q25 or 0) + 0.4 * (q26 or 0), 4) if q24 is not None else None,
                   "q24": q24, "q25": q25, "q26": q26, "fttr": _wavg("fttr", "i_eval", rows),
                   "i_rate": (t_ie / t_ib) if t_ib else None,
-                  "i_reward": _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib, None, REWARD_INSTALL_UNIT),
+                  "i_reward": _reward((t_ie / t_ib) if t_ib else None, t_ie, t_ib, None, cfg["install_unit"]),
                   "i_affect": sum(r["i_affect"] for r in rows), "i_affect_rate": None,
                   "i_diff": sum(r["i_diff"] for r in rows),
                   "bm": sum(r["bm"] for r in rows), "bn": sum(r["bn"] for r in rows),
@@ -863,7 +891,7 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
                   "c_sat": round(0.4 * (q27 or 0) + 0.2 * (q28 or 0) + 0.4 * (q29 or 0), 4) if q27 is not None else None,
                   "q27": q27, "q28": q28, "q29": q29,
                   "c_rate": (t_ce / t_cb) if t_cb else None,
-                  "c_reward": _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb, None, REWARD_COMPLAINT_UNIT),
+                  "c_reward": _reward((t_ce / t_cb) if t_cb else None, t_ce, t_cb, None, cfg["complaint_unit"]),
                   "c_affect": sum(r["c_affect"] for r in rows), "c_affect_rate": None,
                   "c_diff": sum(r["c_diff"] for r in rows)}
         return {"rows": rows, "totals": totals}
@@ -880,3 +908,65 @@ def h5_rate(district: str = Query("洪湖市"), user=Depends(get_current_user), 
 
     return {"has_data": bool(dists or staff_rows), "meta": meta, "fig1": fig1, "fig1_hint": fig1_hint,
             "fig2": {"day": _fig2_block("当日"), "month": _fig2_block("当月")}}
+
+
+@router.get("/rate-config")
+def h5_rate_config(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """读取当前 H5 参与率奖励规则（参与率门槛%、装机参与元/件、故障参与元/件）；可后台设置，逐月调整。"""
+    cfg = _reward_config(db)
+    return {"rate_min": cfg["rate_min"], "install_unit": cfg["install_unit"], "complaint_unit": cfg["complaint_unit"]}
+
+
+@router.put("/rate-config")
+def h5_rate_config_set(body: dict, user=Depends(require_admin), db: Session = Depends(get_db)):
+    """设置 H5 参与率奖励规则，持久化到 settings 表 h5_rate_reward（JSON）。仅管理员可改。"""
+    try:
+        rm = float(body.get("rate_min"))
+        iu = int(body.get("install_unit"))
+        cu = int(body.get("complaint_unit"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="参数必须为数字")
+    if not (0 < rm <= 1):
+        raise HTTPException(status_code=400, detail="参与率门槛需在 0~1 之间（如 0.5 表示 50%）")
+    if iu < 0 or cu < 0:
+        raise HTTPException(status_code=400, detail="奖励单价不能为负")
+    val = json.dumps({"rate_min": rm, "install_unit": iu, "complaint_unit": cu}, ensure_ascii=False)
+    s = db.query(Setting).filter(Setting.key == "h5_rate_reward").first()
+    if s:
+        s.value = val
+    else:
+        db.add(Setting(key="h5_rate_reward", value=val))
+    db.commit()
+    return {"ok": True, "config": {"rate_min": rm, "install_unit": iu, "complaint_unit": cu}}
+
+
+@router.get("/low-score")
+def h5_low_score(threshold: int = Query(9, ge=1, le=10),
+                 kind: str = Query("", description="装机/投诉/空=全部"),
+                 user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """低分（满意度不达标）工单通项明细通报：列出 H5 回复详单中评分 ≤ threshold 的工单。
+    threshold 默认 9（即非满分 10 的工单），可按需下调（如 7=仅列明显不满意）。"""
+    q = db.query(H5SurveyRecord)
+    if kind in ("装机", "投诉"):
+        q = q.filter(H5SurveyRecord.kind == kind)
+    rows = q.order_by(H5SurveyRecord.reply_time.desc()).all()
+    out = []
+    for r in rows:
+        scores = [int(x) for x in (r.q1, r.q2, r.q3) if str(x).strip().lstrip("-").isdigit()]
+        if not scores:
+            continue
+        mn = min(scores)
+        if mn > threshold:
+            continue
+        out.append({
+            "kind": r.kind,
+            "reply_time": r.reply_time,
+            "district": r.district,
+            "order_no": r.order_no,
+            "staff": r.staff,
+            "tag": r.tag or "",
+            "q1": r.q1, "q2": r.q2, "q3": r.q3,
+            "remark": r.remark,
+            "min_score": mn,
+        })
+    return {"threshold": threshold, "count": len(out), "rows": out}

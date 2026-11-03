@@ -1,0 +1,542 @@
+<template>
+  <div class="qc-page">
+    <!-- 工具栏 -->
+    <el-card class="page-card">
+      <div class="toolbar">
+        <el-select v-model="date" style="width:300px" placeholder="选择质检日期" @change="loadAll">
+          <el-option v-for="d in dates" :key="d.date" :value="d.date"
+                     :label="`${d.date}（${d.rows} 单 · 不合格 ${d.ng}）`" />
+        </el-select>
+        <el-select v-model="districtSel" style="width:140px" @change="loadOverview">
+          <el-option label="全部区县" value="全部" />
+          <el-option v-for="d in districtOptions" :key="d" :label="d" :value="d" />
+        </el-select>
+        <el-button v-if="isAdmin" @click="openUpload">
+          <el-icon><Upload /></el-icon>&nbsp;上传质检明细
+        </el-button>
+        <el-button type="primary" :loading="pushing" :disabled="!ov.push.todo" @click="pushAll">
+          <el-icon><Promotion /></el-icon>&nbsp;推送待整改（{{ ov.push.todo }}）
+        </el-button>
+        <el-tag v-if="noAccount" size="small" type="warning" effect="plain"
+                style="white-space:nowrap">
+          {{ noAccount }} 人无账号
+        </el-tag>
+        <span class="tip">
+          口径：合格率 = 合格量 / 抽检量 · 低于达标线标红（投诉/义诊/延伸/看家/组网 96%，
+          装机 98%，企宽、FTTR 100%）· 考核 10 元/件 · 不结算按类型单件计
+        </span>
+      </div>
+
+      <!-- 汇总卡片 -->
+      <el-row :gutter="12" class="stat-row">
+        <el-col v-for="c in cards" :key="c.label" :xs="12" :sm="8" :md="4">
+          <el-card class="stat-card" shadow="never">
+            <div class="stat-label">{{ c.label }}</div>
+            <div class="stat-value" :style="{ color: c.color || '' }">{{ c.value }}<span
+              v-if="c.unit" class="unit">{{ c.unit }}</span></div>
+            <div class="stat-sub">{{ c.sub }}</div>
+          </el-card>
+        </el-col>
+      </el-row>
+
+      <el-tabs v-model="tab">
+        <!-- ================= 通报维度 ================= -->
+        <el-tab-pane label="通报分析" name="report">
+          <template v-if="!ov.has_data">
+            <el-empty description="暂无质检数据，请点击「上传质检明细」导入当日通报附件" />
+          </template>
+          <template v-else>
+            <div class="block-title">一、按质检类型（通报八列）</div>
+            <el-table :data="ov.types" size="small" border class="wide-table">
+              <el-table-column prop="category" label="质检类型" width="120" fixed />
+              <el-table-column prop="scanned" label="抽检量" width="90" align="right" sortable />
+              <el-table-column prop="passed" label="合格量" width="90" align="right" sortable />
+              <el-table-column label="不合格" width="90" align="right" sortable sort-by="ng">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': row.ng > 0 }" style="font-weight:600">{{ row.ng }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="合格率" width="100" align="right" sortable sort-by="rate">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': !row.ok }" style="font-weight:600">{{ row.rate }}%</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="达标线" width="90" align="right">
+                <template #default="{ row }">{{ row.threshold }}%</template>
+              </el-table-column>
+              <el-table-column label="结论" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.ok ? 'success' : 'danger'" effect="plain">
+                    {{ row.ok ? '达标' : '未达标' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="考核(元)" width="100" align="right">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': row.ng > 0 }">{{ row.ng ? fmt(row.penalty) : '—' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="不结算(元)" width="110" align="right">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': row.ng > 0 }">{{ row.no_settle ? fmt(row.no_settle) : '—' }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <div class="block-title" style="margin-top:16px">二、按区县（通报口径：不合格件数 / 考核 / 不结算）
+              <span class="tip-sm">点任意行 → 只看该区县</span></div>
+            <el-table :data="ov.districts" size="small" border max-height="420" class="wide-table"
+                      @row-click="onDistrictRow">
+              <el-table-column prop="district" label="区县" width="110" fixed />
+              <el-table-column prop="scanned" label="抽检量" width="90" align="right" sortable />
+              <el-table-column prop="passed" label="合格量" width="90" align="right" sortable />
+              <el-table-column label="合格率" width="100" align="right" sortable sort-by="rate">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': row.rate < 96 }" style="font-weight:600">{{ row.rate }}%</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="不合格" width="90" align="right" sortable sort-by="ng">
+                <template #default="{ row }">
+                  <span :class="{ 'gp-red': row.ng > 0 }" style="font-weight:600">{{ row.ng }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="考核(元)" width="100" align="right">
+                <template #default="{ row }">{{ row.ng ? fmt(row.penalty) : '—' }}</template>
+              </el-table-column>
+              <el-table-column label="不结算(元)" width="110" align="right">
+                <template #default="{ row }">{{ row.no_settle ? fmt(row.no_settle) : '—' }}</template>
+              </el-table-column>
+              <el-table-column label="短板类型（低于达标线）" min-width="260">
+                <template #default="{ row }">
+                  <el-tag v-for="w in row.weak" :key="w" size="small" type="danger" effect="plain"
+                          style="margin:0 6px 4px 0">{{ w }}</el-tag>
+                  <span v-if="!row.weak.length" class="muted">全部达标</span>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <div class="block-title" style="margin-top:16px">三、不合格原因分布</div>
+            <div class="reason-wrap">
+              <div v-for="r in ov.reasons" :key="r.item" class="reason-item">
+                <div class="reason-head">
+                  <span class="reason-name">{{ r.item }}</span>
+                  <span class="reason-cnt">{{ r.count }} 件</span>
+                </div>
+                <div class="reason-bar">
+                  <div class="reason-inner" :style="{ width: barW(r.count) }" />
+                </div>
+              </div>
+              <el-empty v-if="!ov.reasons.length" :image-size="60" description="当日无不合格" />
+            </div>
+          </template>
+        </el-tab-pane>
+
+        <!-- ================= 不规范清单 ================= -->
+        <el-tab-pane label="不规范清单" name="detail">
+          <div class="toolbar" style="margin-bottom:10px">
+            <el-radio-group v-model="filters.result" size="small" @change="loadRecords">
+              <el-radio-button value="ng">仅不合格</el-radio-button>
+              <el-radio-button value="">全部</el-radio-button>
+            </el-radio-group>
+            <el-select v-model="filters.district" size="small" style="width:140px" clearable
+                       placeholder="全部区县" @change="loadRecords">
+              <el-option label="全部区县" value="" />
+              <el-option v-for="d in districtOptions" :key="d" :label="d" :value="d" />
+            </el-select>
+            <el-select v-model="filters.category" size="small" style="width:140px" clearable
+                       placeholder="全部类型" @change="loadRecords">
+              <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
+            </el-select>
+            <el-select v-model="filters.push_status" size="small" style="width:130px" clearable
+                       placeholder="推送状态" @change="loadRecords">
+              <el-option label="未推送" value="todo" />
+              <el-option label="待整改" value="pushed" />
+              <el-option label="已整改" value="fixed" />
+            </el-select>
+            <el-input v-model="filters.keyword" size="small" style="width:200px" clearable
+                      placeholder="责任人/工单号/原因" @keyup.enter="loadRecords" @clear="loadRecords" />
+            <el-button size="small" @click="loadRecords">查询</el-button>
+            <el-button size="small" type="primary" :disabled="!selected.length" :loading="pushing"
+                       @click="pushSelected">推送选中（{{ selected.length }}）</el-button>
+            <el-button size="small" :loading="capturing" @click="captureLongImage">
+              <el-icon><Camera /></el-icon>&nbsp;一键截图
+            </el-button>
+            <span class="tip">共 {{ recTotal }} 条 · 点击行可展开不合格详情</span>
+          </div>
+
+          <el-table :data="records" size="small" border max-height="520" class="wide-table"
+                    @selection-change="s => selected = s" row-key="id">
+            <el-table-column type="selection" width="42" :selectable="r => !r.is_pass" />
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div class="expand-box">
+                  <div><b>不合格原因原文：</b>{{ row.ng_detail || row.ng_item || '—' }}</div>
+                  <div><b>定单主题：</b>{{ row.subject || '—' }}</div>
+                  <div><b>业务号码：</b>{{ row.service_no || '—' }} · <b>质检人：</b>{{ row.qc_person || '—' }}
+                    · <b>质检时间：</b>{{ row.finish_time || '—' }}</div>
+                  <div v-if="row.push_at"><b>推送：</b>{{ row.push_to_name }} · {{ row.push_at }} · 由 {{ row.push_by }}</div>
+                  <div v-if="row.fix_status === 'fixed'"><b>整改：</b>{{ row.fix_at }} · {{ row.fix_note }}</div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="district" label="区县" width="95" sortable />
+            <el-table-column prop="handler" label="责任人" width="125" sortable>
+              <template #default="{ row }">
+                <span>{{ row.handler || '—' }}</span>
+                <el-tag v-if="!row.is_pass && !row.push_to_name" size="small" type="info" effect="plain"
+                        style="margin-left:4px">无账号</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="category" label="类型" width="105" sortable />
+            <el-table-column prop="order_no" label="定单编码" width="185" show-overflow-tooltip />
+            <el-table-column prop="ng_item" label="不合格项" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="row.is_pass" class="muted">合格</span>
+                <el-tag v-else size="small" type="danger" effect="plain">{{ row.ng_item }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="考核" width="80" align="right">
+              <template #default="{ row }">{{ row.penalty ? fmt(row.penalty) : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="不结算" width="90" align="right">
+              <template #default="{ row }">{{ row.no_settle ? fmt(row.no_settle) : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="推送状态" width="150">
+              <template #default="{ row }">
+                <template v-if="row.is_pass"><span class="muted">—</span></template>
+                <el-tag v-else-if="row.fix_status === 'fixed'" size="small" type="success">已整改</el-tag>
+                <el-tag v-else-if="row.push_at" size="small" type="warning">
+                  待整改 · {{ row.push_to_name }}
+                </el-tag>
+                <span v-else class="muted">未推送</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="pager">
+            <el-pagination layout="total, prev, pager, next, sizes" :total="recTotal"
+                           v-model:current-page="page" v-model:page-size="size"
+                           :page-sizes="[50, 100, 200]" @current-change="loadRecords"
+                           @size-change="loadRecords" />
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+    </el-card>
+
+    <!-- 上传对话框 -->
+    <el-dialog v-model="dlg" title="上传人工质检明细" width="620px">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+                title="直接上传市公司「人工质检明细」原文件即可（含 人工质检明细 / FTTR / 企宽装机 三个 sheet，分析汇总无需处理）" />
+      <el-upload :show-file-list="false" accept=".xlsx,.xls" :auto-upload="false"
+                 :on-change="onFileChange">
+        <el-button :loading="uploading">选择文件并解析</el-button>
+      </el-upload>
+      <div v-if="parsed" style="margin-top:14px">
+        <el-descriptions :column="2" size="small" border>
+          <el-descriptions-item label="文件">{{ parsed.filename }}</el-descriptions-item>
+          <el-descriptions-item label="质检日期">{{ parsed.date }}</el-descriptions-item>
+          <el-descriptions-item label="明细行数">{{ parsed.total_rows }}</el-descriptions-item>
+          <el-descriptions-item label="不合格">{{ parsed.ng }} 件</el-descriptions-item>
+          <el-descriptions-item label="考核">{{ Math.abs(parsed.penalty) }} 元</el-descriptions-item>
+          <el-descriptions-item label="不结算">{{ Math.abs(parsed.no_settle) }} 元</el-descriptions-item>
+          <el-descriptions-item label="分类型" :span="2">{{ parsed.types }}</el-descriptions-item>
+        </el-descriptions>
+        <el-alert type="warning" :closable="false" show-icon style="margin-top:10px"
+                  :title="`请核对：不合格 ${parsed.ng} 件 / 考核 ${Math.abs(parsed.penalty)} 元 / 不结算 ${Math.abs(parsed.no_settle)} 元 是否与通报「分析汇总」合计行一致`" />
+      </div>
+      <template #footer>
+        <el-button @click="dlg = false">取消</el-button>
+        <el-button type="primary" :disabled="!parsed" :loading="importing" @click="doImport">
+          确认入库
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 一键截图：离屏渲染全部不合格明细，供 html2canvas 生成长图（不影响当前视图） -->
+    <div ref="captureRef" class="qc-capture">
+      <h2 class="qc-capture-title">质检不规范清单 · {{ date }} · 共 {{ captureRows.length }} 条不合格</h2>
+      <table class="qc-capture-table">
+        <thead>
+          <tr>
+            <th style="width:48px">#</th>
+            <th style="width:90px">区县</th>
+            <th style="width:110px">责任人</th>
+            <th style="width:100px">类型</th>
+            <th style="width:200px">定单编码</th>
+            <th>不合格项</th>
+            <th style="width:80px">考核</th>
+            <th style="width:90px">不结算</th>
+            <th style="width:150px">推送状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, i) in captureRows" :key="r.id">
+            <td>{{ i + 1 }}</td>
+            <td>{{ r.district }}</td>
+            <td>{{ r.handler || '—' }}</td>
+            <td>{{ r.category }}</td>
+            <td>{{ r.order_no }}</td>
+            <td>{{ r.is_pass ? '合格' : (r.ng_item || '—') }}</td>
+            <td>{{ r.penalty ? fmt(r.penalty) : '—' }}</td>
+            <td>{{ r.no_settle ? fmt(r.no_settle) : '—' }}</td>
+            <td>{{ r.is_pass ? '—' : (r.fix_status === 'fixed' ? '已整改' : (r.push_at ? '待整改·' + r.push_to_name : '未推送')) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Upload, Promotion, Camera } from '@element-plus/icons-vue'
+import api from '../api'
+import html2canvas from 'html2canvas'
+import { useUserStore } from '../store'
+
+const store = useUserStore()
+const isAdmin = computed(() => store.isAdmin)
+
+const DISTRICTS = ['荆州区', '沙市区', '公安县', '监利市', '江陵县', '石首市', '松滋市', '洪湖市', '荆州开发区']
+
+const dates = ref([])
+const date = ref('')
+const districtSel = ref('全部')
+const tab = ref('report')
+const pushing = ref(false)
+const ov = reactive({
+  date: '', has_data: false, summary: {}, types: [], districts: [], reasons: [],
+  push: { ng_total: 0, pushed: 0, fixed: 0, todo: 0, fixing: 0, unmatched_people: [] },
+})
+
+const records = ref([])
+const recTotal = ref(0)
+const page = ref(1)
+const size = ref(50)
+const selected = ref([])
+const filters = reactive({ result: 'ng', district: '', category: '', push_status: '', keyword: '' })
+
+const dlg = ref(false)
+const parsed = ref(null)
+const uploading = ref(false)
+const importing = ref(false)
+
+// 一键截图：把不合格明细截成长图
+const captureRef = ref(null)
+const captureRows = ref([])
+const capturing = ref(false)
+
+const districtOptions = computed(() => {
+  const s = new Set(DISTRICTS)
+  ;(ov.districts || []).forEach(d => s.add(d.district))
+  return [...s]
+})
+const typeOptions = computed(() => (ov.types || []).map(t => t.category))
+
+function fmt(v) {
+  return Math.abs(Number(v) || 0).toFixed(2).replace(/\.00$/, '')
+}
+
+const noAccount = computed(() => (ov.push?.unmatched_people || []).length)
+
+const cards = computed(() => {
+  const s = ov.summary || {}
+  const p = ov.push || {}
+  return [
+    { label: '质检总量', value: s.scanned ?? 0, unit: '单',
+      sub: `${s.districts ?? 0} 区县 · ${s.people ?? 0} 人` },
+    { label: '不合格件数', value: s.ng ?? 0, unit: '件',
+      color: (s.ng ?? 0) > 0 ? '#f56c6c' : '', sub: `合格 ${s.passed ?? 0} 件` },
+    { label: '整体合格率', value: s.rate ?? 0, unit: '%',
+      color: (s.rate ?? 100) < 96 ? '#f56c6c' : '#67c23a',
+      sub: `${(ov.types || []).filter(t => t.ok).length}/${(ov.types || []).length} 类达标` },
+    { label: '考核金额', value: fmt(s.penalty), unit: '元', color: (s.ng ?? 0) ? '#e6a23c' : '',
+      sub: `${s.ng ?? 0} 件 × 10 元` },
+    { label: '不结算金额', value: fmt(s.no_settle), unit: '元', color: (s.ng ?? 0) ? '#e6a23c' : '',
+      sub: '按类型单件计' },
+    { label: '已推送装维端', value: p.pushed ?? 0, unit: '件',
+      sub: `已整改 ${p.fixed ?? 0} / ${s.ng ?? 0}` },
+  ]
+})
+
+function barW(n) {
+  const max = Math.max(1, ...(ov.reasons || []).map(r => r.count))
+  return Math.round((n / max) * 100) + '%'
+}
+
+async function loadDates() {
+  const d = await api.get('/qc/dates')
+  dates.value = d.rows || []
+  if (!date.value && dates.value.length) date.value = dates.value[0].date
+}
+
+async function loadOverview() {
+  const q = { date: date.value }
+  if (districtSel.value && districtSel.value !== '全部') q.district = districtSel.value
+  const d = await api.get('/qc/overview', { params: q })
+  Object.assign(ov, d)
+  if (d.dates) dates.value = d.dates
+}
+
+async function loadRecords() {
+  const district = filters.district
+    || (districtSel.value && districtSel.value !== '全部' ? districtSel.value : '')
+  const q = {
+    date: date.value, page: page.value, size: size.value,
+    result: filters.result, category: filters.category,
+    push_status: filters.push_status, keyword: filters.keyword,
+    district,
+  }
+  const d = await api.get('/qc/records', { params: q })
+  records.value = d.rows || []
+  recTotal.value = d.total || 0
+}
+
+async function loadAll() {
+  await loadOverview()
+  page.value = 1
+  await loadRecords()
+}
+
+function onDistrictRow(row) {
+  districtSel.value = row.district
+  loadAll()
+}
+
+async function pushAll() {
+  const todo = ov.push.todo
+  if (!todo) return
+  const noAcc = (ov.push.unmatched_people || []).length
+  await ElMessageBox.confirm(
+    `将把当日 ${todo} 条未推送的不合格清单推送到对应装维人员的装维端。` +
+    (noAcc ? `其中 ${noAcc} 人没有装维端账号（多为其他区县人员），会被自动跳过。` : ''),
+    '确认推送', { type: 'warning', confirmButtonText: '开始推送' })
+  pushing.value = true
+  try {
+    const r = await api.post('/qc/push', { date: date.value, only_unpushed: true })
+    let msg = `已推送 ${r.pushed} 条`
+    if (r.unmatched_count) msg += `，跳过 ${r.unmatched_count} 条（无装维端账号）`
+    ElMessage.success(msg)
+    await loadOverview()
+    await loadRecords()
+  } finally { pushing.value = false }
+}
+
+async function pushSelected() {
+  const ids = selected.value.filter(r => !r.is_pass).map(r => r.id)
+  if (!ids.length) return
+  pushing.value = true
+  try {
+    const r = await api.post('/qc/push', { ids, only_unpushed: true })
+    let msg = `已推送 ${r.pushed} 条`
+    if (r.unmatched_count) msg += `，${r.unmatched_count} 条无装维端账号被跳过`
+    ElMessage.success(msg)
+    await loadOverview()
+    await loadRecords()
+  } finally { pushing.value = false }
+}
+
+async function captureLongImage() {
+  if (capturing.value) return
+  capturing.value = true
+  try {
+    const district = filters.district
+      || (districtSel.value && districtSel.value !== '全部' ? districtSel.value : '')
+    const d = await api.get('/qc/records', {
+      params: {
+        date: date.value, result: 'ng',
+        category: filters.category, push_status: filters.push_status,
+        keyword: filters.keyword, district, page: 1, size: 100000,
+      },
+    })
+    captureRows.value = d.rows || []
+    if (!captureRows.value.length) {
+      ElMessage.warning('当前筛选下没有不合格明细可截图')
+      return
+    }
+    await nextTick()
+    const canvas = await html2canvas(captureRef.value, { scale: 2, backgroundColor: '#ffffff' })
+    const link = document.createElement('a')
+    link.download = `不合格明细_${date.value}_${captureRows.value.length}条.png`
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+    ElMessage.success(`已生成长图（${captureRows.value.length} 条不合格明细）`)
+  } catch (e) {
+    ElMessage.error('截图失败：' + (e?.message || e))
+  } finally {
+    capturing.value = false
+    captureRows.value = []
+  }
+}
+
+function openUpload() { parsed.value = null; dlg.value = true }
+
+async function onFileChange(file) {
+  uploading.value = true
+  parsed.value = null
+  try {
+    const fd = new FormData()
+    fd.append('file', file.raw)
+    parsed.value = await api.post('/sync/upload/qc', fd)
+    ElMessage.success(`解析成功：${parsed.value.total_rows} 单，不合格 ${parsed.value.ng} 件`)
+  } catch (e) { /* 拦截器已提示 */ }
+  finally { uploading.value = false }
+}
+
+async function doImport() {
+  importing.value = true
+  try {
+    const r = await api.post(`/sync/confirm/${parsed.value.batch_id}`)
+    ElMessage.success(r.msg || '入库成功')
+    dlg.value = false
+    parsed.value = null
+    await loadDates()
+    if (!date.value && dates.value.length) date.value = dates.value[0].date
+    await loadAll()
+  } finally { importing.value = false }
+}
+
+onMounted(async () => {
+  try {
+    await loadDates()
+    await loadAll()
+  } catch (e) { /* 拦截器已提示 */ }
+})
+</script>
+
+<style scoped>
+.tip { color: #909399; font-size: 12px; margin-left: 8px; line-height: 1.6; }
+.toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.stat-row { margin-bottom: 8px; }
+.stat-card { text-align: center; }
+.stat-label { font-size: 12px; color: #909399; }
+.stat-value { font-size: 22px; font-weight: 600; margin: 4px 0 2px; }
+.stat-value .unit { font-size: 12px; font-weight: 400; color: #909399; margin-left: 3px; }
+.stat-sub { font-size: 12px; color: #909399; }
+.block-title { font-weight: 600; font-size: 14px; margin: 6px 0 8px; }
+.gp-red { color: #f56c6c; font-weight: 600; }
+.muted { color: #c0c4cc; }
+.tip-sm { color: #909399; font-size: 12px; font-weight: 400; margin-left: 8px; }
+.wide-table :deep(.el-table__header th) { background: #f5f7fa; }
+.wide-table :deep(.el-table__row) { cursor: pointer; }
+.reason-wrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px 22px; }
+.reason-item { padding: 2px 0; }
+.reason-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+.reason-name { color: #303133; }
+.reason-cnt { color: #f56c6c; font-weight: 600; }
+.reason-bar { height: 8px; background: #f0f2f5; border-radius: 4px; overflow: hidden; }
+.reason-inner { height: 100%; background: linear-gradient(90deg, #f89898, #f56c6c); border-radius: 4px; }
+.expand-box { padding: 6px 16px; font-size: 13px; line-height: 1.9; color: #606266; }
+.pager { display: flex; justify-content: flex-end; margin-top: 10px; }
+/* 一键截图：离屏容器，不参与布局，仅供 html2canvas 渲染长图 */
+.qc-capture { position: fixed; left: -10000px; top: 0; width: 1180px; background: #fff; padding: 16px; box-sizing: border-box; }
+.qc-capture-title { font-size: 18px; margin: 0 0 12px; color: #303133; font-weight: 600; }
+.qc-capture-table { width: 100%; border-collapse: collapse; font-size: 13px; color: #303133; table-layout: fixed; }
+.qc-capture-table th, .qc-capture-table td { border: 1px solid #ebeef5; padding: 6px 8px; text-align: left; word-break: break-all; line-height: 1.5; }
+.qc-capture-table thead th { background: #f5f7fa; font-weight: 600; }
+.qc-capture-table tbody tr:nth-child(even) { background: #fafafa; }
+@media (max-width: 768px) {
+  .stat-value { font-size: 18px; }
+  .page-card :deep(.el-card__body) { padding: 12px; }
+}
+</style>

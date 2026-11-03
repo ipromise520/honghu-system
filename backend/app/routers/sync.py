@@ -510,7 +510,9 @@ def _h5_survey_records(sheets: dict) -> list[dict]:
                         "is_low": _hs(_hcol(r, "是否低分用户", "是否低分用户(IsLowScore)")),
                         "q1": _hq_score(r, qcols[0]), "q2": _hq_score(r, qcols[1]),
                         "q3": _hq_score(r, qcols[2]) if kind == "装机" else "",
-                        "remark": remark})
+                        "remark": remark,
+                        "tag": _hs(_hcol(r, "业务标签(TagInformation)", "业务标签", "TagInformation",
+                                         "产品标签", "业务类型"))})
     return out
 
 
