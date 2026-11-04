@@ -7,7 +7,7 @@
           <span class="page-title">📈 H5 参与率通报</span>
           <el-tag type="warning" effect="light" size="small">{{ meta.day_label }} · 装维 H5 满意度参与率</el-tag>
           <el-tag type="info" effect="plain" size="small">{{ meta.source }}</el-tag>
-          <el-tooltip content="勾选后显示：装机预计奖励、故障预计奖励、奖励合计；取消勾选则隐藏（默认隐藏）" placement="bottom">
+          <el-tooltip content="勾选显示：装机预计奖励、故障预计奖励、奖励合计（默认显示；取消可隐藏）。其值由上方「考核标准」变量决定" placement="bottom">
             <el-checkbox v-model="showReward" size="small" class="reward-toggle">显示奖励列</el-checkbox>
           </el-tooltip>
         </div>
@@ -15,6 +15,40 @@
           <el-button size="small" type="primary" :loading="busy1" @click="exportFig1">🖼️ 一键输出图1 通报图片</el-button>
           <el-button size="small" type="primary" :loading="busy2" @click="exportFig2">🖼️ 一键输出图2 通报图片</el-button>
         </div>
+      </div>
+    </el-card>
+
+    <!-- 考核标准（可编辑）：3 个变量直接可输入，允许修改；第二行同步显示最新标准 -->
+    <el-card shadow="never" class="std-card" v-if="hasData">
+      <div class="std-edit">
+        <span class="std-title">考核标准</span>
+        <div class="std-field">
+          <span class="std-name">参与率门槛</span>
+          <el-input-number v-model="rewardForm.rate_min_pct" :min="1" :max="100" :step="5"
+                           :disabled="!isAdmin" size="small" @change="onStdChange" />
+          <span class="std-unit">%</span>
+        </div>
+        <div class="std-field">
+          <span class="std-name">装机参与奖励</span>
+          <el-input-number v-model="rewardForm.install_unit" :min="0" :step="1"
+                           :disabled="!isAdmin" size="small" @change="onStdChange" />
+          <span class="std-unit">元/件</span>
+        </div>
+        <div class="std-field">
+          <span class="std-name">故障参与奖励</span>
+          <el-input-number v-model="rewardForm.complaint_unit" :min="0" :step="1"
+                           :disabled="!isAdmin" size="small" @change="onStdChange" />
+          <span class="std-unit">元/件</span>
+        </div>
+        <el-button v-if="isAdmin" size="small" type="primary" :loading="rewardSaving" @click="saveRewardCfg">应用并保存</el-button>
+        <el-tag v-else type="info" size="small" effect="plain">只读（管理员可改）</el-tag>
+        <span v-if="stdDirty && isAdmin" class="std-warn">● 已修改未保存</span>
+        <span v-if="stdSaved" class="std-ok">✓ 已保存并刷新通报</span>
+      </div>
+      <!-- 第二行：随上方输入实时同步显示最新标准 -->
+      <div class="std-preview">
+        参与率（{{ rewardForm.rate_min_pct }}%）奖励装机参与（{{ rewardForm.install_unit }} 元/件）；故障参与（{{ rewardForm.complaint_unit }} 元/件）。
+        <span class="std-preview-hint">— 图1/图2 的「装机/故障预计奖励」「奖励合计」据此实时计算，点击「应用并保存」后刷新明细</span>
       </div>
     </el-card>
 
@@ -125,7 +159,7 @@
         口径说明：回单量＝回单明细中归属该区县/人员的工单数；测评量＝H5回复详单数；参与率＝测评量÷回单量；
         欠产数＝ROUND(测评量−50%×回单量)；满意度＝0.4×Q24＋0.2×Q25＋0.4×Q26（投诉为 Q27/Q28/Q29）；
         FTTR 满意度新版导出无明细数据，显示「—」。<br>
-        预计奖励规则（参数以后端 <code>h5.py</code> 顶部常量为准，可调整）：参与率 ≥ {{ (meta.reward?.rate_min ?? 0.5) * 100 }}%（达标）时，
+        预计奖励规则（参数可在本页顶部「考核标准」中直接修改并保存，持久化到后台）：参与率 ≥ {{ (meta.reward?.rate_min ?? 0.5) * 100 }}%（达标）时，
         「装机预计奖励」＝装机H5已测评 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝故障H5已测评 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件；
         参与率未达标时，「装机预计奖励」＝装机50%参与率欠产数 × {{ meta.reward?.install_unit ?? 20 }} 元/件，「故障预计奖励」＝投诉50%参与率欠产数 × {{ meta.reward?.complaint_unit ?? 30 }} 元/件
         （欠产数为负即扣罚）；无回单不计奖；「奖励合计」＝装机预计奖励＋故障预计奖励。
@@ -133,7 +167,79 @@
         网格班组长由花名册（extension_members）及洪湖网格长 mappings 补齐。
       </div>
     </el-card>
+
+    <!-- 图3：低分明细通报（满意度不达标工单通项明细） -->
+    <el-card shadow="never" class="report-card">
+      <div class="card-head">
+        <div class="card-title">
+          <b>图3</b> · 低分明细通报（满意度不达标工单 · 通项明细）
+          <el-tag size="small" type="danger" effect="plain" class="ls-count">共 {{ lowScore.rows.length }} 件</el-tag>
+        </div>
+        <el-button size="small" type="primary" plain :loading="lsExporting" @click="exportLowScore">导出图片</el-button>
+      </div>
+
+      <div class="ls-filter">
+        <span class="ls-filter-label">低分阈值（评分 ≤ ）：</span>
+        <el-input-number v-model="lowScore.threshold" :min="1" :max="10" :step="1" size="small" controls-position="right" style="width:110px" />
+        <span class="ls-hint">分（默认 9 分，即非满分 10 分的工单；下调可纳入更多明显不满意的工单）</span>
+        <el-select v-model="lowScore.kind" size="small" style="width:120px; margin-left:12px">
+          <el-option label="全部" value="" />
+          <el-option label="装机" value="装机" />
+          <el-option label="投诉" value="投诉" />
+        </el-select>
+        <el-button size="small" type="primary" :loading="lsLoading" @click="loadLowScore">查询通报</el-button>
+      </div>
+
+      <div v-if="!lsLoading && !lowScore.rows.length" class="note blk-empty">
+        当前无评分 ≤ {{ lowScore.threshold }} 分的工单（或全部已满分）。可下调阈值或切换业务类型后重新查询。
+      </div>
+      <div v-else class="scroll-x">
+        <div ref="lowScoreRef" class="shot">
+          <table class="rt ls">
+            <caption class="rt-title">
+              <span class="cap-left">低分人员评测场景信息（评分 ≤ {{ lowScore.threshold }} 分）</span>
+              <span class="cap-right">{{ surveyYear }}年业务评测问卷-家装装机</span>
+            </caption>
+            <thead>
+              <tr>
+                <th class="h c-scene" colspan="5">低分人员评测场景信息</th>
+                <th class="h c-qn" colspan="4">{{ surveyYear }}年业务评测问卷-家装装机</th>
+              </tr>
+              <tr>
+                <th class="h c-time">回复时间</th>
+                <th class="h c-dist">区县名称</th>
+                <th class="h c-no">装维工单编码</th>
+                <th class="h c-name">装维人员姓名</th>
+                <th class="h c-tag">业务标签</th>
+                <th class="h c-q">Q1 上门及时性</th>
+                <th class="h c-q">Q2 工作人员服务</th>
+                <th class="h c-q">Q3 安装效果</th>
+                <th class="h c-remark">建议（Q5）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(r, i) in lowScore.rows" :key="i">
+                <td class="c-time">{{ r.reply_time }}</td>
+                <td class="c-dist">{{ r.district }}</td>
+                <td class="c-no">{{ r.order_no }}</td>
+                <td class="c-name">{{ r.staff }}</td>
+                <td class="c-tag">{{ r.tag || '—' }}</td>
+                <td class="c-q" :class="qCls(r.q1)">{{ r.q1 }}</td>
+                <td class="c-q" :class="qCls(r.q2)">{{ r.q2 }}</td>
+                <td class="c-q" :class="qCls(r.q3)">{{ r.q3 }}</td>
+                <td class="c-remark">{{ r.remark || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="note">
+        口径：取 H5 回复详单中 Q1/Q2/Q3 任一评分 ≤ 阈值 的工单（阈值可调，默认 9 分即「非满分 10 分」）。
+        业务标签来自平台导出「业务标签」列，历史工单按宽带类型自动回填（如「个人、FTTR」）。
+      </div>
+    </el-card>
     </template>
+
   </div>
 </template>
 
@@ -142,6 +248,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import html2canvas from 'html2canvas'
 import api from '../api'
+import { useUserStore } from '../store'
 
 // 数据来自「数据同步 → H5满意度通报」最新确认快照（后端本地聚合），不再使用静态 JSON
 const payload = ref(null)
@@ -152,6 +259,12 @@ const fig1 = computed(() => payload.value?.fig1 || { rows: [], totals: {} })
 const fig1Hint = computed(() => payload.value?.fig1_hint || '')
 const fig2 = computed(() => payload.value?.fig2 || { day: { rows: [], totals: {} }, month: { rows: [], totals: {} } })
 const hasData = computed(() => !!payload.value?.has_data)
+
+// 管理员判定统一走用户 store（与 Dashboard/QualityCheck 一致），避免误判
+const store = useUserStore()
+const isAdmin = computed(() => store.isAdmin)
+// 低分通报右侧表头年份（业务评测问卷-家装装机）
+const surveyYear = ref(new Date().getFullYear())
 
 async function loadRate() {
   loading.value = true
@@ -166,8 +279,9 @@ const fig1Ref = ref(null)
 const fig2Ref = ref(null)
 const busy1 = ref(false)
 const busy2 = ref(false)
-// 「显示奖励列」勾选框：控制图1/图2 的奖励列（装机预计奖励、故障预计奖励、奖励合计）显隐，默认不勾选（隐藏）
-const showReward = ref(false)
+// 「显示奖励列」勾选框：控制图1/图2 的奖励列（装机预计奖励、故障预计奖励、奖励合计）显隐。
+// 默认勾选展示（考核标准修改后下方明细据此显示奖惩值）；可取消隐藏。
+const showReward = ref(true)
 const REWARD_COL_KEYS = ['i_reward', 'c_reward', 'rw_total']
 const _noReward = cols => cols.filter(c => !REWARD_COL_KEYS.includes(c.key))
 
@@ -285,6 +399,12 @@ function cellCls(col, row) {
   }
   return ''
 }
+// 低分 Q 评分配色：满分绿、低分红
+function qCls(v) {
+  const n = Number(v)
+  if (isNaN(n)) return ''
+  return n <= 9 ? 's-neg' : (n >= 10 ? 's-pos' : '')
+}
 
 async function shot(el, name) {
   // html2canvas 宽表导出加固（避免勾选「显示奖励列」后导出的图片缺少右侧奖励列）：
@@ -361,6 +481,103 @@ async function exportFig2() {
   } catch (e) { ElMessage.error('导出失败：' + (e?.message || e)) }
   finally { busy2.value = false }
 }
+
+// --------------------------------------------------------------------------
+// 考核标准（可编辑）：GET /h5/rate-config 拉取当前值；PUT 仅管理员可改并持久化。
+// 页面内联 3 个变量直接输入；第二行 std-preview 随输入实时显示最新标准；
+// 保存后重新拉取 /h5/rate，使图1/图2 奖励列按新标准重算并默认展示。
+// --------------------------------------------------------------------------
+const rewardSaving = ref(false)
+const rewardForm = ref({ rate_min_pct: 50, install_unit: 20, complaint_unit: 30 })
+// 是否已修改但尚未保存（用于「已修改未保存」提示）
+const stdDirty = ref(false)
+const stdSaved = ref(false)
+
+// 进入页面即拉取当前考核标准，填入内联输入框（同时作为第二行预览的初始值）
+async function loadRewardConfig() {
+  try {
+    const cfg = await api.get('/h5/rate-config')
+    rewardForm.value = {
+      rate_min_pct: Math.round((cfg.rate_min ?? 0.5) * 100),
+      install_unit: cfg.install_unit ?? 20,
+      complaint_unit: cfg.complaint_unit ?? 30,
+    }
+  } catch (e) {
+    // 拉取失败不阻断页面；使用默认值，第二行预览仍可用
+  }
+}
+
+// 输入变化即标记脏（第二行预览绑定 rewardForm，已实时同步）
+function onStdChange() {
+  stdDirty.value = true
+  stdSaved.value = false
+}
+
+async function saveRewardCfg() {
+  if (!isAdmin.value) { ElMessage.warning('当前账号无权限，仅管理员可修改考核标准'); return }
+  const rm = rewardForm.value.rate_min_pct / 100
+  if (!(rm > 0 && rm <= 1)) { ElMessage.warning('参与率门槛需在 1%~100% 之间'); return }
+  if (rewardForm.value.install_unit < 0 || rewardForm.value.complaint_unit < 0) {
+    ElMessage.warning('奖励单价不能为负'); return
+  }
+  rewardSaving.value = true
+  try {
+    await api.put('/h5/rate-config', {
+      rate_min: rm,
+      install_unit: rewardForm.value.install_unit,
+      complaint_unit: rewardForm.value.complaint_unit,
+    })
+    stdSaved.value = true
+    stdDirty.value = false
+    // 重新拉取通报，使图1/图2 的奖励说明（meta.reward / meta.reward_note）与奖励列即时刷新
+    showReward.value = true
+    await loadRate()
+    ElMessage.success('考核标准已保存，通报已更新')
+  } catch (e) {
+    const status = e?.response?.status
+    if (status === 403) ElMessage.error('无权限：仅管理员可修改考核标准')
+    else if (status === 400) ElMessage.error('参数不合法：' + (e?.response?.data?.detail || ''))
+    else ElMessage.error('保存失败，请稍后重试')
+  } finally { rewardSaving.value = false }
+}
+
+// --------------------------------------------------------------------------
+// 低分明细通报（GET /h5/low-score）：满意度不达标工单通项明细，阈值/业务类型可选
+// --------------------------------------------------------------------------
+const lowScoreRef = ref(null)
+const lsLoading = ref(false)
+const lsExporting = ref(false)
+const lowScore = ref({ threshold: 9, kind: '', rows: [] })
+
+async function loadLowScore() {
+  lsLoading.value = true
+  try {
+    const params = { threshold: lowScore.value.threshold }
+    if (lowScore.value.kind) params.kind = lowScore.value.kind
+    const res = await api.get('/h5/low-score', { params })
+    lowScore.value.rows = res.rows || []
+  } catch (e) {
+    ElMessage.error('查询低分明细失败')
+  } finally { lsLoading.value = false }
+}
+async function exportLowScore() {
+  if (!lowScore.value.rows.length) {
+    ElMessage.warning('当前无低分明细可导出')
+    return
+  }
+  if (!lowScoreRef.value) return
+  lsExporting.value = true
+  try {
+    await shot(lowScoreRef.value, `H5低分明细通报_${meta.value.day_label}_阈值${lowScore.value.threshold}.png`)
+    ElMessage.success('低分明细通报图片已导出')
+  } catch (e) { ElMessage.error('导出失败：' + (e?.message || e)) }
+  finally { lsExporting.value = false }
+}
+
+// 进入页面即加载一次低分明细（默认阈值 9），与图1/图2 同步呈现
+onMounted(loadLowScore)
+// 进入页面即拉取当前考核标准填入内联输入框
+onMounted(loadRewardConfig)
 </script>
 
 <style scoped>
@@ -371,7 +588,7 @@ async function exportFig2() {
 .page-title { font-size: 17px; font-weight: 700; }
 .toolbar-right { display: flex; align-items: center; gap: 8px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.card-title { font-size: 14px; color: #303133; }
+.card-title { font-size: 14px; color: #303133; display: flex; align-items: center; gap: 8px; }
 .reward-note { margin-left: 10px; font-size: 12px; color: #e02020; font-weight: 700; white-space: nowrap; }
 .note { margin-top: 10px; font-size: 12px; color: #909399; line-height: 1.7; }
 .note code { background: #f2f2f2; padding: 0 4px; border-radius: 3px; font-size: 11px; }
@@ -379,6 +596,10 @@ async function exportFig2() {
 .fig1-empty { margin-bottom: 10px; }
 .fig1-empty :deep(.el-alert__title) { font-size: 13px; line-height: 1.6; }
 .blk-empty { margin: 4px 0 14px; }
+.ls-count { margin-left: 6px; }
+.ls-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.ls-filter-label { font-size: 13px; color: #606266; }
+.ls-hint { font-size: 12px; color: #909399; }
 
 /* 截图表 —— 使用独立表格样式，保证 html2canvas 导出保真 */
 .shot { width: max-content; }
@@ -428,13 +649,38 @@ table.rt td.c-short { background: #fdf3ee; }
 table.rt td.c-c { background: #fdf2ec; }
 table.rt td.c-rw { background: #fff7e0; }
 table.rt th.c-rw { background: #ffe6a3; color: #7a5b00; }
-table.rt tfoot td.c-rw { background: #ffd966; color: inherit; }
+/* 图2 区县汇总明细列底色（与服务器既有样式保持一致，避免回退） */
 table.rt td.c-q { background: #f2f7fd; }
 table.rt td.c-af { background: #f7f7f7; }
 table.rt td.c-no { background: #fbfbfb; }
+table.rt td.c-diff { background: #fff; }
 table.rt tfoot td { background: #ffd966; font-weight: 700; }
 table.rt tfoot td.sum-label { background: #ffd966; }
 table.rt .s-neg { color: #e02020; font-weight: 700; }
 table.rt .s-pos { color: #0f9d58; font-weight: 700; }
+
+/* 低分明细表（图3）专属配色：时间列左对齐、备注列可换行 */
+table.rt.ls th.c-time, table.rt.ls td.c-time { text-align: left; white-space: nowrap; }
+table.rt.ls th.c-no, table.rt.ls td.c-no { text-align: left; white-space: nowrap; }
+table.rt.ls th.c-name, table.rt.ls td.c-name { text-align: left; }
+table.rt.ls th.c-tag, table.rt.ls td.c-tag { text-align: left; white-space: nowrap; }
+table.rt.ls th.c-remark, table.rt.ls td.c-remark { text-align: left; white-space: normal; min-width: 160px; }
 :deep(.el-card__body) { padding: 14px; }
+
+/* 考核标准可编辑卡片 */
+.std-card { margin-bottom: 12px; }
+.std-card :deep(.el-card__body) { padding: 12px 14px; }
+.std-edit { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.std-title { font-size: 14px; font-weight: 700; color: #303133; }
+.std-field { display: flex; align-items: center; gap: 4px; }
+.std-name { font-size: 13px; color: #606266; }
+.std-unit { font-size: 12px; color: #909399; }
+.std-warn { font-size: 12px; color: #e6a23c; }
+.std-ok { font-size: 12px; color: #0f9d58; font-weight: 600; }
+.std-preview { margin-top: 10px; padding: 8px 12px; background: #fff7e6; border: 1px solid #ffe0a3; border-radius: 4px; font-size: 13px; color: #974706; font-weight: 600; }
+.std-preview-hint { font-size: 12px; color: #c08a3e; font-weight: 400; margin-left: 6px; }
+
+/* 图3 低分通报：场景信息 / 问卷结果 双段表头 */
+table.rt.ls th.c-scene { background: #bdd7ee; color: #1f4e79; font-size: 13px; }
+table.rt.ls th.c-qn { background: #c6efce; color: #1f5c2e; font-size: 13px; }
 </style>

@@ -394,9 +394,9 @@ def _build_wide_summary(month: str, district: str, db: Session):
     # 人员聚合（保留）
     handler_agg = defaultdict(lambda: {"total": 0, "done": 0})
     for r in installs:
-        if not r.handler:
+        if not _intake_handler(r):
             continue
-        a = handler_agg[r.handler]
+        a = handler_agg[_intake_handler(r)]
         a["total"] += 1; a["done"] += (1 if status_of(r) == "已施工" else 0)
     by_handler = [{"handler": h, "total": a["total"], "done": a["done"],
                    "rate": round(a["done"] / a["total"] * 100, 1) if a["total"] else 0}
@@ -445,9 +445,9 @@ def _build_wide_summary(month: str, district: str, db: Session):
     # ---- 撤单分析-人员 Top30（新） ----
     person_agg = defaultdict(lambda: {"total": 0, "done": 0, "cancel": 0, "refund_only": 0, "pending": 0})
     for r in installs:
-        if not r.handler:
+        if not _intake_handler(r):
             continue
-        a = person_agg[r.handler]
+        a = person_agg[_intake_handler(r)]
         a["total"] += 1
         s = status_of(r)
         if s == "已施工":
@@ -721,6 +721,9 @@ def _pick(rows, metric):
         return [r for r in rows if "撤" in _status_of(r)]
     if metric == "refund":
         return [r for r in rows if "退" in _status_of(r) and "撤" not in _status_of(r)]
+    if metric == "refund_cancel":
+        # v1.9.0：退撤单合并口径（已退单 + 已撤单）
+        return [r for r in rows if "退" in _status_of(r) or "撤" in _status_of(r)]
     if metric == "pending":
         return [r for r in rows if is_pending(_status_of(r))]
     if metric == "nostate":
@@ -891,7 +894,68 @@ def _intake_handler(r) -> str:
     h = (r.handler or "").strip()
     if h:
         return h
+    # v1.10.0：空处理人按小区匹配责任田责任人补全（撤/退单常见空处理人）
+    cn = (r.community_name or "").strip()
+    if cn:
+        p = _match_territory(cn)
+        if p:
+            return p
     return _INTAKE_NOSTATE if _is_nostate(r) else _INTAKE_UNASSIGNED
+
+
+# ---- v1.10.0：空处理人按小区匹配责任田责任人补全 ----
+# 撤单/退单常无装维处理人(handler)；责任田表(territory_responsible)按小区维护了责任人。
+# 用 install_orders.community_name(完整地址) 子串匹配 territory_responsible.territory(小区名)，
+# 取「最长命中」(最具体小区名优先于镇名，如「郭岭村居民小区」优先于「沙口」)。
+_TERR_CACHE = {"ts": 0.0, "data": None}
+_TERR_HIT = {}
+
+
+def _territory_map():
+    import time
+    now = time.time()
+    if _TERR_CACHE["data"] is None or now - _TERR_CACHE["ts"] > 3600:
+        from app.database import SessionLocal
+        s = SessionLocal()
+        try:
+            rows = s.execute(
+                text("SELECT territory, person_name FROM territory_responsible "
+                     "WHERE territory IS NOT NULL AND territory != ''")
+            ).fetchall()
+        finally:
+            s.close()
+        _TERR_CACHE["data"] = sorted(((t, p) for t, p in rows), key=lambda x: -len(x[0]))
+        _TERR_CACHE["ts"] = now
+    return _TERR_CACHE["data"]
+
+
+def _match_territory(community_name: str) -> str:
+    """community_name 子串匹配责任田，返回责任田责任人；无匹配返回 ''。"""
+    cn = (community_name or "").strip()
+    if not cn:
+        return ""
+    cached = _TERR_HIT.get(cn)
+    if cached is not None:
+        return cached
+    for t, p in _territory_map():
+        if t and t in cn:
+            _TERR_HIT[cn] = p
+            return p
+    _TERR_HIT[cn] = ""
+    return ""
+
+
+def _intake_handler_display(r) -> str:
+    """drill 明细展示用：空处理人按责任田补全；无匹配仍返回原始空串(前端显示占位)。"""
+    h = (r.handler or "").strip()
+    if h:
+        return h
+    cn = (r.community_name or "").strip()
+    if cn:
+        p = _match_territory(cn)
+        if p:
+            return p
+    return ""
 
 
 def _intake_is_pending(r, include_nostate: bool = False) -> bool:
@@ -957,6 +1021,7 @@ def completion_intake(req: _IntakeReq,
     info = {
         "records": len(rows),                                    # 生成记录数
         "refund_back": len(_pick(rows, "refund")),               # 退单打回
+        "refund_cancel": len(_pick(rows, "refund_cancel")),      # 退撤单合计（退+撤）
         "state_count": len(states),                              # 选择状态数
         "states": states,
         "days": sorted({_intake_day(r.accept_time) for r in rows if _intake_day(r.accept_time)}),
@@ -1128,7 +1193,7 @@ def completion_drill(req: _DrillReq,
     kw = (req.keyword or "").strip()
     if kw:
         rows = [r for r in rows
-                if kw in (r.order_id or "") or kw in (r.handler or "")
+                if kw in (r.order_id or "") or kw in (_intake_handler_display(r) or "")
                 or kw in (r.community_name or "") or kw in (r.service_number or "")]
 
     rows.sort(key=lambda r: (r.accept_time or ""), reverse=True)
@@ -1136,6 +1201,19 @@ def completion_drill(req: _DrillReq,
     ps = max(1, min(req.page_size, 200))
     st = max(0, (req.page - 1) * ps)
     page_rows = rows[st:st + ps]
+
+    # v1.9.0：退撤单明细的「退单备注」取自 install_realtime_status.remark（按 order_id 关联）。
+    # install_orders 宽表无备注列，备注覆盖率低，缺失时前端显示"—"。
+    _ids = [r.order_id for r in page_rows if getattr(r, "order_id", None)]
+    _remark_map = {}
+    if _ids:
+        from sqlalchemy import text as _text, bindparam as _bindparam
+        # v1.9.0：expanding=True 让 SQLAlchemy 把列表展开为 IN (?, ?, ...)（新版不再自动展开 tuple）
+        _rm = db.execute(
+            _text("SELECT order_id, remark FROM install_realtime_status WHERE order_id IN :ids").bindparams(_bindparam("ids", expanding=True)),
+            {"ids": _ids},
+        ).fetchall()
+        _remark_map = {row[0]: (row[1] or "") for row in _rm}
 
     return {
         "total": total, "page": req.page, "page_size": ps,
@@ -1151,7 +1229,7 @@ def completion_drill(req: _DrillReq,
             "status_src": getattr(r, "_st_src", "") or "",
             "status_note": getattr(r, "_st_note", "") or "",
             "status_conflict": bool(getattr(r, "_st_conflict", False)),
-            "handler": r.handler or "",
+            "handler": _intake_handler_display(r),
             "community": r.community_name or "",
             "number": r.service_number or "",
             "completion_time": (r.completion_time or "")[:16],
@@ -1166,6 +1244,11 @@ def completion_drill(req: _DrillReq,
             "urge_cnt": r.urge_cnt or 0,
             "appointment_time": (r.appointment_time or "")[:16],
             "district_name": r.district or "",
+            # v1.9.0：退撤单明细所需字段（install_orders 自带，备注来自实时表）
+            "refund_reason": getattr(r, "refund_reason", "") or "",
+            "refund_reason2": getattr(r, "refund_reason2", "") or "",
+            "refund_person": getattr(r, "refund_person", "") or "",
+            "refund_note": _remark_map.get(getattr(r, "order_id", ""), ""),
         } for r in page_rows],
     }
 

@@ -295,6 +295,11 @@
             <div class="ik-val">{{ intake.data.info.refund_back }}</div>
             <div class="ik-sub">退回重派</div>
           </div>
+          <div class="ik-cell danger" @click="openDrill('', 'refund_cancel', '退撤单')">
+            <div class="ik-lb">退撤单</div>
+            <div class="ik-val">{{ intake.data.info.refund_cancel }}</div>
+            <div class="ik-sub">退单 + 撤单</div>
+          </div>
           <!-- v1.8.1：这里原来是「选择状态数」，统计全量后是 11 种，混进了
                已施工 / 已撤单 / 已退单 三个终态；盯控要看的是「还没做完的单卡在哪些环节」，
                后端已改为只数待装单，称谓也跟着改清楚。 -->
@@ -521,6 +526,16 @@
           </template>
         </el-table-column>
         <el-table-column prop="urge_cnt" label="催装次数" width="90" align="right" />
+        <!-- v1.9.0：退撤单类下钻，展示一级/二级退单原因、退单人员、退单备注 -->
+        <el-table-column v-if="isRefundKind" prop="refund_reason" label="一级退单原因" min-width="130" show-overflow-tooltip />
+        <el-table-column v-if="isRefundKind" prop="refund_reason2" label="二级退单原因" min-width="130" show-overflow-tooltip />
+        <el-table-column v-if="isRefundKind" prop="refund_person" label="退单人员" width="100" show-overflow-tooltip />
+        <el-table-column v-if="isRefundKind" prop="refund_note" label="退单备注" min-width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="!row.refund_note" class="ik-muted">—</span>
+            <span v-else>{{ row.refund_note }}</span>
+          </template>
+        </el-table-column>
         <!-- v1.8.3：原「前台预约时间」列与上面新增的「预约截止时间」是同一字段，
              同一份数据画两遍没意义，删掉（它原本还在横向滚动的最右侧，基本没人看到）。 -->
       </el-table>
@@ -773,6 +788,8 @@ const drillRowClass = ({ row }) => (row.status_conflict ? 'row-conflict' : '')
 // v1.8.3：当前抽屉是不是「待装」口径。按网格视图里点「待装」卡片钻取时
 // metric 就是 pending、scope 还是 all，所以两个都要判。
 const isPendingDrill = computed(() => drill.metric === 'pending' || drill.scope === 'pending')
+// v1.9.0：退撤单类下钻（退单/退撤单/撤单）时显示原因与备注列
+const isRefundKind = computed(() => ["refund", "refund_cancel", "cancel"].includes(drill.metric))
 
 // 预约截止时间是否已过（且仍未完工）。
 // 不直接 new Date('2026-10-30 00:00')：带空格的时间串在部分浏览器里解析成 NaN，
