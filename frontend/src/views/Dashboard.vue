@@ -98,9 +98,12 @@
               <el-tag size="small" type="warning" effect="plain">数据 {{ reportMeta.meta.data_date }}</el-tag>
               <el-tag size="small" type="danger" effect="plain">收件 {{ reportMeta.meta.mail_time }}</el-tag>
               <span class="header-tip">拉取 {{ reportMeta.meta.fetched_at }}</span>
+              <el-tag v-if="detailStale" size="small" type="danger" effect="dark">⚠ 数据可能滞后，请点「同步邮件」</el-tag>
             </template>
             <span class="header-tip">共 {{ detailTotal }} 条</span>
-            <el-button v-if="isAdmin" size="small" type="danger" plain
+            <el-button v-if="isAdmin" size="small"
+                       :type="detailStale ? 'danger' : 'primary'"
+                       :effect="detailStale ? 'dark' : 'plain'"
                        :loading="reportSyncing" @click="syncReport">同步邮件</el-button>
           </div>
         </div>
@@ -1233,6 +1236,21 @@ const h5StaffRows = computed(() =>
 const h5LowRows = computed(() =>
   (h5Survey.value.lows || []).filter(l => district.value === '全部' || l.district === district.value))
 
+const detailStale = computed(() => {
+  const m = reportMeta.value && reportMeta.value.meta
+  if (!m) return false
+  // 拉取时间距今 > 24h，或数据日期距今 > 2 天 → 视为滞后（移植飞书通报新鲜度纪律）
+  if (m.fetched_at) {
+    const t = new Date(String(m.fetched_at).replace(/-/g, '/')).getTime()
+    if (!isNaN(t) && (Date.now() - t) / 3600000 > 24) return true
+  }
+  if (m.data_date) {
+    const d = new Date(String(m.data_date).replace(/-/g, '/')).getTime()
+    if (!isNaN(d) && (Date.now() - d) / 86400000 > 2) return true
+  }
+  return false
+})
+
 async function syncReport() {
   reportSyncing.value = true
   try {
@@ -1244,6 +1262,9 @@ async function syncReport() {
       if (bs.complaint_replaced?.length) parts.push(`看板投诉${bs.complaint_replaced.join('、')}`)
       if (bs.install_skipped?.length || bs.complaint_skipped?.length) parts.push('较早快照已跳过')
       ElMessage.success(`已同步：${r.subject}（通报日 ${r.data_date}）${parts.length ? '，' + parts.join('；') : ''}`)
+      if (r.warnings && r.warnings.length) {
+        ElMessage.warning(`部分同步：${r.warnings.join('；')}`)
+      }
       await Promise.all([loadReport(), load()])
     } else ElMessage.error(r.error || '同步失败')
   } catch (e) { ElMessage.error('同步失败：' + (e?.response?.data?.detail || e.message)) }

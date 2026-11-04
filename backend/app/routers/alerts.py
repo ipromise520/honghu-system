@@ -389,15 +389,34 @@ def fetch_report_mail() -> dict:
 
 
 def sync_report(db: Session) -> dict:
-    """拉取最新【重要通报】→ 解析 5 类区县指标 + 超时盯控明细 → 替换入库"""
+    """拉取最新【重要通报】→ 解析 5 类区县指标 + 超时盯控明细 → 替换入库
+
+    容错（2026-11-04 移植飞书同步经验）：邮件附件可能只含「装机指标」或只含「投诉」
+    （实测 11-04 邮件仅带 装机指标1102.xlsx、缺投诉附件，旧逻辑整体 raise 导致一整天
+    看板明细停在旧快照）。现改为「缺哪类只跳过哪类 + 记录 warnings」，不再整体中止；
+    新鲜度三时间戳（data_date/mail_time/fetched_at）回写宽表行，与 AlertMeta 一致。
+    """
     import io, json as _json
     from datetime import datetime as _dt
     info = fetch_report_mail()
     atts = info["attachments"]
     inst_raw = next((v for k, v in atts.items() if "装机指标" in k), None)
     comp_raw = next((v for k, v in atts.items() if "投诉" in k), None)
-    if not inst_raw or not comp_raw:
-        raise RuntimeError(f"附件不完整：{list(atts.keys())}")
+    has_inst = bool(inst_raw)
+    has_comp = bool(comp_raw)
+    warnings = []
+    if not has_inst:
+        warnings.append("缺失「装机指标」附件，装机类指标/宽表未更新，沿用上次快照")
+    if not has_comp:
+        warnings.append("缺失「投诉」附件，投诉类指标/受理明细未更新，沿用上次快照")
+    if not (has_inst or has_comp):
+        raise RuntimeError(f"无可用附件：{list(atts.keys())}")
+
+    # ---- 新鲜度三时间戳（移植飞书 AlertMeta 纪律）----
+    mm = re.search(r"(\d{8})", info["subject"])
+    data_date = f"{mm.group(1)[:4]}-{mm.group(1)[4:6]}-{mm.group(1)[6:]}" if mm else ""
+    mail_time = _mail_time_cn(info["mail_date"], info["subject"])
+    fetched_at = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
 
     recs = []   # (kind, district, data_dict)
     _seen = set()
@@ -408,87 +427,6 @@ def sync_report(db: Session) -> dict:
             _seen.add((kind, d))
             recs.append((kind, d, data))
 
-    # ---- 1) 装机通报（sheet 装机，标题2行+列名行 → header=2；第一段后还有FTTR段，靠 _seen 排除）----
-    xls1 = pd.ExcelFile(io.BytesIO(inst_raw), engine="openpyxl")
-    sh = _find_sheet(xls1, ["装机"]) or xls1.sheet_names[0]
-    df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=2, engine="openpyxl")
-    if "区县" in df.columns:
-        for _, r in df.iterrows():
-            _put("install", _s(r.get("区县")), {
-                "month_order": _num(r.get("当月宽带收单数")), "month_done": _num(r.get("当月宽带竣工数")),
-                "month_rate": _pct(r.get("当月宽带竣工率")), "day_order": _num(r.get("当日装机收单数")),
-                "day_done": _num(r.get("当日装机竣工数")), "day_rate": _pct(r.get("当日宽带竣工率")),
-                "untimely": _num(r.get("当月装机不及时数")), "timely_rate": _pct(r.get("当月装机及时率")),
-                "timeout_orders": _num(r.get("当月超时工单数")), "timeout_rate": _pct(r.get("当月超时工单占比")),
-                "visit_untimely": _num(r.get("当月装机上门不及时数")), "visit_timely_rate": _pct(r.get("当月装机上门及时率"))})
-    # ---- 2) 装机 H5（sheet H5，标题1行+列名行 → header=1；首段为荆州月累计，后续为全省分日快照）----
-    sh = _find_sheet(xls1, ["H5"])
-    if sh and "明细" not in sh:
-        df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=1, engine="openpyxl")
-        col0 = df.columns[0]
-        for _, r in df.iterrows():
-            _put("h5_install", _s(r.get(col0)), {
-                "satisfaction": _pct(r.get("满意度")), "q24": _pct(r.get("Q24上门及时性")),
-                "q25": _pct(r.get("Q25人员服务")), "q26": _pct(r.get("Q26安装效果")),
-                "install_cnt": _num(r.get("装机数")), "joined": _num(r.get("参评数")),
-                "join_rate": _pct(r.get("参评率")), "day_joined": _num(r.get("当日参评数")),
-                "day_join_rate": _pct(r.get("当日参评率"))})
-    # ---- 3) 装机超时盯控明细（sheet 超时明细）----
-    sh = _find_sheet(xls1, ["超时"])
-    timeouts = []
-    if sh:
-        df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=0, engine="openpyxl")
-        for _, r in df.iterrows():
-            if _s(r.get("地市")) != CITY:
-                continue
-            timeouts.append(dict(
-                district=_s(r.get("区县")), order_no=_s(r.get("单号")), theme=_s(r.get("定单主题")),
-                accept_time=_t(r.get("受理时间")),
-                appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
-                step=_s(r.get("当前环节")), handler=_s(r.get("当前处理人")),
-                phone=_s(r.get("当前处理人电话")), ctrl_type=_s(r.get("预约盯控类型"))))
-    # ---- 4) 投诉通报（sheet 投诉指标通报，header=1；白名单排除荆州市全市行/通报文字行）----
-    xls2 = pd.ExcelFile(io.BytesIO(comp_raw), engine="openpyxl")
-    sh = _find_sheet(xls2, ["投诉指标通报"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=1, engine="openpyxl")
-        for _, r in df.iterrows():
-            _put("complaint", _s(r.get("区县")), {
-                "total": _num(r.get("工单总量")), "day_timeout": _num(r.get("当当慢超时工单量")),
-                "unfinished": _num(r.get("未完工")), "hq_normal_rate": _pct(r.get("高品质+普通及时率")),
-                "hq_rate": _pct(r.get("高品质投诉处理及时率")), "normal_rate": _pct(r.get("普通用户投诉处理及时率(当日修)")),
-                "visit_rate": _pct(r.get("投诉上门处理及时率")), "comm_rate": _pct(r.get("省公司通信连接及时率")),
-                "platinum_rate": _pct(r.get("省公司全球通白金卡以上及时率")),
-                "comm_duration": _num(r.get("省公司通信连接投诉处理时长"), as_int=False),
-                "vip_rate": _pct(r.get("VIP处理及时率")), "hv_rate": _pct(r.get("高价值处理及时率")),
-                "vip_hv_duration": _num(r.get("VIP及钻石卡平均处理时长"), as_int=False),
-                "h5_join_rate": _pct(r.get("H5参与率")), "h5_satisfaction": _pct(r.get("H5满意度")),
-                "dup_rate": _pct(r.get("广义重复投诉率"))})
-    # ---- 5) 投诉 H5 通报（header=0；首段为月累计：满意度/Q27/Q28/Q29/FTTR/工单数/参评数/参评率/当日回单/当日完成测评/当日引导参评率）----
-    sh = _find_sheet(xls2, ["投诉H5"]) or _find_sheet(xls2, ["H5"])
-    if sh and "清单" not in sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
-        cols = df.columns
-        for _, r in df.iterrows():
-            vals = list(r.values)
-            _put("h5_complaint", _s(r.get(cols[0])), {
-                "satisfaction": _pct(vals[1]), "q27": _pct(vals[2]), "q28": _pct(vals[3]),
-                "q29": _pct(vals[4]), "fttr_satisfaction": _pct(vals[5]),
-                "orders": _num(vals[6]), "joined": _num(vals[7]), "join_rate": _pct(vals[8]),
-                "day_back": _num(vals[9]) if len(vals) > 9 else 0,
-                "day_joined": _num(vals[10]) if len(vals) > 10 else 0,
-                "day_join_rate": _pct(vals[11]) if len(vals) > 11 else ""})
-    # ---- 6) 广义重复投诉通报（标题1行+列名行 → header=1，左栏 5 列）----
-    sh = _find_sheet(xls2, ["广义重复通报"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=1, engine="openpyxl")
-        cols = list(df.columns)
-        for _, r in df.iterrows():
-            _put("dup", _s(r.get(cols[0])), {
-                "dup_users": _num(r.get(cols[1])), "total": _num(r.get(cols[2])),
-                "dup_rate": _pct(r.get(cols[3])), "rank": _num(r.get(cols[4]))})
-
-    # ---- 7) 明细①：装机宽表明细（荆州全部，用于上门不及时下钻）----
     def _col(df, *prefixes):
         """按前缀模糊找列名（附件列名带后缀/换行，如 装维人员姓名(ServStaffName)）"""
         for p in prefixes:
@@ -497,152 +435,245 @@ def sync_report(db: Session) -> dict:
                     return c
         return None
 
-    wide_rows = []
-    inst_rows = []                      # 联动看板：InstallOrder 全字段映射
-    sh = _find_sheet(xls1, ["宽表明细"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=0, engine="openpyxl")
-        df.columns = [str(c).replace("\n", "").strip() for c in df.columns]   # 列名含换行清洗（如'预约时间段结束时间'）
-        if "分公司" in df.columns:
-            df = df[df["分公司"].astype(str).str.contains(CITY, na=False)]
-        vcol = _col(df, "是否及时上门.1") or _col(df, "是否及时上门")
-        for _, r in df.iterrows():
-            wide_rows.append(dict(
-                district=_s(r.get("区县")), grid=_s(r.get("网格")), order_no=_s(r.get("定单编码")),
-                theme=_s(r.get("业务主题")), broadband_type=_s(r.get("宽带类型")),
-                status=_s(r.get("定单状态")), step=_s(r.get("当前环节")),
-                accept_time=_t(r.get("受理时间")),
-                appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
-                handler=_s(r.get("当前处理人或回单人")),
-                is_timely=str(_num(r.get("是否及时"))), visit_timely=str(_num(r.get(vcol))),
-                fttr_over=str(_num(r.get("FTTR超2.5小时"))), is_high_quality=_s(r.get("高品质标签"))))
-            accept = _norm_time(_t(r.get("受理时间")))
-            pkg = _s(r.get("智能组网套餐编码"))
-            inst_rows.append(dict(
-                order_id=_s(r.get("定单编码")), month=accept[:7], district=_s(r.get("区县")),
-                grid=_s(r.get("网格")), accept_time=accept, order_theme=_s(r.get("业务主题")),
-                status=_s(r.get("定单状态")), broadband_type=_s(r.get("宽带类型")),
-                is_fttr="是" if pkg.startswith("全光组网") else "",
-                handler=_strip_district_prefix(r.get("当前处理人或回单人"), r.get("区县")),
-                completion_time=_norm_time(_t(r.get("回单时间"))),
-                is_24h=_s(r.get("24小时及时")), is_8h=_s(r.get("8小时及时")),
-                is_perform=_s(r.get("是否履约(新)") or r.get("是否履约")),
-                is_refund=_s(r.get("是否退单")), refund_reason=_s(r.get("一级退单原因")),
-                install_duration=_to_num(r.get("装机时长"), as_int=False),
-                completion_duration=_to_num(r.get("完工时长"), as_int=False),
-                h5_satisfaction=_s(r.get("H5装机满意度")),
-                appointment_time=_norm_time(_t(r.get("预约时间段结束时间") or r.get("首次预约时间"))),
-                is_high_quality=_s(r.get("高品质标签")), current_step=_s(r.get("当前环节"))))
+    timeouts, wide_rows, inst_rows = [], [], []
+    comp_rows, comp_order_rows, h5_rows, dup_rows = [], [], [], []
 
-    # ---- 8) 明细②：投诉受理明细（当日修及时性/全球通标识，用于投诉及时率与全球通下钻）----
-    comp_rows = []
-    comp_order_rows = []                # 联动看板：ComplaintOrder 全字段映射
-    sh = _find_sheet(xls2, ["受理"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
-        df.columns = [str(c).replace("\n", "").strip() for c in df.columns]
-        if "地市" in df.columns:
-            df = df[df["地市"].astype(str).str.contains(CITY, na=False)]
-        for _, r in df.iterrows():
-            comp_rows.append(dict(
-                district=_s(r.get("区县")), flow_no=_s(r.get("工单流水号")), theme=_s(r.get("投诉主题")),
-                category=_s(r.get("投诉分类")), accept_time=_t(r.get("投诉时间")),
-                status=_s(r.get("智慧装维工单状态")), handler=_s(r.get("当前处理人")),
-                phone=_s(r.get("当前处理人电话")), grid=_s(r.get("最终回单网格")),
-                duration=_s(r.get("投诉处理时长")), visit_timely=_s(r.get("是否上门及时")),
-                day_timely=_s(r.get("当日修是否及时")), global_pass=_s(r.get("全球通标识")),
-                is_high_quality=_s(r.get("是否高品质")), account=_s(r.get("宽带帐号"))))
-            accept = _norm_time(_t(r.get("投诉时间")))
-            dur_raw = _s(r.get("工单时长")) or _s(r.get("投诉处理时长"))
-            comp_order_rows.append(dict(
-                eoms_no=_s(r.get("工单流水号")), month=accept[:7], district=_s(r.get("区县")),
-                accept_time=accept, status=_s(r.get("智慧装维工单状态")),
-                handler=_strip_district_prefix(r.get("当前处理人"), r.get("区县")),
-                complaint_category=_s(r.get("投诉分类")),
-                is_24h=_s(r.get("24小时是否及时")), is_8h=_s(r.get("8小时是否及时")),
-                is_perform=_s(r.get("是否履约")),
-                order_duration=_to_num(dur_raw, as_int=False),
-                is_solved=_s(r.get("是否维修完成") or r.get("故障是否解决") or r.get("最终处理结果")),
-                satisfaction=_s(r.get("归档满意度")),
-                appointment_time=_norm_time(_t(r.get("预约上门时间止") or r.get("首次预约时间"))),
-                grid=_s(r.get("首次派单目标网格") or r.get("最终回单网格")),
-                is_high_quality=_s(r.get("是否高品质")), global_pass=_s(r.get("全球通标识"))))
+    # ============ 装机侧（仅当 inst_raw 存在）============
+    if has_inst:
+        # ---- 1) 装机通报（sheet 装机，标题2行+列名行 → header=2；第一段后还有FTTR段，靠 _seen 排除）----
+        xls1 = pd.ExcelFile(io.BytesIO(inst_raw), engine="openpyxl")
+        sh = _find_sheet(xls1, ["装机"]) or xls1.sheet_names[0]
+        df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=2, engine="openpyxl")
+        if "区县" in df.columns:
+            for _, r in df.iterrows():
+                _put("install", _s(r.get("区县")), {
+                    "month_order": _num(r.get("当月宽带收单数")), "month_done": _num(r.get("当月宽带竣工数")),
+                    "month_rate": _pct(r.get("当月宽带竣工率")), "day_order": _num(r.get("当日装机收单数")),
+                    "day_done": _num(r.get("当日装机竣工数")), "day_rate": _pct(r.get("当日宽带竣工率")),
+                    "untimely": _num(r.get("当月装机不及时数")), "timely_rate": _pct(r.get("当月装机及时率")),
+                    "timeout_orders": _num(r.get("当月超时工单数")), "timeout_rate": _pct(r.get("当月超时工单占比")),
+                    "visit_untimely": _num(r.get("当月装机上门不及时数")), "visit_timely_rate": _pct(r.get("当月装机上门及时率"))})
+        # ---- 2) 装机 H5（sheet H5，标题1行+列名行 → header=1；首段为荆州月累计，后续为全省分日快照）----
+        sh = _find_sheet(xls1, ["H5"])
+        if sh and "明细" not in sh:
+            df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=1, engine="openpyxl")
+            col0 = df.columns[0]
+            for _, r in df.iterrows():
+                _put("h5_install", _s(r.get(col0)), {
+                    "satisfaction": _pct(r.get("满意度")), "q24": _pct(r.get("Q24上门及时性")),
+                    "q25": _pct(r.get("Q25人员服务")), "q26": _pct(r.get("Q26安装效果")),
+                    "install_cnt": _num(r.get("装机数")), "joined": _num(r.get("参评数")),
+                    "join_rate": _pct(r.get("参评率")), "day_joined": _num(r.get("当日参评数")),
+                    "day_join_rate": _pct(r.get("当日参评率"))})
+        # ---- 3) 装机超时盯控明细（sheet 超时明细）----
+        sh = _find_sheet(xls1, ["超时"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=0, engine="openpyxl")
+            for _, r in df.iterrows():
+                if _s(r.get("地市")) != CITY:
+                    continue
+                timeouts.append(dict(
+                    district=_s(r.get("区县")), order_no=_s(r.get("单号")), theme=_s(r.get("定单主题")),
+                    accept_time=_t(r.get("受理时间")),
+                    appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
+                    step=_s(r.get("当前环节")), handler=_s(r.get("当前处理人")),
+                    phone=_s(r.get("当前处理人电话")), ctrl_type=_s(r.get("预约盯控类型"))))
+        # ---- 7) 明细①：装机宽表明细（荆州全部，用于上门不及时下钻）----
+        sh = _find_sheet(xls1, ["宽表明细"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(inst_raw), sheet_name=sh, header=0, engine="openpyxl")
+            df.columns = [str(c).replace("\n", "").strip() for c in df.columns]
+            if "分公司" in df.columns:
+                df = df[df["分公司"].astype(str).str.contains(CITY, na=False)]
+            vcol = _col(df, "是否及时上门.1") or _col(df, "是否及时上门")
+            for _, r in df.iterrows():
+                wide_rows.append(dict(
+                    district=_s(r.get("区县")), grid=_s(r.get("网格")), order_no=_s(r.get("定单编码")),
+                    theme=_s(r.get("业务主题")), broadband_type=_s(r.get("宽带类型")),
+                    status=_s(r.get("定单状态")), step=_s(r.get("当前环节")),
+                    accept_time=_t(r.get("受理时间")),
+                    appoint_end=_first_t(r, "预约时间段结束时间", "预约结束时间"),
+                    handler=_s(r.get("当前处理人或回单人")),
+                    is_timely=str(_num(r.get("是否及时"))), visit_timely=str(_num(r.get(vcol))),
+                    fttr_over=str(_num(r.get("FTTR超2.5小时"))), is_high_quality=_s(r.get("高品质标签"))))
+                accept = _norm_time(_t(r.get("受理时间")))
+                pkg = _s(r.get("智能组网套餐编码"))
+                inst_rows.append(dict(
+                    order_id=_s(r.get("定单编码")), month=accept[:7], district=_s(r.get("区县")),
+                    grid=_s(r.get("网格")), accept_time=accept, order_theme=_s(r.get("业务主题")),
+                    status=_s(r.get("定单状态")), broadband_type=_s(r.get("宽带类型")),
+                    is_fttr="是" if pkg.startswith("全光组网") else "",
+                    handler=_strip_district_prefix(r.get("当前处理人或回单人"), r.get("区县")),
+                    completion_time=_norm_time(_t(r.get("回单时间"))),
+                    is_24h=_s(r.get("24小时及时")), is_8h=_s(r.get("8小时及时")),
+                    is_perform=_s(r.get("是否履约(新)") or r.get("是否履约")),
+                    is_refund=_s(r.get("是否退单")), refund_reason=_s(r.get("一级退单原因")),
+                    install_duration=_to_num(r.get("装机时长"), as_int=False),
+                    completion_duration=_to_num(r.get("完工时长"), as_int=False),
+                    h5_satisfaction=_s(r.get("H5装机满意度")),
+                    appointment_time=_norm_time(_t(r.get("预约时间段结束时间") or r.get("首次预约时间"))),
+                    is_high_quality=_s(r.get("高品质标签")), current_step=_s(r.get("当前环节"))))
+        # 新鲜度回写（移植飞书三时间戳）
+        for r in inst_rows:
+            r["data_date"] = data_date
+            r["mail_time"] = mail_time
+            r["fetched_at"] = fetched_at
 
-    # ---- 9) 明细③：投诉H5参评记录（按装维人员统计参评率）----
-    h5_rows = []
-    sh = _find_sheet(xls2, ["H5清单"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
-        c_city = _col(df, "地市标识")
-        c_dist = _col(df, "区县名称")
-        c_staff = _col(df, "装维人员姓名")
-        c_sid = _col(df, "装维人员工号")
-        c_ord = _col(df, "装维工单编码")
-        c_phone = _col(df, "目标手机号码")
-        c_send = _col(df, "下发时间")
-        c_reply = _col(df, "回复时间")
-        if c_city is not None:
-            df = df[df[c_city].astype(str).str.contains(CITY, na=False)]
-        for _, r in df.iterrows():
-            h5_rows.append(dict(
-                source="投诉", district=_s(r.get(c_dist)), staff=_s(r.get(c_staff)),
-                staff_id=_s(r.get(c_sid)), order_no=_s(r.get(c_ord)), phone=_s(r.get(c_phone)),
-                send_time=_t(r.get(c_send)), reply_time=_t(r.get(c_reply))))
+    # ============ 投诉侧（仅当 comp_raw 存在）============
+    if has_comp:
+        # ---- 4) 投诉通报（sheet 投诉指标通报，header=1；白名单排除荆州市全市行/通报文字行）----
+        xls2 = pd.ExcelFile(io.BytesIO(comp_raw), engine="openpyxl")
+        sh = _find_sheet(xls2, ["投诉指标通报"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=1, engine="openpyxl")
+            for _, r in df.iterrows():
+                _put("complaint", _s(r.get("区县")), {
+                    "total": _num(r.get("工单总量")), "day_timeout": _num(r.get("当当慢超时工单量")),
+                    "unfinished": _num(r.get("未完工")), "hq_normal_rate": _pct(r.get("高品质+普通及时率")),
+                    "hq_rate": _pct(r.get("高品质投诉处理及时率")), "normal_rate": _pct(r.get("普通用户投诉处理及时率(当日修)")),
+                    "visit_rate": _pct(r.get("投诉上门处理及时率")), "comm_rate": _pct(r.get("省公司通信连接及时率")),
+                    "platinum_rate": _pct(r.get("省公司全球通白金卡以上及时率")),
+                    "comm_duration": _num(r.get("省公司通信连接投诉处理时长"), as_int=False),
+                    "vip_rate": _pct(r.get("VIP处理及时率")), "hv_rate": _pct(r.get("高价值处理及时率")),
+                    "vip_hv_duration": _num(r.get("VIP及钻石卡平均处理时长"), as_int=False),
+                    "h5_join_rate": _pct(r.get("H5参与率")), "h5_satisfaction": _pct(r.get("H5满意度")),
+                    "dup_rate": _pct(r.get("广义重复投诉率"))})
+        # ---- 5) 投诉 H5 通报（header=0；首段为月累计）----
+        sh = _find_sheet(xls2, ["投诉H5"]) or _find_sheet(xls2, ["H5"])
+        if sh and "清单" not in sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
+            cols = df.columns
+            for _, r in df.iterrows():
+                vals = list(r.values)
+                _put("h5_complaint", _s(r.get(cols[0])), {
+                    "satisfaction": _pct(vals[1]), "q27": _pct(vals[2]), "q28": _pct(vals[3]),
+                    "q29": _pct(vals[4]), "fttr_satisfaction": _pct(vals[5]),
+                    "orders": _num(vals[6]), "joined": _num(vals[7]), "join_rate": _pct(vals[8]),
+                    "day_back": _num(vals[9]) if len(vals) > 9 else 0,
+                    "day_joined": _num(vals[10]) if len(vals) > 10 else 0,
+                    "day_join_rate": _pct(vals[11]) if len(vals) > 11 else ""})
+        # ---- 6) 广义重复投诉通报（标题1行+列名行 → header=1，左栏 5 列）----
+        sh = _find_sheet(xls2, ["广义重复通报"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=1, engine="openpyxl")
+            cols = list(df.columns)
+            for _, r in df.iterrows():
+                _put("dup", _s(r.get(cols[0])), {
+                    "dup_users": _num(r.get(cols[1])), "total": _num(r.get(cols[2])),
+                    "dup_rate": _pct(r.get(cols[3])), "rank": _num(r.get(cols[4]))})
+        # ---- 8) 明细②：投诉受理明细（当日修及时性/全球通标识，用于投诉及时率与全球通下钻）----
+        sh = _find_sheet(xls2, ["受理"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
+            df.columns = [str(c).replace("\n", "").strip() for c in df.columns]
+            if "地市" in df.columns:
+                df = df[df["地市"].astype(str).str.contains(CITY, na=False)]
+            for _, r in df.iterrows():
+                comp_rows.append(dict(
+                    district=_s(r.get("区县")), flow_no=_s(r.get("工单流水号")), theme=_s(r.get("投诉主题")),
+                    category=_s(r.get("投诉分类")), accept_time=_t(r.get("投诉时间")),
+                    status=_s(r.get("智慧装维工单状态")), handler=_s(r.get("当前处理人")),
+                    phone=_s(r.get("当前处理人电话")), grid=_s(r.get("最终回单网格")),
+                    duration=_s(r.get("投诉处理时长")), visit_timely=_s(r.get("是否上门及时")),
+                    day_timely=_s(r.get("当日修是否及时")), global_pass=_s(r.get("全球通标识")),
+                    is_high_quality=_s(r.get("是否高品质")), account=_s(r.get("宽带帐号"))))
+                accept = _norm_time(_t(r.get("投诉时间")))
+                dur_raw = _s(r.get("工单时长")) or _s(r.get("投诉处理时长"))
+                comp_order_rows.append(dict(
+                    eoms_no=_s(r.get("工单流水号")), month=accept[:7], district=_s(r.get("区县")),
+                    accept_time=accept, status=_s(r.get("智慧装维工单状态")),
+                    handler=_strip_district_prefix(r.get("当前处理人"), r.get("区县")),
+                    complaint_category=_s(r.get("投诉分类")),
+                    is_24h=_s(r.get("24小时是否及时")), is_8h=_s(r.get("8小时是否及时")),
+                    is_perform=_s(r.get("是否履约")),
+                    order_duration=_to_num(dur_raw, as_int=False),
+                    is_solved=_s(r.get("是否维修完成") or r.get("故障是否解决") or r.get("最终处理结果")),
+                    satisfaction=_s(r.get("归档满意度")),
+                    appointment_time=_norm_time(_t(r.get("预约上门时间止") or r.get("首次预约时间"))),
+                    grid=_s(r.get("首次派单目标网格") or r.get("最终回单网格")),
+                    is_high_quality=_s(r.get("是否高品质")), global_pass=_s(r.get("全球通标识"))))
+        # ---- 9) 明细③：投诉H5参评记录（按装维人员统计参评率）----
+        h5_rows = []
+        sh = _find_sheet(xls2, ["H5清单"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
+            c_city = _col(df, "地市标识")
+            c_dist = _col(df, "区县名称")
+            c_staff = _col(df, "装维人员姓名")
+            c_sid = _col(df, "装维人员工号")
+            c_ord = _col(df, "装维工单编码")
+            c_phone = _col(df, "目标手机号码")
+            c_send = _col(df, "下发时间")
+            c_reply = _col(df, "回复时间")
+            if c_city is not None:
+                df = df[df[c_city].astype(str).str.contains(CITY, na=False)]
+            for _, r in df.iterrows():
+                h5_rows.append(dict(
+                    source="投诉", district=_s(r.get(c_dist)), staff=_s(r.get(c_staff)),
+                    staff_id=_s(r.get(c_sid)), order_no=_s(r.get(c_ord)), phone=_s(r.get(c_phone)),
+                    send_time=_t(r.get(c_send)), reply_time=_t(r.get(c_reply))))
+        # ---- 10) 明细④：广义重复投诉工单（广义分子）----
+        dup_rows = []
+        sh = _find_sheet(xls2, ["广义分子"])
+        if sh:
+            df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
+            for _, r in df.iterrows():
+                d = _s(r.get("归属区县")).replace("监利县", "监利市")
+                dup_rows.append(dict(
+                    district=d, order_no=_s(r.get("工单编号")), account=_s(r.get("宽带账号")),
+                    dup_cnt=_s(r.get("重复投诉次数")), reason=_s(r.get("广义投诉七级分类")) or _s(r.get("广义投诉原因一级")),
+                    first_time=_t(r.get("第一次投诉时间")), first_reason=_s(r.get("第一次投诉时间原因")),
+                    second_time=_t(r.get("第二次投诉时间")), second_reason=_s(r.get("第二次投诉时间原因")),
+                    handler=_s(r.get("当前处理人")), grid=_s(r.get("最终回单网格"))))
+        # 新鲜度回写
+        for r in comp_order_rows:
+            r["data_date"] = data_date
+            r["mail_time"] = mail_time
+            r["fetched_at"] = fetched_at
 
-    # ---- 10) 明细④：广义重复投诉工单（广义分子）----
-    dup_rows = []
-    sh = _find_sheet(xls2, ["广义分子"])
-    if sh:
-        df = pd.read_excel(io.BytesIO(comp_raw), sheet_name=sh, header=0, engine="openpyxl")
-        for _, r in df.iterrows():
-            d = _s(r.get("归属区县")).replace("监利县", "监利市")
-            dup_rows.append(dict(
-                district=d, order_no=_s(r.get("工单编号")), account=_s(r.get("宽带账号")),
-                dup_cnt=_s(r.get("重复投诉次数")), reason=_s(r.get("广义投诉七级分类")) or _s(r.get("广义投诉原因一级")),
-                first_time=_t(r.get("第一次投诉时间")), first_reason=_s(r.get("第一次投诉时间原因")),
-                second_time=_t(r.get("第二次投诉时间")), second_reason=_s(r.get("第二次投诉时间原因")),
-                handler=_s(r.get("当前处理人")), grid=_s(r.get("最终回单网格"))))
-
-    # ---- 替换入库 ----
-    db.query(ReportDistrict).delete()
-    db.query(ReportTimeout).delete()
-    db.query(ReportWideOrder).delete()
-    db.query(ReportComplaintOrder).delete()
-    db.query(ReportH5Record).delete()
-    db.query(ReportDupOrder).delete()
+    # ---- 替换入库（仅清理/重写本次实际更新的表，避免误删对侧数据）----
+    if has_inst:
+        db.query(ReportDistrict).filter(ReportDistrict.kind.in_(["install", "h5_install"])).delete(synchronize_session=False)
+        db.query(ReportTimeout).delete(synchronize_session=False)
+        db.query(ReportWideOrder).delete(synchronize_session=False)
+    if has_comp:
+        db.query(ReportDistrict).filter(ReportDistrict.kind.in_(["complaint", "h5_complaint", "dup"])).delete(synchronize_session=False)
+        db.query(ReportComplaintOrder).delete(synchronize_session=False)
+        db.query(ReportH5Record).delete(synchronize_session=False)
+        db.query(ReportDupOrder).delete(synchronize_session=False)
     for kind, d, data in recs:
-        db.add(ReportDistrict(kind=kind, district=d, data=_json.dumps(data, ensure_ascii=False)))
-    if timeouts:
+        if (kind in ("install", "h5_install") and has_inst) or (kind in ("complaint", "h5_complaint", "dup") and has_comp):
+            db.add(ReportDistrict(kind=kind, district=d, data=_json.dumps(data, ensure_ascii=False)))
+    if has_inst and timeouts:
         db.bulk_insert_mappings(ReportTimeout, timeouts)
-    if wide_rows:
+    if has_inst and wide_rows:
         db.bulk_insert_mappings(ReportWideOrder, wide_rows)
-    if comp_rows:
+    if has_comp and comp_rows:
         db.bulk_insert_mappings(ReportComplaintOrder, comp_rows)
-    if h5_rows:
+    if has_comp and h5_rows:
         db.bulk_insert_mappings(ReportH5Record, h5_rows)
-    if dup_rows:
+    if has_comp and dup_rows:
         db.bulk_insert_mappings(ReportDupOrder, dup_rows)
 
     # ---- 联动更新看板数据（install_orders / complaint_orders）----
-    # 邮件明细与手动上传共用批次比较机制：只让更新的快照覆盖（旧通报不会回退手动上传的新宽表）
     inst_sync = sync_wide_batch(db, InstallOrder, "order_id",
-                                [r for r in inst_rows if r["month"]]) if inst_rows else {"replaced": [], "skipped": []}
+                                [r for r in inst_rows if r.get("month")]) if (has_inst and inst_rows) else {"replaced": [], "skipped": [], "guarded": []}
     comp_sync = sync_wide_batch(db, ComplaintOrder, "eoms_no",
-                                [r for r in comp_order_rows if r["month"]]) if comp_order_rows else {"replaced": [], "skipped": []}
+                                [r for r in comp_order_rows if r.get("month")]) if (has_comp and comp_order_rows) else {"replaced": [], "skipped": [], "guarded": []}
 
-    mm = re.search(r"(\d{8})", info["subject"])
-    data_date = f"{mm.group(1)[:4]}-{mm.group(1)[4:6]}-{mm.group(1)[6:]}" if mm else ""
     meta = db.get(ReportMeta, 1) or ReportMeta(id=1)
     meta.mail_subject = info["subject"]
     meta.data_date = data_date
-    meta.mail_time = _mail_time_cn(info["mail_date"], info["subject"])
-    meta.fetched_at = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    meta.mail_time = mail_time
+    meta.fetched_at = fetched_at
     db.add(meta)
     db.commit()
     return {"ok": True, "subject": info["subject"], "data_date": data_date,
-            "mail_time": meta.mail_time, "districts": len({d for _, d, _ in recs}),
+            "mail_time": mail_time, "fetched_at": fetched_at,
+            "districts": len({d for _, d, _ in recs}),
             "timeouts": len(timeouts), "wide": len(wide_rows), "complaints": len(comp_rows),
             "h5": len(h5_rows), "dups": len(dup_rows),
+            "warnings": warnings,
             "board_sync": {"install_replaced": inst_sync["replaced"], "install_skipped": inst_sync["skipped"],
                            "complaint_replaced": comp_sync["replaced"], "complaint_skipped": comp_sync["skipped"]}}
 

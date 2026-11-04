@@ -332,6 +332,11 @@ class InstallOrder(Base):
     service_number: Mapped[str] = mapped_column(String(64), default="")     # 服务号码
 
 
+    # ---- 同步新鲜度（2026-11-04 移植飞书 AlertMeta 三时间戳纪律）----
+    data_date: Mapped[str] = mapped_column(String(16), default="")       # 数据截至日期(邮件主题)
+    mail_time: Mapped[str] = mapped_column(String(32), default="")       # 邮件收件时间
+    fetched_at: Mapped[str] = mapped_column(String(32), default="")      # 本系统拉取时间
+
 class ComplaintOrder(Base):
     """投诉工单详情（来自「宽表查询-投诉」/ 家宽投诉综合工单列表，按月替换）"""
     __tablename__ = "complaint_orders"
@@ -357,6 +362,11 @@ class ComplaintOrder(Base):
     contact_person: Mapped[str] = mapped_column(String(64), default="")     # 受理电话号码
     fault_number: Mapped[str] = mapped_column(String(64), default="")       # 主叫号码
 
+
+    # ---- 同步新鲜度（2026-11-04 移植飞书 AlertMeta 三时间戳纪律）----
+    data_date: Mapped[str] = mapped_column(String(16), default="")       # 数据截至日期(邮件主题)
+    mail_time: Mapped[str] = mapped_column(String(32), default="")       # 邮件收件时间
+    fetched_at: Mapped[str] = mapped_column(String(32), default="")      # 本系统拉取时间
 
 class Setting(Base):
     """系统参数（key-value，如每月人均延伸任务 ext_target_YYYY-MM）"""

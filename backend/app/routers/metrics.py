@@ -9,7 +9,7 @@ from ..config import COMPLETED_STATUS, PENDING_STATUS, TARGET_PER_PERSON
 from ..database import get_db
 from ..models import (WorkOrder, District, ExtensionOrder, ExtensionMember, H5Complaint, H5Receipt,
                       MetricDefinition, User, Setting, AuditLog, CompletionRecord, SyncJob,
-                      InstallOrder, ComplaintOrder)
+                      InstallOrder, ComplaintOrder, ReportMeta)
 from ..deps import get_current_user, scope_district_ids, require_admin, get_role
 from ..h5_rule import judge_complaint_h5 as _h5j
 from ..status_resolver import (NOT_PENDING, classify, is_pending, realtime_cand,
@@ -1191,6 +1191,10 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
     被 FastAPI 静默丢弃，导致每次全量返回 640KB+、分页与复选框全部失效。
     现改为 SQL 层过滤 + 真分页，只回传当前页，并返回 total 供分页器。
     """
+    rm = db.get(ReportMeta, 1)
+    meta = {"data_date": rm.data_date, "mail_time": rm.mail_time,
+            "fetched_at": rm.fetched_at, "mail_subject": rm.mail_subject} if rm else {}
+
     if type == "complaint":
         q = db.query(ComplaintOrder).filter(ComplaintOrder.month == month)
         if district:
@@ -1233,7 +1237,7 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             # 是否触发H5：口径见 h5_rule.py（HB-058 前缀 + 分类首级=家庭市场）
             **_h5j(r.eoms_no, r.complaint_category)} for r in rows],
             "total": total, "page": page, "page_size": page_size,
-            "truncated": total >= MAX_SCAN}
+            "truncated": total >= MAX_SCAN, "meta": meta}
 
     q = db.query(InstallOrder).filter(InstallOrder.month == month)
     if district:
@@ -1274,7 +1278,7 @@ def wide_orders(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
         "is_fttr": r.is_fttr or "否",
         "current_step": r.current_step or r.status} for r in rows],
         "total": total, "page": page, "page_size": page_size,
-        "truncated": total >= MAX_SCAN}
+        "truncated": total >= MAX_SCAN, "meta": meta}
 
 
 # ---------------- 延伸服务（手册 7.6 / 8.2） ----------------
