@@ -69,7 +69,7 @@
     <el-dialog v-model="dlg" :title="form.id ? '编辑用户' : '新增用户'" width="520px">
       <el-form label-width="90px">
         <el-form-item label="用户名"><el-input v-model="form.username" :disabled="!!form.id" /></el-form-item>
-        <el-form-item v-if="!form.id" label="初始密码"><el-input v-model="form.password" placeholder="默认 123456" /></el-form-item>
+        <el-form-item v-if="!form.id" label="初始密码"><el-input v-model="form.password" placeholder="至少 8 位，含字母和数字" /></el-form-item>
         <el-form-item label="姓名"><el-input v-model="form.real_name" /></el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width:100%">
@@ -151,7 +151,7 @@ async function load() {
 
 function openCreate() {
   Object.keys(form).forEach(k => delete form[k])
-  Object.assign(form, { username: '', password: '123456', real_name: '', role: 'field_worker', district_id: null, team: '', grid: '', position: '' })
+  Object.assign(form, { username: '', password: '', real_name: '', role: 'field_worker', district_id: null, team: '', grid: '', position: '' })
   dlg.value = true
 }
 
@@ -162,6 +162,12 @@ function openEdit(row) {
 }
 
 async function save() {
+  if (!form.id) {
+    if (!form.username || !form.real_name) return ElMessage.error('用户名与姓名不能为空')
+    if (!/^(?=.*[A-Za-z])(?=.*\d).{8,}$/.test(form.password || '')) {
+      return ElMessage.error('初始密码至少 8 位，且需同时包含字母和数字')
+    }
+  }
   if (form.id) {
     await api.put(`/users/${form.id}`, form)
   } else {

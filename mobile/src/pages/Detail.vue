@@ -315,29 +315,30 @@ onMounted(load)
 }
 .btn-sm {
   height: 30px; padding: 0 15px; border-radius: 9px; border: 1px solid var(--line);
-  background: #fff; color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+  background: rgba(125, 211, 252, .06); color: var(--ink-2); font-size: 12.5px; font-weight: 600;
   transition: transform .12s ease, background .15s ease;
 }
 .btn-sm.primary {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8); border-color: transparent;
-  color: #fff; box-shadow: 0 3px 10px rgba(37, 99, 235, .28);
+  background: linear-gradient(100deg, #0ea5e9, #2563eb); border-color: transparent;
+  color: #fff; box-shadow: 0 8px 20px -12px rgba(37, 99, 235, .95);
 }
 .btn-sm:active { transform: scale(.96); }
 .btn-sm[disabled] { opacity: .55; }
-.task { border-left: 3px solid var(--brand); }
+.task { border-left: 3px solid var(--brand-2); }
 
 /* 状态依据小字：浅灰，不抢主信息但可追溯 */
 .status-note {
   margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--ink-3);
-  background: #f8fafc; border-left: 2px solid #cbd5e1;
+  background: rgba(255, 255, 255, .03); border-left: 2px solid rgba(148, 163, 184, .3);
   padding: 4px 7px; border-radius: 0 5px 5px 0;
 }
-.sn-src { color: #475569; font-weight: 700; margin-right: 4px; }
+.sn-src { color: #a9bfd8; font-weight: 700; margin-right: 4px; }
 
 /* 责任人（便于网格长按人督办） */
 .row-owner { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 7px 0 3px; }
 .owner-label {
-  font-size: 10.5px; color: #92400e; background: #fef3c7;
+  font-size: 10.5px; color: #fcd34d; background: rgba(251, 191, 36, .14);
+  border: 1px solid rgba(251, 191, 36, .26);
   padding: 2px 6px; border-radius: 5px; font-weight: 700;
 }
 .owner-name { font-size: 14px; font-weight: 800; color: var(--ink); letter-spacing: .3px; }

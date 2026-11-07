@@ -1589,7 +1589,9 @@ def district_ranking(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
 @router.get("/dashboard/user-ranking")
 def user_ranking(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"), limit: int = 50,
                  user=Depends(get_current_user), db: Session = Depends(get_db)):
-    cr = {(r["handler"]): r for r in completion_users(month, user, db)}
+    limit = max(1, min(limit, 200))
+    # 直接调用时必须显式传 district=""，否则会把 Query 当 SQL 参数绑定导致 500。
+    cr = {(r["handler"]): r for r in completion_users(month=month, district="", user=user, db=db)}
     rows = db.query(ExtensionOrder.handler, func.sum(ExtensionOrder.income)).filter(
         ExtensionOrder.month == month).group_by(ExtensionOrder.handler).all()
     ext = {h: round(i or 0, 1) for h, i in rows}

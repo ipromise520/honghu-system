@@ -8,7 +8,7 @@ import {
   Platform, Menu, WarningFilled, Edit, Lock, User, Upload, UploadFilled,
   Odometer, TrendCharts, DataLine, Coin, ChatLineSquare, Warning, ChatDotRound,
   DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message, CircleCheck,
-  MapLocation, Refresh,
+  MapLocation, Refresh, Document,
 } from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
@@ -28,7 +28,7 @@ const ICONS = {
   Platform, Menu, WarningFilled, Edit, Lock, User, Upload, UploadFilled,
   Odometer, TrendCharts, DataLine, Coin, ChatLineSquare, Warning, ChatDotRound,
   DataAnalysis, Bell, Tickets, List, Finished, Promotion, Message, CircleCheck,
-  MapLocation, Refresh,
+  MapLocation, Refresh, Document,
 }
 
 const app = createApp(App)

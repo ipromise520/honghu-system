@@ -24,11 +24,11 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, require_admin
 from ..models import QcRecord, District, User, AuditLog
 from ..qc_rules import (QC_ORDER, QC_THRESHOLD, QC_SOURCE_ORDER,
                         QC_SOURCE_LABEL, QC_SOURCE_TYPES)
@@ -45,21 +45,20 @@ def _now() -> str:
 
 
 def _dates(db: Session) -> list[dict]:
-    """通报批次日列表（倒序）。olds：同一天合并了几个来源、多少行、多少件不合格。"""
-    rows = (db.query(QcRecord.report_date, func.count(QcRecord.id))
+    """通报批次日列表（倒序）。olds：同一天合并了几个来源、多少行、多少件不合格。
+
+    单条聚合查询：不合格数与来源数用条件聚合/COUNT(DISTINCT) 一次算完，
+    避免按批次日逐日再查 2 次（N+1）。
+    """
+    rows = (db.query(QcRecord.report_date,
+                     func.count(QcRecord.id),
+                     func.sum(case((QcRecord.is_pass.is_(False), 1), else_=0)),
+                     func.count(func.distinct(QcRecord.source)))
             .filter(QcRecord.report_date != "")
             .group_by(QcRecord.report_date)
             .order_by(QcRecord.report_date.desc()).all())
-    out = []
-    for d, n in rows:
-        if not d:
-            continue
-        ng = (db.query(func.count(QcRecord.id))
-              .filter(QcRecord.report_date == d, QcRecord.is_pass.is_(False)).scalar() or 0)
-        src = (db.query(func.count(func.distinct(QcRecord.source)))
-               .filter(QcRecord.report_date == d).scalar() or 0)
-        out.append({"date": d, "rows": n, "ng": ng, "sources": src})
-    return out
+    return [{"date": d, "rows": int(n or 0), "ng": int(ng or 0), "sources": int(src or 0)}
+            for d, n, ng, src in rows if d]
 
 
 @router.get("/dates")
@@ -286,8 +285,8 @@ def records(date: str = "", district: str = "", category: str = "", source: str 
 
 
 @router.post("/push")
-def push(body: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """把「不通过」记录推到对应装维人员的装维端。
+def push(body: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """把「不通过」记录推到对应装维人员的装维端（仅管理员）。
 
     body: {ids: [], date: '', district: '', category: '', source: '', only_unpushed: true}
     ids 为空时按 date/district/category/source 范围推送（只推不通过、未推送、未整改的）。
@@ -348,8 +347,8 @@ def push(body: dict, db: Session = Depends(get_db), user=Depends(get_current_use
 
 
 @router.post("/unpush")
-def unpush(body: dict, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """撤回推送（装维端不再显示），用于误推/推给离职人员。"""
+def unpush(body: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """撤回推送（仅管理员），用于误推/推给离职人员。"""
     ids = [int(x) for x in (body.get("ids") or [])]
     if not ids:
         raise HTTPException(status_code=400, detail="缺少 ids")

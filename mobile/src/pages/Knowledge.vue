@@ -7,15 +7,15 @@
     </div>
 
     <div class="body">
-      <div class="field" style="position:relative">
+      <div class="search-wrap">
         <input
           v-model.trim="kw"
+          class="kb-search"
           type="search"
           placeholder="搜索装维规范、流程、口径…"
-          style="width:100%;height:44px;border-radius:12px;border:1px solid #dfe6f0;padding:0 14px 0 40px;font:inherit;font-size:14px;background:#fbfcfe;outline:none"
           @input="onInput"
         />
-        <span style="position:absolute;left:13px;top:13px;opacity:.4"><Icon name="search" :size="18" /></span>
+        <span class="search-ico"><Icon name="search" :size="18" /></span>
       </div>
 
       <p class="note" v-if="loading">检索中…</p>
@@ -67,3 +67,21 @@ async function search() {
 function goBack() { router.back() }
 onMounted(search)
 </script>
+
+<style scoped>
+.search-wrap { position: relative; }
+.kb-search {
+  width: 100%; height: 44px; border-radius: 12px;
+  border: 1px solid var(--line); padding: 0 14px 0 40px;
+  font: inherit; font-size: 14px; color: var(--ink);
+  background: rgba(6, 14, 28, .7); outline: none;
+  transition: border-color .18s, box-shadow .18s, background .18s;
+}
+.kb-search::placeholder { color: var(--ink-3); }
+.kb-search:focus {
+  border-color: rgba(56, 189, 248, .7);
+  background: rgba(7, 18, 36, .92);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, .12);
+}
+.search-ico { position: absolute; left: 13px; top: 13px; color: var(--ink-3); pointer-events: none; }
+</style>

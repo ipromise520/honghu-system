@@ -132,8 +132,8 @@ def refresh(body: dict, db: Session = Depends(get_db)):
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="refresh_token 无效")
     user = db.query(User).filter(User.id == int(payload["sub"])).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="用户不存在")
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="用户不存在或已停用")
     return {"access_token": create_token(user.id, user.username, get_role(user)), "token_type": "bearer"}
 
 

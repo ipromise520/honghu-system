@@ -5,18 +5,26 @@
 """
 import json
 import math
+import os
 import re
+import time
 import uuid
 from collections import Counter
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from ..database import get_db
 from ..models import (SyncJob, WorkOrder, ExtensionOrder, ExtensionMember, District, AuditLog,
                       Setting, H5Complaint, CompletionRecord, InstallOrder, ComplaintOrder,
                       AiVisitIssue, AiVisitStat, QcRecord)
-from ..deps import require_admin
+from ..deps import require_admin, get_role
+from ..services.broad_match import (CID_MAX_BYTES, CID_STAGING, INSERT_STAGING,
+                                    account_norm_key, backup_db, enrich_broad_rows,
+                                    ensure_cid_tables, norm_account, norm_district,
+                                    norm_text, purge_staging, replace_cid_snapshot)
 from ..utils_excel import (parse_upload, parse_upload_sheets, parse_upload_raw,
                           parse_upload_multi_raw)
 from ..qc_rules import (QC_UNIT_PRICE, QC_PENALTY_PER_ITEM,
@@ -68,8 +76,7 @@ SYNC_MODULES = {
                              "当月装机即访清单 / 当月投诉即访清单：责任人/不规范项/工单号/回单时间"],
                  "note": "通报表→区县×类型×周期(当日/当月)规范率；清单→不规范明细（仅「外呼成功」且勾选项答案为「不是」，工单×不规范项 一行）；"
                          "日期从文件名推导，month 取其年月；均按月替换；展示在首页「AI装维即访-不规范」卡片与「AI装维即访」页面"},
-    "qc": {"name": "质检规范（五项通报）", "target": "qc_records（质检通报分析·五表项合一）",
-           "columns": ["① 人工质检明细：区县/网格/定单编码/定单类型/回单人姓名/质检结果/不通过原因/不合格原因/质检考核/不结算金额",
+    "qc": {"name": "质检规范（五项通报）", "target": "qc_records（质检通报分析·五表项合一）",           "columns": ["① 人工质检明细：区县/网格/定单编码/定单类型/回单人姓名/质检结果/不通过原因/不合格原因/质检考核/不结算金额",
                        "② FTTR质检工单汇总表：「FTTR质检数据」sheet 全月累计，取通报日当天",
                        "③ 企宽装机质检统计：「明细」sheet 全月累计，判定列「整体是否合格」",
                        "④ 装、维改约质检通报：「装机新增」「投诉新增」两个当日 sheet，判定列「听音质检（真实或虚假）」",
@@ -80,6 +87,20 @@ SYNC_MODULES = {
                    "企宽月统计 ⊇ 其企宽 sheet，同并存自动去重（保留带考核金额的那份）；"
                    "同一批文件归入同一「通报批次日」（取明细最大数据日），按 (批次日, 来源) 分别替换，"
                    "单传一个文件不会误删其它来源的数据；驱动「质检规范」页卡片区与不合格清单推送到装维端"},
+    "broad_users": {"name": "广义用户清单", "target": "broad_user_list（广义用户明细，按工单编号增量更新）",
+                    "columns": ["广义重复清单：工单上报时间/工单编号/工单建立日期/宽带账号/归属区县/"
+                                "是否重复投诉/重复投诉次数/广义投诉原因明细/广义投诉七级分类"],
+                    "note": "解析「广义重复清单」sheet（多行标题不参与）；工单编号为唯一键，已存在则只更新文件派生列，"
+                            "保留电话/CID/小区/责任人/匹配状态等补齐字段；监利县→监利市归一；不删除文件外旧行；"
+                            "仅市级管理员（super_admin）可上传与确认；入库后「广义用户清单」列表与 6 张统计卡实时生效"},
+    "cid_data": {"name": "CID数据（智能网关）",
+                 "target": "cid_records（CID 快照，整表替换）+ broad_user_list 关联补齐",
+                 "columns": ["CID智能网关 CSV（GB18030，逗号分隔）：用户上网账号 / CID上报SN / 归属小区 / 归属区县"],
+                 "note": "CID 版本周期更新（如 CID智能网关20260801.csv），上传先写 staging 预览，"
+                         "确认后在事务内整表替换 cid_records，并按「账号→电话兜底」重匹配广义用户清单："
+                         "只填空值（旧 CID 来源的 cid_sn 可刷新，community 只填空），"
+                         "源表电话与当前处理人永不覆盖；再用「归属小区」匹配责任田回填责任人与网格。"
+                         "单文件上限 400MB（其它渠道仍为 30MB），流式落盘解析；仅市级管理员可用"},
 }
 
 
@@ -126,6 +147,7 @@ def _detect_metric(filename: str, sheets: list) -> str | None:
                       ["H5满意度", "装维H5", "满意度", "大音", "H5"]),
         "ai_visit": (["当月装机即访清单", "当月投诉即访清单", "装后即访-通报表", "投诉即访-通报表"],
                      ["AI装维即访", "即访", "AI装维"]),
+        "broad_users": (["广义重复清单"], ["广义重复", "广义投诉", "广义用户"]),
     }
     # 装机宽表/综合查询 vs 投诉宽表/综合查询：仅 sheet 同名，靠文件名「投诉」区分
     penalty_install = "投诉" in fnl
@@ -190,15 +212,19 @@ def sync_wide_batch(db: Session, model, key_field: str, rows: list[dict]) -> dic
                 best[k] = r
         new_rows = list(best.values())
         new_key = _batch_key(new_rows)
-        cur = db.query(model).filter(model.month == m).all()
-        old_key = (max((getattr(r, "accept_time") or "" for r in cur), default=""), len(cur))
+        # 库内基线只取聚合值（最新受理时间 + 行数），不再把整月 ORM 行全部加载进内存
+        mx, cnt = (db.query(func.max(model.accept_time), func.count())
+                   .filter(model.month == m).one())
+        old_key = ((mx or ""), int(cnt or 0))
         if new_key < old_key:
             skipped.append(f"{m}: 库内较新(受理至{old_key[0][:16]}/{old_key[1]}行)≥上传(受理至{new_key[0][:16]}/{new_key[1]}行)，未覆盖")
             continue
         # 缩水保护：行数或区县覆盖度明显下降时拒绝覆盖
-        old_n, new_n = len(cur), len(new_rows)
+        old_n, new_n = old_key[1], len(new_rows)
         if old_n >= 100 and new_n < old_n * 0.6:
-            old_d = {getattr(r, "district", "") for r in cur if getattr(r, "district", "")}
+            old_d = {d for (d,) in (db.query(model.district)
+                                    .filter(model.month == m, model.district != "")
+                                    .distinct().all()) if d}
             new_d = {r.get("district") for r in new_rows if r.get("district")}
             msg = (f"{m}: 上传仅 {new_n} 行/{len(new_d)} 个区县，"
                    f"少于库内 {old_n} 行/{len(old_d)} 个区县的 60%，已拒绝覆盖"
@@ -1716,6 +1742,149 @@ def _merge_qc_files(parsed: list[tuple[str, list[dict]]], sheets_map: dict) -> t
     return out, report_date, stat
 
 
+# ---------- 广义用户清单导入（broad_user_list） ----------
+_BROAD_DISTRICT = {"监利县": "监利市"}
+_BROAD_DETAIL_MAX = 200
+
+
+def _broad_date(v) -> str:
+    """工单上报/建立日期：支持 20261104、2026-11-04、Excel 日期。"""
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    s = re.sub(r"\D", "", str(v or ""))
+    if len(s) < 8:
+        return ""
+    try:
+        datetime.strptime(s[:8], "%Y%m%d")
+    except ValueError:
+        return ""
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _broad_text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).replace("\u3000", " ").strip()
+
+
+def _normalize_broad_users(raw: dict, filename: str = ""):
+    """解析「广义重复清单」→ (rows, errors, warnings, dup_rows)。
+
+    rows 的字段与 broad_user_list 对齐；errors 行不入库，warnings（缺宽带账号）仍入库。
+    """
+    rows_raw = raw.get("广义重复清单")
+    if not rows_raw:
+        raise HTTPException(status_code=400,
+                            detail="未找到「广义重复清单」sheet，请上传广义投诉重复清单原件")
+    header = [_broad_text(x) for x in rows_raw[0]]
+    idx: dict = {}
+    for i, h in enumerate(header):
+        if h and h not in idx:
+            idx[h] = i
+    if "工单编号" not in idx or "工单上报时间" not in idx:
+        raise HTTPException(status_code=400, detail="表头缺少必需列：工单上报时间 / 工单编号")
+    rows, errors, warnings = [], [], []
+    seen: dict = {}
+    dup_rows = 0
+    for i, raw_row in enumerate(rows_raw[1:], start=2):
+        if not any(_broad_text(v) for v in raw_row):
+            continue
+        val = lambda name: raw_row[idx[name]] if name in idx and idx[name] < len(raw_row) else None
+        order = _broad_text(val("工单编号"))
+        if not order:
+            errors.append({"row": i, "order_no": "", "error": "工单编号为空"})
+            continue
+        d = _broad_date(val("工单上报时间"))
+        if not d:
+            errors.append({"row": i, "order_no": order,
+                           "error": "工单上报时间无法解析：%s" % _broad_text(val("工单上报时间"))})
+            continue
+        dist = _broad_text(val("归属区县"))
+        if not dist:
+            errors.append({"row": i, "order_no": order, "error": "归属区县为空"})
+            continue
+        dist = _BROAD_DISTRICT.get(dist, dist)
+        acc = _broad_text(val("宽带账号"))
+        if not acc:
+            warnings.append({"row": i, "order_no": order, "warning": "宽带账号为空"})
+        detail = _broad_text(val("广义投诉原因明细"))
+        if len(detail) > _BROAD_DETAIL_MAX:
+            detail = detail[:_BROAD_DETAIL_MAX - 9] + "…[原文见源表]"
+        rep = _broad_text(val("是否重复投诉"))
+        rec = {
+            "work_order_no": order,
+            "source_month": f"{int(d[5:7])}月",
+            "report_date": d,
+            "setup_date": _broad_date(val("工单建立日期")) or d,
+            "district": dist,
+            "internet_account": acc,
+            "is_repeat": rep if rep in ("是", "否") else "",
+            "repeat_times": _broad_text(val("重复投诉次数")) or "0",
+            "complaint_lv7": _broad_text(val("广义投诉七级分类")),
+            "complaint_detail": detail,
+            "source_file": filename,
+            "source_row": str(i),
+        }
+        if order in seen:
+            dup_rows += 1
+            rows[seen[order]] = rec       # 文件内同单号以最后一条为准
+        else:
+            seen[order] = len(rows)
+            rows.append(rec)
+    return rows, errors, warnings, dup_rows
+
+
+def _broad_counts(db: Session, rows: list[dict]) -> tuple[int, int]:
+    """返回 (库里已存在条数, 新增条数)。"""
+    keys = [r["work_order_no"] for r in rows]
+    exist: set = set()
+    for i in range(0, len(keys), 400):
+        chunk = keys[i:i + 400]
+        sql = ("SELECT work_order_no FROM broad_user_list WHERE work_order_no IN (%s)"
+               % ", ".join(":k%d" % j for j in range(len(chunk))))
+        for (k,) in db.execute(text(sql), {"k%d" % j: v for j, v in enumerate(chunk)}):
+            exist.add(k)
+    upd = sum(1 for k in keys if k in exist)
+    return upd, len(keys) - upd
+
+
+_BROAD_UPSERT = text("""
+INSERT INTO broad_user_list
+  (seq, source_month, work_order_no, report_date, setup_date, district, internet_account,
+   phone, cid_sn, community, owner, grid, is_repeat, repeat_times, complaint_lv7, complaint_detail,
+   phone_source, owner_source, match_status, unmatch_reason, source_file, source_row,
+   cid_source, owner_original)
+VALUES
+  (:seq, :source_month, :work_order_no, :report_date, :setup_date, :district, :internet_account,
+   '', '', '', '', '', :is_repeat, :repeat_times, :complaint_lv7, :complaint_detail,
+   '无(待CID匹配)', '无(待责任田匹配)', '待正式匹配',
+   '用户联系电话缺；CID上报SN缺；归属小区缺；责任人缺', :source_file, :source_row, '', '')
+ON CONFLICT(work_order_no) DO UPDATE SET
+  source_month = excluded.source_month,
+  report_date = excluded.report_date,
+  setup_date = excluded.setup_date,
+  district = excluded.district,
+  internet_account = excluded.internet_account,
+  is_repeat = excluded.is_repeat,
+  repeat_times = excluded.repeat_times,
+  complaint_lv7 = excluded.complaint_lv7,
+  complaint_detail = excluded.complaint_detail,
+  source_file = excluded.source_file,
+  source_row = excluded.source_row
+""")
+
+
+def _apply_broad_users(db: Session, rows: list[dict]) -> tuple[int, int]:
+    """按工单编号 upsert（一次事务）。返回 (更新条数, 新增条数)。"""
+    upd, new = _broad_counts(db, rows)
+    base = db.execute(text("SELECT COALESCE(MAX(seq), 0) FROM broad_user_list")).scalar() or 0
+    for i, r in enumerate(rows, start=1):
+        db.execute(_BROAD_UPSERT, dict(r, seq=base + i))
+    return upd, new
+
+
 @router.get("/info/{metric}")
 def sync_info(metric: str, user=Depends(require_admin)):
     if metric not in SYNC_MODULES:
@@ -1736,6 +1905,36 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
     """上传解析预览（不入库，铁律 1）。单文件入口：从 request 读出字节后交给 _process_metric。"""
     if metric not in SYNC_MODULES:
         raise HTTPException(status_code=404, detail="模块不存在")
+    if metric == "broad_users" and get_role(user) != "super_admin":
+        raise HTTPException(status_code=403, detail="广义用户清单导入仅限市级管理员")
+    if metric == "cid_data":
+        # CID 快照体积大（约 260MB）：不走 read() 整读，直接流式落盘解析
+        if get_role(user) != "super_admin":
+            raise HTTPException(status_code=403, detail="CID 数据上传仅限市级管理员")
+        ctype = request.headers.get("content-type", "")
+        if "multipart/form-data" not in ctype:
+            raise HTTPException(status_code=400, detail="请使用 multipart/form-data 上传（字段名 file）")
+        cl = request.headers.get("content-length") or ""
+        if cl.isdigit() and int(cl) > CID_MAX_BYTES + 8 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="请求体超过 CID 渠道 400MB 上限")
+        form = await request.form()
+        up = form.get("file")
+        if up is None:
+            raise HTTPException(status_code=400, detail="缺少 file 字段")
+        fn = up.filename or "CID智能网关.csv"
+        batch_id = str(uuid.uuid4())[:8].upper()
+        try:
+            res = await run_in_threadpool(_cid_upload_job, db, up.file, fn, batch_id)
+        except HTTPException:
+            raise
+        except Exception as e:  # 解析异常转为 400，避免 500 只留日志
+            raise HTTPException(status_code=400, detail="CID 解析失败：%s" % str(e)[:300])
+        db.add(SyncJob(batch_id=batch_id, metric="cid_data", filename=fn,
+                       rows=res["total"], status="preview",
+                       preview_data=json.dumps(res, ensure_ascii=False)))
+        db.commit()
+        return {"batch_id": batch_id, "filename": fn, "total_rows": res["total"],
+                "metric": "cid_data", "columns": [], "preview": [], **res}
     ctype = request.headers.get("content-type", "")
     if "multipart/form-data" in ctype:
         form = await request.form()
@@ -1749,6 +1948,113 @@ async def upload(metric: str, request: Request, user=Depends(require_admin), db:
         data = await request.body()
     month = request.query_params.get("month")
     return await _process_metric(metric, [(fn, data)], db, month=month)
+
+
+def _spool_size(f) -> int:
+    """上传文件字节数（SpooledTemporaryFile 的 fileno() 会先落盘，避免整读进内存）。"""
+    try:
+        f.seek(0)
+        return os.fstat(f.fileno()).st_size
+    except (AttributeError, OSError, ValueError):
+        f.seek(0)
+        n = len(f.read())
+        f.seek(0)
+        return n
+
+
+def _cid_version(filename: str) -> str:
+    """从文件名取 CID 版本号，如 CID智能网关20260801.csv → 20260801。"""
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})", filename or "")
+    return m.group(0) if m else ""
+
+
+_CID_REQUIRED = ("用户上网账号", "CID上报SN", "归属小区")
+
+
+def _cid_upload_job(db, fobj, filename: str, batch_id: str) -> dict:
+    """流式解析 CID CSV（GB18030）→ cid_staging，并做不写库的匹配预览。
+
+    不替换 cid_records、不写 broad_user_list，确认入库时才在事务内整表替换。
+    """
+    import csv
+    import io
+
+    t0 = time.time()
+    size = _spool_size(fobj)
+    if size > CID_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="文件 %.1fMB 超过 CID 渠道 400MB 上限，请拆分后上传"
+                            % (size / 1048576.0))
+    db_path = (db.get_bind().url.database or "").strip()
+    try:
+        sver = os.statvfs(os.path.dirname(db_path) or "/")
+        free = sver.f_bavail * sver.f_frsize
+    except OSError:
+        free = 0
+    if free and free < max(size * 3, 512 * 1024 * 1024):
+        raise HTTPException(status_code=400, detail="服务器磁盘余量不足（剩 %.1fGB），暂不接收该 CID 文件"
+                            % (free / 1073741824.0))
+
+    backup = backup_db(db)
+    ensure_cid_tables(db)
+    purge_staging(db, keep_batch=batch_id)
+    db.execute(text("DROP INDEX IF EXISTS idx_cid_stage_batch"))  # 批量插入后再建索引，快很多
+
+    version = _cid_version(filename)
+    total = skipped = no_sn = no_comm = 0
+    buf = []
+    wrapper = io.TextIOWrapper(fobj, encoding="gb18030", errors="replace", newline="")
+    rd = csv.reader(wrapper)
+    header = next(rd, None)
+    if not header:
+        raise HTTPException(status_code=400, detail="CID 文件为空")
+    idx = {}
+    for i, h in enumerate(header):
+        h = norm_text(h)
+        if h and h not in idx:
+            idx[h] = i
+    need = [h for h in _CID_REQUIRED if h not in idx]
+    if need:
+        raise HTTPException(status_code=400, detail="CID 表头缺少必需列：%s（实际表头：%s）"
+                            % ("、".join(need), "、".join([norm_text(h) for h in header[:16]])))
+    i_acc, i_sn, i_comm = idx["用户上网账号"], idx["CID上报SN"], idx["归属小区"]
+    i_dist = idx.get("归属区县")
+    for row in rd:
+        total += 1
+        acc = norm_account(row[i_acc] if i_acc < len(row) else "")
+        if not acc:
+            skipped += 1
+            continue
+        sn = norm_text(row[i_sn]) if i_sn < len(row) else ""
+        comm = norm_text(row[i_comm]) if i_comm < len(row) else ""
+        dist = norm_district(row[i_dist]) if (i_dist is not None and i_dist < len(row)) else ""
+        if not sn:
+            no_sn += 1
+        if not comm:
+            no_comm += 1
+        buf.append({"batch_id": batch_id, "account_norm": account_norm_key(acc),
+                    "account": acc, "cid_sn": sn, "community": comm,
+                    "district": dist, "row_no": rd.line_num})
+        if len(buf) >= 10000:
+            db.execute(INSERT_STAGING, buf)
+            buf = []
+    if buf:
+        db.execute(INSERT_STAGING, buf)
+    db.execute(text("CREATE INDEX IF NOT EXISTS idx_cid_stage_batch "
+                    "ON %s(batch_id, account_norm)" % CID_STAGING))
+    db.commit()
+    unique = db.execute(text(
+        "SELECT COUNT(DISTINCT account_norm) FROM %s WHERE batch_id = :b" % CID_STAGING),
+        {"b": batch_id}).scalar() or 0
+
+    label = "CID智能网关" + version
+    st = enrich_broad_rows(db, cid_label=label, apply=False, batch_id=batch_id)
+    return {"version": version, "label": label, "total": total, "unique": unique,
+            "skipped": skipped, "no_sn": no_sn, "no_comm": no_comm,
+            "size_mb": round(size / 1048576.0, 1),
+            "backup": backup, "elapsed": round(time.time() - t0, 1),
+            "impact": st,
+            "note": ("确认入库后：cid_records 整表替换为本次快照，并立即按账号（电话兜底）重匹配"
+                     "广义用户清单，再用归属小区匹配责任田；只填空值，源表电话与当前处理人不覆盖")}
 
 
 async def _process_metric(metric: str, files: list, db: Session, month: str = None) -> dict:
@@ -1981,6 +2287,29 @@ async def _process_metric(metric: str, files: list, db: Session, month: str = No
                                    for k, v in ty.items()),
                  "note": "五个通报表项已合并；请核对不合格件数、考核与不结算金额是否与各通报「分析汇总」合计行一致"}
         preview = rows[:150]
+    elif metric == "broad_users":
+        # 广义投诉重复清单：唯一键 work_order_no 增量更新，仅市级管理员可用
+        filename, raw = await parse_upload_raw(data=files[0][1], filename=files[0][0],
+                                              sheet_names=["广义重复清单"])
+        rows, errors, warns, dup_rows = _normalize_broad_users(raw, files[0][0])
+        if not rows:
+            detail = "未解析到有效数据行"
+            if errors:
+                detail += "：" + "；".join("%s（%s）" % (e["error"], e["order_no"] or "无单号")
+                                           for e in errors[:5])
+            raise HTTPException(status_code=400, detail=detail)
+        if len(rows) > 50000:
+            raise HTTPException(status_code=400, detail="单次最多导入 5 万行，请拆分文件后上传")
+        upd, new = _broad_counts(db, rows)
+        extra = {
+            "new": new, "update": upd, "invalid": len(errors),
+            "errors": errors[:50], "warnings": warns[:30], "dup_rows": dup_rows,
+            "months": "、".join(sorted({r["source_month"] for r in rows})) or "无",
+            "warn": (f"有 {len(errors)} 行未通过校验，确认入库时将跳过" if errors else ""),
+            "note": ("按工单编号增量更新：已存在只更新文件派生列，保留电话/CID/小区/责任人/匹配状态；"
+                     "监利县→监利市；文件外旧行不删除"),
+        }
+        preview = rows[:100]
     else:
         filename, rows = await parse_upload(data=files[0][1], filename=files[0][0])
         if not rows:
@@ -1991,6 +2320,7 @@ async def _process_metric(metric: str, files: list, db: Session, month: str = No
                    status="preview", preview_data=json.dumps(rows, ensure_ascii=False)))
     db.commit()
     return {"batch_id": batch_id, "filename": filename, "total_rows": len(rows),
+            "metric": metric,
             "columns": col_override or (list(rows[0].keys()) if rows else []),
             "preview": preview, **extra}
 
@@ -2037,6 +2367,8 @@ async def upload_batch(request: Request, user=Depends(require_admin), db: Sessio
             unrecognized.append({"filename": fn, "sheets": sheets})
 
     results = []
+    if "broad_users" in groups and get_role(user) != "super_admin":
+        raise HTTPException(status_code=403, detail="广义用户清单导入仅限市级管理员")
     for m, items in groups.items():
         try:
             res = await _process_metric(m, items, db)
@@ -2066,6 +2398,8 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="批次不存在")
     if job.status == "confirmed":
         raise HTTPException(status_code=400, detail="该批次已入库")
+    if job.metric in ("broad_users", "cid_data") and get_role(user) != "super_admin":
+        raise HTTPException(status_code=403, detail="该渠道仅限市级管理员")
     rows = json.loads(job.preview_data)
     # 超过预览容量的行不完整，仅演示入库预览数据
     districts = {d.name: d.id for d in db.query(District).all()}
@@ -2319,12 +2653,55 @@ def confirm(batch_id: str, user=Depends(require_admin), db: Session = Depends(ge
                f"不合格 {len(ng)} 件 / 考核 {abs(round(sum(r['penalty'] for r in ng), 2))} 元 / "
                f"不结算 {abs(round(sum(r['no_settle'] for r in ng), 2))} 元；"
                f"「质检规范」页已更新，已推送与整改状态已保留")
+    elif job.metric == "broad_users":
+        # 广义用户清单：按 work_order_no upsert（同一事务，失败整体回滚）；
+        # 入库后共用公共口径做一次 CID + 责任田补齐，新增行也能立即带上 CID/责任人
+        ensure_cid_tables(db)  # 幂等建表，先建好再开写事务
+        try:
+            upd, new = _apply_broad_users(db, rows)
+            st = enrich_broad_rows(db, apply=True, commit=False, ensure=False)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"导入失败，已回滚：{str(e)[:200]}")
+        n = len(rows)
+        months = sorted({r.get("source_month", "") for r in rows} - {""})
+        msg = (f"入库成功：广义用户 {n} 行（新增 {new} / 更新 {upd}，月份 {'、'.join(months) or '无'}）；"
+               f"CID 补齐 SN {st['cid_sn_filled']}（刷新 {st['cid_sn_refreshed']}）/ 小区 {st['community_filled']}"
+               f"/ 电话 {st['phone_filled']}；责任人 {st['owner_filled']}（刷新 {st['owner_refreshed']}）"
+               f"/ 网格 {st['grid_filled']}；「广义用户清单」列表与 6 张统计卡已实时更新")
+    elif job.metric == "cid_data":
+        # CID 快照：确认时才在**一个事务内**整表替换 cid_records + 全量重匹配广义用户清单
+        stats = rows if isinstance(rows, dict) else {}
+        t0 = time.time()
+        ensure_cid_tables(db, commit=False)
+        try:
+            snapshot = replace_cid_snapshot(db, job.batch_id, version=stats.get("version", ""),
+                                            source_file=job.filename)
+            st = enrich_broad_rows(db, cid_label=stats.get("label", ""), apply=True,
+                                   commit=False, ensure=False)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"CID 入库失败，已回滚：{str(e)[:200]}")
+        n = snapshot
+        cost = round(time.time() - t0, 1)
+        msg = (f"入库成功：CID 快照 {snapshot} 个账号（版本 {stats.get('version') or '未标'}，整表替换）；"
+               f"广义用户回填 SN {st['cid_sn_filled']}（刷新 {st['cid_sn_refreshed']}）/ 小区 {st['community_filled']}"
+               f"/ 电话 {st['phone_filled']}；责任人 {st['owner_filled']}（刷新 {st['owner_refreshed']}）"
+               f"/ 网格 {st['grid_filled']}；冲突未覆盖 SN {st['conflict_sn']} / 小区 {st['conflict_community']}；"
+               f"状态 已匹配 {st['status_matched']} / 部分 {st['status_partial']} / 待匹配 {st['status_pending']}；"
+               f"耗时 {cost}s")
     job.status = "confirmed"
     job.confirmed_at = datetime.now()
+    # 修复 P1-6：入库后不再需要原始预览 JSON（此前永久保留，单库因此膨胀到 250MB）。
+    # 保留批次元信息供 /sync/history 展示，明细数据已在宽表落库。
+    job.preview_data = "[]"
     db.add(AuditLog(username=user.username, action="数据入库", detail=f"{job.metric} {n} 行"))
     db.commit()
     if job.metric in ("extension", "completion_rate", "install_wide", "complaint_wide",
-                      "install_query", "complaint_query", "ai_visit", "h5_survey", "qc"):
+                      "install_query", "complaint_query", "ai_visit", "h5_survey", "qc",
+                      "broad_users", "cid_data"):
         return {"msg": msg, "rows": n}
     return {"msg": f"入库成功 {n} 行（指标实时计算，无需重算）", "rows": n}
 

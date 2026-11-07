@@ -16,7 +16,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="token 无效或已过期，请重新登录")
-    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    # 修复 P1-1：refresh token 只允许换发新令牌，不能直接当访问令牌使用
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="token 类型无效，请重新登录")
+    try:
+        uid = int(payload["sub"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="token 内容无效，请重新登录")
+    user = db.query(User).filter(User.id == uid).first()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="用户不存在或已停用")
     return user

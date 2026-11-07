@@ -1,5 +1,15 @@
 """Excel / CSV 上传解析工具"""
 
+from starlette.concurrency import run_in_threadpool
+
+# 修复 P1-5（配套）：单文件/单批上限，避免一次把超大文件读进内存
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+
+
+def _guard_size(data, filename=""):
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"{filename or '文件'} 超过 {MAX_UPLOAD_BYTES // 1048576}MB 上限，请拆分后上传")
+
 
 async def parse_upload_sheets(request=None, sheet_names=None, skip_rows=0, data=None, filename=None):
     """解析 xlsx / xls / csv。
@@ -21,10 +31,13 @@ async def parse_upload_sheets(request=None, sheet_names=None, skip_rows=0, data=
                 raise ValueError("缺少 file 字段")
             filename = upload.filename or "upload"
             data = await upload.read()
+            _guard_size(data, filename)
         else:
             filename = "raw.csv"
             data = await request.body()
-    return _bytes_to_sheets(data, filename, sheet_names, skip_rows)
+            _guard_size(data, filename)
+    # 修复 P1-5：openpyxl 解析是 CPU/IO 密集的同步操作，放到线程池，避免阻塞事件循环
+    return await run_in_threadpool(_bytes_to_sheets, data, filename, sheet_names, skip_rows)
 
 
 def _bytes_to_sheets(data, filename, sheet_names, skip_rows):
@@ -105,10 +118,12 @@ async def parse_upload_raw(request=None, sheet_names=None, data=None, filename=N
                 raise ValueError("缺少 file 字段")
             filename = upload.filename or "upload"
             data = await upload.read()
+            _guard_size(data, filename)
         else:
             filename = "raw.csv"
             data = await request.body()
-    return _bytes_to_raw(data, filename, sheet_names)
+            _guard_size(data, filename)
+    return await run_in_threadpool(_bytes_to_raw, data, filename, sheet_names)
 
 
 def _bytes_to_raw(data, filename, sheet_names):
@@ -155,7 +170,8 @@ async def parse_upload_multi_raw(request, sheet_names=None):
     if not uploads:
         raise ValueError("缺少 file / files 字段")
 
-    out: list = []
+    pairs = []
+    total = 0
     for upload in uploads:
         if upload is None:
             filename, data = "raw.csv", await request.body()
@@ -164,6 +180,21 @@ async def parse_upload_multi_raw(request, sheet_names=None):
             data = await upload.read()
         if not data:
             continue
+        total += len(data)
+        if total > MAX_UPLOAD_BYTES:
+            raise ValueError(f"本批文件合计超过 {MAX_UPLOAD_BYTES // 1048576}MB 上限，请分批上传")
+        _guard_size(data, filename)
+        pairs.append((filename, data))
+    # 修复 P1-5：把这一批文件的解析整体放到线程池，避免长时间占用事件循环
+    return await run_in_threadpool(_parse_multi_files, pairs, sheet_names)
+
+
+def _parse_multi_files(pairs, sheet_names):
+    import io
+    import openpyxl
+
+    out: list = []
+    for filename, data in pairs:
         if filename.lower().endswith((".xlsx", ".xlsm", ".xls")):
             wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
             wanted = {str(s).strip() for s in sheet_names} if sheet_names else None

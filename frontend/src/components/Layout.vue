@@ -114,6 +114,7 @@ const allMenus = [
   { path: '/metrics/shortcomings', title: '短板分析', icon: 'Warning' },
   { path: '/h5-monitor', title: 'H5短信盯控', icon: 'ChatDotRound' },
   { path: '/h5-rate', title: 'H5参与率通报', icon: 'DataAnalysis' },
+  { path: '/broad-user-list', title: '广义用户清单', icon: 'Document' },
   { path: '/alerts', title: '预警中心', icon: 'Bell' },
   { path: '/work-orders', title: '工单管理', icon: 'Tickets' },
   { path: '/territory', title: '责任田对应责任人', icon: 'MapLocation' },

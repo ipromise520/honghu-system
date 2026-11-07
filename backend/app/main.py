@@ -17,7 +17,7 @@ from app.config import CORS_ORIGINS, DOCS_ENABLED, MOBILE_DIST
 from app.database import engine, SessionLocal, Base
 from app.seed import seed
 from app.routers import (auth, dashboard, metrics, h5, work_orders, tasks, notices, sync, users,
-                          alerts, honghu, mp, qc, territory)
+                          alerts, honghu, mp, qc, territory, broad_user_list)
 
 app = FastAPI(title="洪湖支撑服务中心管理系统", version="1.3.0",
               docs_url="/docs" if DOCS_ENABLED else None,
@@ -70,7 +70,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 for r in [auth.router, dashboard.router, metrics.router, h5.router, work_orders.router,
           tasks.router, notices.router, sync.router, users.router, alerts.router, honghu.router,
-          mp.router, qc.router, territory.router]:
+          mp.router, qc.router, territory.router, broad_user_list.router]:
     app.include_router(r, prefix="/api/v1")
 
 # 装维人员端 H5 专用 API 前缀 /m/api（由 8011 独立承载，与桌面端 /api/v1 隔离，避免跨实例 token 问题）
@@ -289,6 +289,25 @@ def health():
     return {"status": "ok", "system": "洪湖支撑服务中心", "time": __import__("datetime").datetime.now().isoformat()}
 
 
+def _safe_static_file(base: str, rel: str) -> str | None:
+    """安全解析 SPA 静态文件路径：只允许发行目录内的真实文件。
+
+    修复路径穿越（P0-1）：此前 os.path.join(base, "../../..") 可逃逸到任意目录，
+    未登录即可读取 /etc/honghu/env（JWT 密钥）等敏感文件。这里先做显式拒绝，
+    再用 realpath 双重校验前缀，符号链接指向目录外同样会被拦截。
+    """
+    if not rel:
+        return None
+    norm = rel.replace("\\", "/")
+    if norm.startswith("/") or ".." in norm.split("/") or "\x00" in norm:
+        return None
+    base_real = os.path.realpath(base)
+    fp = os.path.realpath(os.path.join(base_real, norm))
+    if not fp.startswith(base_real + os.sep) or not os.path.isfile(fp):
+        return None
+    return fp
+
+
 if os.path.isdir(FRONTEND_DIST):
     class _HashedStatic(StaticFiles):
         """带内容哈希的静态资源（/assets/xxx.<hash>.js）：文件名即版本号，
@@ -314,8 +333,8 @@ if os.path.isdir(FRONTEND_DIST):
         @app.get("/m")
         @app.get("/m/{full_path:path}")
         def mobile_spa(full_path: str = ""):
-            fp = os.path.join(MOBILE_DIST, full_path)
-            if full_path and os.path.isfile(fp):
+            fp = _safe_static_file(MOBILE_DIST, full_path)
+            if fp:
                 return FileResponse(fp)
             # v1.7.2：本路由比桌面端 catch-all 先注册，会先拿到 /m/api/xxx，
             # 所以 API 保护必须在这里也写一遍，否则小程序端接口写错照样白屏 200。
@@ -333,8 +352,8 @@ if os.path.isdir(FRONTEND_DIST):
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
-        fp = os.path.join(FRONTEND_DIST, full_path)
-        if full_path and os.path.isfile(fp):
+        fp = _safe_static_file(FRONTEND_DIST, full_path)
+        if fp:
             return FileResponse(fp)
         if full_path.startswith(_API_PREFIXES):
             return JSONResponse(status_code=404, content={"detail": "接口不存在: /%s" % full_path})

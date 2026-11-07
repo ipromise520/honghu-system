@@ -14,3 +14,6 @@ frontend/assets.syncbak-*/
 
 # 装维人员端 H5 构建产物（服务器本地构建，不入库）
 mobile/dist/
+
+# 本地运维备份（数据库/配置/文件快照，不入库）
+backup/

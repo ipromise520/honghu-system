@@ -134,42 +134,50 @@ onMounted(load)
 
 <style scoped>
 .sum {
-  display: flex; align-items: center; background: #fff; border-radius: 14px;
+  display: flex; align-items: center;
+  background: linear-gradient(158deg, rgba(22, 40, 70, .72), rgba(9, 18, 34, .84));
+  border: 1px solid rgba(96, 165, 250, .16);
+  border-radius: 14px;
   padding: 14px 8px; box-shadow: var(--shadow); margin-bottom: 10px;
 }
 .sum-item { flex: 1; text-align: center; }
-.sum-item b { display: block; font-size: 22px; line-height: 1.2; color: var(--ink); }
-.sum-item b.danger { color: var(--danger); }
-.sum-item b.ok { color: var(--ok); }
+.sum-item b { display: block; font-size: 22px; line-height: 1.2; color: var(--ink); font-variant-numeric: tabular-nums; }
+.sum-item b.danger { color: #f87171; }
+.sum-item b.ok { color: #34d399; }
 .sum-item span { font-size: 11.5px; color: var(--ink-3); }
 .sum-sep { width: 1px; height: 26px; background: var(--line); }
 
 .hint {
-  font-size: 12px; color: var(--ink-2); line-height: 1.7; background: #eff6ff;
+  font-size: 12px; color: var(--ink-2); line-height: 1.7;
+  background: rgba(56, 189, 248, .10); border: 1px solid rgba(56, 189, 248, .18);
   border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
 }
 
 .qc {
-  background: #fff; border-radius: 14px; padding: 13px 14px; margin-bottom: 10px;
-  box-shadow: var(--shadow); border-left: 3px solid var(--danger);
+  background: linear-gradient(158deg, rgba(22, 40, 70, .72), rgba(9, 18, 34, .84));
+  border: 1px solid rgba(96, 165, 250, .14);
+  border-radius: 14px; padding: 13px 14px; margin-bottom: 10px;
+  box-shadow: var(--shadow); border-left: 3px solid #f87171;
 }
-.qc.done { border-left-color: var(--ok); }
-.qc-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.qc.done { border-left-color: #34d399; }
+.qc-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .cat {
-  font-size: 11.5px; font-weight: 600; color: var(--brand-2);
-  background: #eff6ff; border-radius: 7px; padding: 2px 7px;
+  font-size: 11.5px; font-weight: 600; color: #7dd3fc;
+  background: rgba(56, 189, 248, .12); border: 1px solid rgba(56, 189, 248, .20);
+  border-radius: 7px; padding: 2px 7px;
 }
 .date { font-size: 11.5px; color: var(--ink-3); }
 .st { margin-left: auto; font-size: 11.5px; font-weight: 600; border-radius: 7px; padding: 2px 8px; }
-.st-wait { color: var(--danger); background: #fef2f2; }
-.st-ok { color: var(--ok); background: #f0fdf4; }
+.st-wait { color: #fca5a5; background: rgba(248, 113, 113, .14); border: 1px solid rgba(248, 113, 113, .28); }
+.st-ok { color: #6ee7b7; background: rgba(52, 211, 153, .14); border: 1px solid rgba(52, 211, 153, .26); }
 
-.qc-item { font-size: 15px; font-weight: 700; color: var(--danger); line-height: 1.45; }
+.qc-item { font-size: 15px; font-weight: 700; color: #fca5a5; line-height: 1.45; }
 .qc.done .qc-item { color: var(--ink); }
 .qc-no { font-size: 12px; color: var(--ink-3); margin-top: 3px; font-family: ui-monospace, Menlo, monospace; }
 .qc-detail {
   font-size: 12.5px; color: var(--ink-2); line-height: 1.65; margin-top: 6px;
-  background: #f8fafc; border-radius: 9px; padding: 8px 10px;
+  background: rgba(255, 255, 255, .03); border: 1px solid rgba(96, 165, 250, .10);
+  border-radius: 9px; padding: 8px 10px;
 }
 .qc-meta {
   display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px;
@@ -177,35 +185,37 @@ onMounted(load)
 }
 
 .btn-fix {
-  width: 100%; margin-top: 10px; height: 38px; border: none; border-radius: 11px;
-  background: #eff6ff; color: var(--brand-2); font-size: 14px; font-weight: 600;
+  width: 100%; margin-top: 10px; height: 38px; border: 1px solid rgba(56, 189, 248, .22); border-radius: 11px;
+  background: rgba(56, 189, 248, .12); color: #7dd3fc; font-size: 14px; font-weight: 600;
 }
-.btn-fix:active { background: #dbeafe; }
+.btn-fix:active { background: rgba(56, 189, 248, .24); }
 .fix-box { margin-top: 10px; }
 .fix-box textarea {
   width: 100%; border: 1px solid var(--line); border-radius: 11px; padding: 10px;
   font-size: 13.5px; line-height: 1.6; font-family: inherit; color: var(--ink);
-  resize: none; outline: none; background: #fcfdff;
+  resize: none; outline: none; background: rgba(6, 14, 28, .7);
 }
-.fix-box textarea:focus { border-color: #93c5fd; background: #fff; }
+.fix-box textarea::placeholder { color: var(--ink-3); }
+.fix-box textarea:focus { border-color: rgba(56, 189, 248, .7); background: rgba(7, 18, 36, .92); box-shadow: 0 0 0 3px rgba(56, 189, 248, .12); }
 .fix-btns { display: flex; gap: 8px; margin-top: 8px; }
 .btn-ghost {
-  flex: 0 0 84px; height: 40px; border: 1px solid var(--line); background: #fff;
+  flex: 0 0 84px; height: 40px; border: 1px solid var(--line); background: rgba(125, 211, 252, .05);
   border-radius: 11px; color: var(--ink-2); font-size: 14px;
 }
 .fix-btns .btn-primary { flex: 1; height: 40px; }
 
 .qc-done {
-  margin-top: 10px; font-size: 12px; color: var(--ok); line-height: 1.7;
-  background: #f0fdf4; border-radius: 9px; padding: 8px 10px;
+  margin-top: 10px; font-size: 12px; color: #6ee7b7; line-height: 1.7;
+  background: rgba(52, 211, 153, .10); border: 1px solid rgba(52, 211, 153, .22);
+  border-radius: 9px; padding: 8px 10px;
   display: flex; align-items: flex-start; gap: 6px;
 }
 /* Icon.vue 的 svg 不带宽高属性（尺寸历来由各页 CSS 给），
    这里不给就会撑满整块 —— 截图里那个巨大的绿勾就是这么来的 */
 .qc-done :deep(svg) { width: 14px; height: 14px; flex: 0 0 14px; margin-top: 3px; }
-.empty :deep(svg) { width: 40px; height: 40px; color: #cbd5e1; }
+.empty :deep(svg) { width: 40px; height: 40px; color: var(--ink-3); }
 
 .empty { text-align: center; padding: 60px 0; color: var(--ink-3); }
 .empty div { margin-top: 10px; font-size: 14px; }
-.empty .empty-sub { font-size: 12px; color: #cbd5e1; margin-top: 4px; }
+.empty .empty-sub { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
 </style>

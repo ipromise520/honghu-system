@@ -114,7 +114,7 @@
           </div>
 
           <template v-if="c.state === 'none'">
-            <div class="v" style="font-size:17px;color:#cbd5e1">待接入</div>
+            <div class="v" style="font-size:17px;color:var(--ink-3)">待接入</div>
           </template>
           <template v-else>
             <div class="card-v">
@@ -298,19 +298,19 @@ onMounted(load)
 <style scoped>
 /* v1.6.6：网格视图下「仅个人口径」的卡片 —— 显示 —，弱化且不可点 */
 .card.is-na { cursor: default; }
-.card.is-na .v { color: #cbd5e1; }
+.card.is-na .v { color: var(--ink-3); }
 
 /* ============ 四类提醒铃铛 ============ */
 .bell {
   position: relative; z-index: 3; flex: 0 0 auto;
   width: 36px; height: 36px; border-radius: 12px;
-  background: rgba(255, 255, 255, .16);
-  border: 1px solid rgba(255, 255, 255, .28);
-  color: #fff; display: flex; align-items: center; justify-content: center;
+  background: rgba(125, 211, 252, .12);
+  border: 1px solid rgba(125, 211, 252, .26);
+  color: #dceeff; display: flex; align-items: center; justify-content: center;
   transition: background .18s ease, transform .18s ease;
 }
 .bell:active { transform: scale(.94); }
-.bell.open { background: rgba(255, 255, 255, .3); }
+.bell.open { background: rgba(56, 189, 248, .26); }
 .bell.ringing { animation: bellRing 2.4s ease-in-out infinite; }
 @keyframes bellRing {
   0%, 62%, 100% { transform: rotate(0); }
@@ -323,9 +323,9 @@ onMounted(load)
 .bell-num {
   position: absolute; top: -5px; right: -6px;
   min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px;
-  background: #ef4444; color: #fff; font-size: 10px; font-weight: 800;
+  background: linear-gradient(135deg, #f87171, #dc2626); color: #fff; font-size: 10px; font-weight: 800;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1.5px solid #1e3a8a; line-height: 1;
+  border: 1.5px solid rgba(10, 26, 51, .9); line-height: 1;
   box-shadow: 0 0 0 0 rgba(239, 68, 68, .7);
   animation: pulse 2s infinite;
 }
@@ -336,16 +336,21 @@ onMounted(load)
 }
 
 /* 面板 */
-.ap-mask { position: fixed; inset: 0; z-index: 20; background: rgba(15, 23, 42, .22); }
+.ap-mask { position: fixed; inset: 0; z-index: 20; background: rgba(2, 6, 16, .58); }
 .alert-panel {
   position: fixed; z-index: 21; right: 14px; top: 58px; width: 268px;
-  background: #fff; border-radius: 16px; padding: 12px 10px 10px;
-  box-shadow: 0 18px 44px rgba(15, 23, 42, .3);
+  background: var(--glass-strong);
+  border: 1px solid rgba(96, 165, 250, .22);
+  border-radius: 16px; padding: 12px 10px 10px;
+  box-shadow: 0 26px 60px -18px rgba(0, 0, 0, .95), 0 1px 0 rgba(255, 255, 255, .06) inset;
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
 }
 .alert-panel::before {
   content: ""; position: absolute; top: -6px; right: 20px;
-  width: 12px; height: 12px; background: #fff; transform: rotate(45deg);
-  border-radius: 2px;
+  width: 12px; height: 12px; background: #0e1c33; transform: rotate(45deg);
+  border-radius: 2px; border-left: 1px solid rgba(96, 165, 250, .22);
+  border-top: 1px solid rgba(96, 165, 250, .22);
 }
 .ap-h {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -355,19 +360,19 @@ onMounted(load)
 .ap-list { display: flex; flex-direction: column; gap: 5px; }
 .ap-item {
   display: flex; align-items: center; gap: 9px; width: 100%;
-  padding: 9px 8px; border-radius: 11px; background: #f8fafc;
-  border: 1px solid transparent; text-align: left;
+  padding: 9px 8px; border-radius: 11px; background: rgba(125, 211, 252, .05);
+  border: 1px solid transparent; text-align: left; color: inherit;
   animation: apIn .28s ease both; animation-delay: calc(var(--i) * 45ms);
 }
-.ap-item:active { background: #eef2f7; }
-.ap-item.dim { opacity: .58; }
+.ap-item:active { background: rgba(56, 189, 248, .14); }
+.ap-item.dim { opacity: .55; }
 @keyframes apIn {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 .ap-ico {
   flex: 0 0 26px; width: 26px; height: 26px; border-radius: 8px;
-  background: color-mix(in srgb, var(--ac) 13%, #fff);
+  background: color-mix(in srgb, var(--ac) 20%, transparent);
   color: var(--ac); display: flex; align-items: center; justify-content: center;
 }
 .ap-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -378,10 +383,11 @@ onMounted(load)
   background: var(--ac); color: #fff; font-size: 11.5px; font-weight: 800;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.ap-cnt.zero { background: #e2e8f0; color: #94a3b8; }
+.ap-cnt.zero { background: rgba(148, 163, 184, .16); color: var(--ink-3); }
 .ap-top {
   margin-top: 9px; padding: 7px 9px; border-radius: 9px;
-  background: #fff7ed; color: #c2410c; font-size: 10.5px; font-weight: 600;
+  background: rgba(251, 146, 60, .12); border: 1px solid rgba(251, 146, 60, .24);
+  color: #fdba74; font-size: 10.5px; font-weight: 600;
   display: flex; align-items: center; gap: 5px; line-height: 1.4;
 }
 /* 图标必须锁死尺寸，否则 flex 内 SVG 会被撑满 */

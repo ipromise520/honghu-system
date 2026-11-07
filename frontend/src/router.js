@@ -17,6 +17,7 @@ const routes = [
       { path: 'metrics/shortcomings', component: () => import('./views/Shortcomings.vue'), meta: { title: '短板分析' } },
       { path: 'h5-monitor', component: () => import('./views/H5Monitor.vue'), meta: { title: 'H5短信盯控' } },
       { path: 'h5-rate', component: () => import('./views/H5Rate.vue'), meta: { title: 'H5参与率通报' } },
+      { path: 'broad-user-list', component: () => import('./views/BroadUserList.vue'), meta: { title: '广义用户清单' } },
       { path: 'alerts', component: () => import('./views/AlertCenter.vue'), meta: { title: '预警中心' } },
       { path: 'work-orders', component: () => import('./views/WorkOrders.vue'), meta: { title: '工单管理' } },
       { path: 'territory', component: () => import('./views/Territory.vue'), meta: { title: '责任田对应责任人' } },

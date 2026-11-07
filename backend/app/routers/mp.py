@@ -383,6 +383,7 @@ def _near_timeout(db, sub, name, district, gkey):
         q = q.filter(_h(AlertOrder.handler, name))
     now = _now()
     out = {"diamond": 0, "platinum": 0, "normal": 0, "rows": []}
+    picked = []
     for r in q.all():
         if (r.status or "").strip() in DONE_ST:
             continue
@@ -398,6 +399,15 @@ def _near_timeout(db, sub, name, district, gkey):
             lvl, lvl_name = "platinum", "白金"
         else:
             lvl, lvl_name = "normal", "普通"
+        picked.append((r, ts, left, lvl, lvl_name))
+    # 客户卡等级批量取：原先逐条查 complaint_orders（N+1），改为一次 IN 查询后查字典
+    nos = {r.order_no for r, *_ in picked if r.order_no}
+    levels: dict = {}
+    if nos:
+        for k, v in (db.query(ComplaintOrder.eoms_no, ComplaintOrder.global_pass)
+                     .filter(ComplaintOrder.eoms_no.in_(nos)).all()):
+            levels.setdefault(k, v or "")
+    for r, ts, left, lvl, lvl_name in picked:
         out[lvl] += 1
         out["rows"].append({
             "no": r.order_no or "",
@@ -411,7 +421,7 @@ def _near_timeout(db, sub, name, district, gkey):
             "community": r.community or "",
             "handler": _short_name(r.handler, r.district),
             "supervise": (r.supervise_person or "").strip(),
-            "customer": _customer_level(db, r.order_no),
+            "customer": levels.get(r.order_no, ""),
         })
     out["rows"].sort(key=lambda x: x["left_min"])
     return out

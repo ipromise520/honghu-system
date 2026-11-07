@@ -17,7 +17,10 @@ def role_list(user=Depends(get_current_user), db: Session = Depends(get_db)):
 
 @router.get("/users")
 def list_users(page: int = 1, page_size: int = 50, role: str = None, district_id: int = None,
-               keyword: str = None, user=Depends(get_current_user), db: Session = Depends(get_db)):
+               keyword: str = None, user=Depends(require_admin), db: Session = Depends(get_db)):
+    """用户列表（仅管理员）：含手机号、锁定状态等敏感字段，普通装维人员不可见。"""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
     q = db.query(User)
     my_role = get_role(user)
     if my_role == "district_admin" and user.district_id:
@@ -140,16 +143,27 @@ def sync_staff(body: dict = None, user=Depends(require_admin), db: Session = Dep
 
 @router.post("/users")
 def create_user(body: dict, user=Depends(require_admin), db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == body["username"]).first():
+    username = (body.get("username") or "").strip()
+    real_name = (body.get("real_name") or "").strip()
+    if not username or not real_name:
+        raise HTTPException(status_code=400, detail="用户名与姓名不能为空")
+    # 修复 P1-9：不再给默认弱口令 123456，创建时必须设置合规密码
+    from .auth import _validate_new_password
+    _validate_new_password(body.get("password") or "")
+    if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="用户名已存在")
     role = db.query(Role).filter(Role.code == body.get("role", "field_worker")).first()
     if not role:
         raise HTTPException(status_code=400, detail="角色无效")
-    if get_role(user) == "district_admin" and role.code != "field_worker":
-        raise HTTPException(status_code=403, detail="区县管理员只能创建装维人员")
-    u = User(username=body["username"], password_hash=hash_password(body.get("password", "123456")),
-             real_name=body["real_name"], phone=body.get("phone", ""), role_id=role.id,
-             district_id=body.get("district_id"), team=body.get("team", ""),
+    if get_role(user) == "district_admin":
+        if role.code != "field_worker":
+            raise HTTPException(status_code=403, detail="区县管理员只能创建装维人员")
+        if body.get("district_id") not in (None, "", user.district_id):
+            raise HTTPException(status_code=403, detail="只能在本区县创建用户")
+    u = User(username=username, password_hash=hash_password(body["password"]),
+             real_name=real_name, phone=body.get("phone", ""), role_id=role.id,
+             district_id=body.get("district_id") if get_role(user) == "super_admin" else user.district_id,
+             team=body.get("team", ""),
              grid=body.get("grid", ""), position=body.get("position", ""),
              staff_no=body.get("staff_no", ""))
     db.add(u)
@@ -163,20 +177,38 @@ def update_user(user_id: int, body: dict, user=Depends(require_admin), db: Sessi
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(status_code=404, detail="用户不存在")
-    if get_role(user) == "district_admin" and u.district_id != user.district_id:
-        raise HTTPException(status_code=403, detail="只能修改本区县用户")
+    actor_role = get_role(user)
+    target_role = get_role(u)
+    if actor_role == "district_admin":
+        # 修复 P1-2：区县管理员只能维护本区县装维人员，
+        # 禁止改角色（防自我提权为超管）、改区县（防跨区调人）、改密码。
+        if u.district_id != user.district_id:
+            raise HTTPException(status_code=403, detail="只能修改本区县用户")
+        if target_role != "field_worker":
+            raise HTTPException(status_code=403, detail="只能修改本区县装维人员")
+        if "role" in body and body["role"] != target_role:
+            raise HTTPException(status_code=403, detail="区县管理员不能修改用户角色")
+        if "district_id" in body and body["district_id"] != u.district_id:
+            raise HTTPException(status_code=403, detail="区县管理员不能调整用户区县")
+        if body.get("password"):
+            raise HTTPException(status_code=403, detail="区县管理员不能修改用户密码")
     for f in ["real_name", "phone", "team", "grid", "position", "staff_no"]:
         if f in body:
             setattr(u, f, body[f])
-    if "district_id" in body:
+    if "district_id" in body and actor_role == "super_admin":
         u.district_id = body["district_id"]
     if "is_active" in body:
         u.is_active = bool(body["is_active"])
-    if "role" in body:
+    if "role" in body and actor_role == "super_admin":
         role = db.query(Role).filter(Role.code == body["role"]).first()
-        if role:
-            u.role_id = role.id
+        if not role:
+            raise HTTPException(status_code=400, detail="角色无效")
+        u.role_id = role.id
     if body.get("password"):
+        if actor_role != "super_admin":
+            raise HTTPException(status_code=403, detail="需要市级管理员权限才能重置密码")
+        from .auth import _validate_new_password
+        _validate_new_password(body["password"])
         u.password_hash = hash_password(body["password"])
     db.commit()
     return {"msg": "更新成功"}

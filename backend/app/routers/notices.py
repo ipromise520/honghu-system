@@ -1,6 +1,7 @@
 """通知签收（手册 7.10）：创建/发布/撤回/签收/逾期统计"""
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -15,14 +16,23 @@ SIG_DEADLINE_DAYS = 3  # 签收期限：发布后 3 天
 @router.get("")
 def list_notices(user=Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.query(Notice).order_by(Notice.id.desc()).limit(100).all()
+    ids = [n.id for n in rows]
+    # 签收数与发布人批量取：原先每条通知查 1 次签名计数 + 1 次 User（N+1）
+    counts: dict = {}
+    if ids:
+        counts = dict(db.query(NoticeSignature.notice_id, func.count(NoticeSignature.id))
+                      .filter(NoticeSignature.notice_id.in_(ids))
+                      .group_by(NoticeSignature.notice_id).all())
+    pubs: dict = {}
+    pids = {n.publisher_id for n in rows if n.publisher_id}
+    if pids:
+        pubs = dict(db.query(User.id, User.real_name).filter(User.id.in_(pids)).all())
     out = []
     for n in rows:
-        total = db.query(NoticeSignature).filter(NoticeSignature.notice_id == n.id).count()
-        publisher = db.query(User).filter(User.id == n.publisher_id).first()
         out.append({"id": n.id, "title": n.title, "category": n.category, "status": n.status,
-                    "require_sign": n.require_sign, "publisher": publisher.real_name if publisher else "",
+                    "require_sign": n.require_sign, "publisher": pubs.get(n.publisher_id, ""),
                     "publish_time": n.publish_time.strftime("%Y-%m-%d %H:%M") if n.publish_time else "",
-                    "signed_count": total, "deadline": _deadline(n)})
+                    "signed_count": int(counts.get(n.id, 0)), "deadline": _deadline(n)})
     return out
 
 

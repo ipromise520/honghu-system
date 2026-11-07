@@ -34,7 +34,7 @@
                 title="三条铁律：① 先预览后入库（上传只解析不入库）② 时间一律从受理时间推导 ③ 确认入库后自动重算指标" />
 
       <el-tabs v-model="metric" @tab-change="loadHistory">
-        <el-tab-pane v-for="(m, k) in modules" :key="k" :label="m.name" :name="k">
+        <el-tab-pane v-for="([k, m]) in visibleModules" :key="k" :label="m.name" :name="k">
           <el-descriptions :column="2" size="small" border style="margin-bottom:14px">
             <el-descriptions-item label="入库目标">{{ m.target }}</el-descriptions-item>
             <el-descriptions-item label="模板列">{{ m.columns.join(' / ') }}</el-descriptions-item>
@@ -43,7 +43,8 @@
           <el-upload :show-file-list="false" accept=".xlsx,.xls,.csv" :auto-upload="false"
                      :on-change="f => upload(k, f)">
             <el-button type="primary" :loading="uploading">
-              <el-icon><Upload /></el-icon>&nbsp;选择 xlsx / csv 文件（解析预览）
+              <el-icon><Upload /></el-icon>&nbsp;{{ k === 'cid_data'
+                ? '选择 CID 智能网关 CSV（≤400MB，解析预览）' : '选择 xlsx / csv 文件（解析预览）' }}
             </el-button>
           </el-upload>
         </el-tab-pane>
@@ -66,7 +67,61 @@
       <!-- 重复工单号告警（投诉综合查询等）：同键重复时入库自动保留最新记录 -->
       <el-alert v-if="preview.dup_warning" :title="preview.dup_warning" type="warning" :closable="false"
                 show-icon style="margin-bottom:12px" />
-      <el-table :data="preview.preview" size="small" max-height="400">
+      <!-- 广义用户清单导入：新增/更新/失败统计与错误行 -->
+      <template v-if="preview.metric === 'broad_users'">
+        <el-descriptions :column="5" size="small" border style="margin-bottom:12px">
+          <el-descriptions-item label="新增">{{ preview.new ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="更新">{{ preview.update ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="失败行">{{ preview.invalid ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="文件内重复">{{ preview.dup_rows ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="月份">{{ preview.months || '无' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-alert v-if="preview.note" :title="preview.note" type="info" :closable="false" show-icon
+                  style="margin-bottom:12px" />
+        <el-table v-if="preview.errors && preview.errors.length" :data="preview.errors" size="small"
+                  max-height="220" style="margin-bottom:12px">
+          <el-table-column prop="row" label="Excel 行" width="90" />
+          <el-table-column prop="order_no" label="工单编号" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="error" label="失败原因" min-width="220" show-overflow-tooltip />
+        </el-table>
+      </template>
+      <!-- CID 数据（智能网关）：快照 + 广义用户回填预览 -->
+      <template v-if="preview.metric === 'cid_data'">
+        <el-descriptions :column="4" size="small" border style="margin-bottom:12px">
+          <el-descriptions-item label="CID 版本">{{ preview.version || '未标' }}</el-descriptions-item>
+          <el-descriptions-item label="数据行">{{ preview.total ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="唯一账号">{{ preview.unique ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="文件大小">{{ preview.size_mb ?? 0 }} MB</el-descriptions-item>
+          <el-descriptions-item label="解析+预览耗时">{{ preview.elapsed ?? 0 }} s</el-descriptions-item>
+          <el-descriptions-item label="空账号跳过">{{ preview.skipped ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="空 SN">{{ preview.no_sn ?? 0 }}</el-descriptions-item>
+          <el-descriptions-item label="空小区">{{ preview.no_comm ?? 0 }}</el-descriptions-item>
+        </el-descriptions>
+        <el-descriptions v-if="preview.impact" :column="3" size="small" border style="margin-bottom:12px">
+          <el-descriptions-item label="CID 命中">
+            {{ preview.impact.hit }} 行（账号 {{ preview.impact.hit_account }} / 电话兜底 {{ preview.impact.hit_phone }}）
+          </el-descriptions-item>
+          <el-descriptions-item label="可填 CID上报SN">
+            {{ preview.impact.cid_sn_filled }} 行（旧 CID 刷新 {{ preview.impact.cid_sn_refreshed }}）
+          </el-descriptions-item>
+          <el-descriptions-item label="可填归属小区">{{ preview.impact.community_filled }} 行</el-descriptions-item>
+          <el-descriptions-item label="可填联系电话">{{ preview.impact.phone_filled }} 行</el-descriptions-item>
+          <el-descriptions-item label="可填责任人">
+            {{ preview.impact.owner_filled }} 行（责任田刷新 {{ preview.impact.owner_refreshed }}）
+          </el-descriptions-item>
+          <el-descriptions-item label="可填网格">{{ preview.impact.grid_filled }} 行</el-descriptions-item>
+          <el-descriptions-item label="冲突未覆盖">
+            SN {{ preview.impact.conflict_sn }} / 小区 {{ preview.impact.conflict_community }} 行
+          </el-descriptions-item>
+          <el-descriptions-item label="匹配状态">
+            已匹配 {{ preview.impact.status_matched }} / 部分 {{ preview.impact.status_partial }} / 待 {{ preview.impact.status_pending }}
+          </el-descriptions-item>
+          <el-descriptions-item label="上传前备份">{{ preview.backup || '未生成' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-alert v-if="preview.note" :title="preview.note" type="info" :closable="false" show-icon
+                  style="margin-bottom:12px" />
+      </template>
+      <el-table v-if="preview.preview && preview.preview.length" :data="preview.preview" size="small" max-height="400">
         <el-table-column v-for="c in preview.columns" :key="c" :prop="c" :label="c" min-width="120" show-overflow-tooltip />
       </el-table>
     </el-card>
@@ -88,7 +143,7 @@
             <span class="batch-warn">⚠ {{ r.error }}</span>
             <el-select v-if="r.metric == null" size="small" placeholder="手动指定指标" style="width:180px"
                        @change="m => onManual(r, m)">
-              <el-option v-for="(m, k) in modules" :key="k" :label="m.name" :value="k" />
+              <el-option v-for="([k, m]) in manualModules" :key="k" :label="m.name" :value="k" />
             </el-select>
           </template>
           <el-button v-else type="success" size="small" :loading="confirmingBatch"
@@ -99,6 +154,10 @@
         <el-alert v-if="r.warn" :title="r.warn" type="warning" :closable="false" show-icon style="margin:8px 0" />
         <el-alert v-if="r.dup_warning" :title="r.dup_warning" type="warning" :closable="false"
                   show-icon style="margin:8px 0" />
+        <div v-if="r.metric === 'broad_users'" style="color:#606266;font-size:13px;margin:6px 0">
+          新增 {{ r.new ?? 0 }} / 更新 {{ r.update ?? 0 }} / 失败 {{ r.invalid ?? 0 }}
+          / 文件内重复 {{ r.dup_rows ?? 0 }} / 月份 {{ r.months || '无' }}
+        </div>
         <el-table v-if="r.preview && r.preview.length" :data="r.preview" size="small" max-height="320"
                   style="margin-top:6px">
           <el-table-column v-for="c in r.columns" :key="c" :prop="c" :label="c" min-width="120" show-overflow-tooltip />
@@ -132,6 +191,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, UploadFilled, MagicStick } from '@element-plus/icons-vue'
 import api from '../api'
+import { useUserStore } from '../store'
+
+const store = useUserStore()
+const isSuper = computed(() => store.role === 'super_admin')
 
 const modules = {
   completion_rate: {
@@ -190,9 +253,30 @@ const modules = {
     note: '解析「当月装机即访清单」「当月投诉即访清单」两个 sheet；只取「外呼成功」且勾选项答案为「不是」的记录，' +
           '按 工单×不规范项 于每月替换；展示在首页「AI装维即访-不规范」通报卡片',
   },
+  broad_users: {
+    name: '广义用户清单', target: 'broad_user_list（广义用户明细，按工单编号增量更新）',
+    columns: ['广义重复清单：工单上报时间/工单编号/工单建立日期/宽带账号/归属区县/是否重复投诉/重复投诉次数/广义投诉原因明细/广义投诉七级分类'],
+    note: '仅市级管理员可用。工单编号为唯一键：已存在只更新文件派生列（保留电话/CID/小区/责任人/匹配状态），' +
+          '新增行补齐默认值；监利县→监利市；不删除文件外旧行；入库后「广义用户清单」列表与 6 张统计卡实时生效',
+  },
+  cid_data: {
+    name: 'CID数据（智能网关）', target: 'cid_records（CID 快照，整表替换）+ 广义用户清单关联补齐',
+    columns: ['CID智能网关 CSV（GB18030）：用户上网账号 / CID上报SN / 归属小区 / 归属区县'],
+    note: '仅市级管理员可用。CID 版本周期更新（如 CID智能网关20260801.csv）；上传先写暂存并预览，' +
+          '确认后在事务内整表替换 CID 快照，并按「账号优先、电话兜底」重匹配广义用户清单：' +
+          '只填空值（旧 CID 来源的 SN 可刷新、小区只填空），源表电话与当前处理人永不覆盖；' +
+          '再用归属小区匹配责任田回填责任人与网格。单文件 ≤400MB，流式落盘解析，上传前自动备份数据库',
+  },
 }
 
 const metric = ref('completion_rate')
+// 广义用户清单 / CID 数据仅市级管理员可见（后端同样 403 兜底）
+const SUPER_ONLY = ['broad_users', 'cid_data']
+const visibleModules = computed(() =>
+  Object.entries(modules).filter(([k]) => !SUPER_ONLY.includes(k) || isSuper.value))
+// 批量上传的「手动指定指标」不含 CID（体积大，仅支持单文件页签上传）
+const manualModules = computed(() =>
+  Object.entries(modules).filter(([k]) => k !== 'cid_data'))
 const preview = ref(null)
 const history = ref([])
 const uploading = ref(false)
@@ -220,7 +304,8 @@ async function upload(k, file) {
   try {
     const fd = new FormData()
     fd.append('file', file.raw)
-    preview.value = await api.post(`/sync/upload/${k}`, fd, { timeout: 180000 })
+    preview.value = await api.post(`/sync/upload/${k}`, fd,
+      { timeout: k === 'cid_data' ? 900000 : 180000 })
     ElMessage.success(`解析成功 ${preview.value.total_rows} 行，请核对后确认入库`)
   } catch (e) { /* 拦截器已提示 */ }
   finally { uploading.value = false }
@@ -263,7 +348,9 @@ async function confirm() {
   await ElMessageBox.confirm('确认将预览数据入库？入库后指标将自动重算。', '确认入库', { type: 'warning' })
   confirming.value = true
   try {
-    const r = await api.post(`/sync/confirm/${preview.value.batch_id}`, null, { timeout: 180000 })
+    const isCid = preview.value.metric === 'cid_data'
+    const r = await api.post(`/sync/confirm/${preview.value.batch_id}`, null,
+      { timeout: isCid ? 600000 : 180000 })
     ElMessage.success(r.msg)
     preview.value = null
     loadHistory()
